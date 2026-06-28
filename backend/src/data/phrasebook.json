@@ -1,0 +1,90 @@
+{
+  "quotes": [
+    {
+      "id": "qvac-api-key",
+      "text": "If you need an API key to use your AI, it doesn't really belong to you",
+      "attribution": "Paolo Ardoino",
+      "speaker": "Paolo Ardoino",
+      "track": "QVAC",
+      "pillar": "qvac",
+      "mapsTo": "QVAC on-device Bergamot translation"
+    },
+    {
+      "id": "wdk-qvac-agents-wallet",
+      "text": "Every single AI agent will have a wallet within 15 years",
+      "attribution": "Paolo Ardoino",
+      "speaker": "Paolo Ardoino",
+      "track": "WDK + QVAC",
+      "pillar": "all",
+      "mapsTo": "MCP server + WDK EIP-3009 tipping"
+    },
+    {
+      "id": "wdk-trillion-agents",
+      "text": "We are going to have one trillion agents transacting in bitcoin and stablecoins",
+      "attribution": "Paolo Ardoino",
+      "speaker": "Paolo Ardoino",
+      "track": "WDK",
+      "pillar": "wdk",
+      "mapsTo": "WDK gasless USDT facilitator"
+    },
+    {
+      "id": "qvac-not-corporations",
+      "text": "AI should empower the next wave of growth for society and humanity, not delegate even more control to corporations",
+      "attribution": "Paolo Ardoino",
+      "speaker": "Paolo Ardoino",
+      "track": "QVAC",
+      "pillar": "qvac",
+      "mapsTo": "QVAC local model registry, no API key required"
+    },
+    {
+      "id": "pears-qvac-offline",
+      "text": "Works offline",
+      "attribution": "Paolo Ardoino",
+      "speaker": "Paolo Ardoino",
+      "track": "Pears + QVAC",
+      "pillar": "all",
+      "mapsTo": "Pear app P2P playback + on-device translation"
+    },
+    {
+      "id": "all-three-no-string-attached",
+      "text": "No string attached, pure freedom",
+      "attribution": "Paolo Ardoino",
+      "speaker": "Paolo Ardoino",
+      "track": "All three",
+      "pillar": "all",
+      "mapsTo": "Full stack: Pears rooms + WDK tips + QVAC translation"
+    },
+    {
+      "id": "wdk-trillions-self-custodial",
+      "text": "Trillions of self-custodial wallets. No string attached. Pure freedom.",
+      "attribution": "Paolo Ardoino, X post, 2025-10-04",
+      "speaker": "Paolo Ardoino",
+      "track": "WDK",
+      "pillar": "wdk",
+      "mapsTo": "WDK gasless USDT tipping via EIP-3009 facilitator",
+      "source_url": "https://x.com/paoloardoino/status/1974361565978915242"
+    },
+    {
+      "id": "qvac-unstoppable-p2p-agents",
+      "text": "Unstoppable peer-to-peer network of billions of AI agents",
+      "attribution": "Paolo Ardoino, X post announcing Tether AI, 2025-05-05",
+      "speaker": "Paolo Ardoino",
+      "track": "QVAC + Pears",
+      "pillar": "all",
+      "mapsTo": "MCP agent-tip demo + Pears P2P transport",
+      "source_url": "https://en.cryptonomist.ch/2025/05/05/tether-ai-paolo-ardoino-presents-the-new-product-that-will-host-billions-of-ai-agents/"
+    }
+  ],
+  "italian_phrases": [
+    {
+      "id": "demo-close",
+      "text": "Cosi il calcio doveva essere.",
+      "translation": "This is how football was always supposed to be."
+    },
+    {
+      "id": "tweet-quote",
+      "text": "La curva dove gli ultras stanno insieme e' ora la curva dove i tifosi di tutto il mondo stanno insieme.",
+      "translation": "The curve where ultras stand together is now the curve where fans worldwide stand together."
+    }
+  ]
+}
