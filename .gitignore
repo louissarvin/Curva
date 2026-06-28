@@ -1,0 +1,161 @@
+# Curva root .gitignore
+# Sub-repos (backend/, pear-app/, web/) have their own .gitignore for their
+# specific patterns. This root file catches everything that lives at the
+# repo root or spans multiple sub-repos.
+
+# =============================================================================
+# SECRETS - anything with a private key must NEVER be committed
+# =============================================================================
+.env
+.env.local
+.env.*.local
+.env.production
+.env.staging
+.env.development
+*.pem
+*.key
+*.mnemonic
+*.seed
+secrets/
+
+# =============================================================================
+# AGENT SCRATCHPAD
+# =============================================================================
+# Research notes, memory files, drafted-not-shipped content
+memory/
+
+# =============================================================================
+# RESEARCH ARTIFACTS
+# =============================================================================
+# 21 MB of Playwright screenshots + design research
+web/research/
+research/
+**/research/screenshots/
+**/research/current-state/
+**/research/after/
+
+# =============================================================================
+# BUILD OUTPUTS
+# =============================================================================
+node_modules/
+dist/
+build/
+.output/
+out/
+.next/
+.nitro/
+.tanstack/
+.wrangler/
+.vinxi/
+.webpack/
+.vercel/
+
+# =============================================================================
+# PACKAGE MANAGERS
+# =============================================================================
+# lock files are kept for reproducibility (do not ignore package-lock.json,
+# bun.lockb, bun.lock, yarn.lock)
+.npm/
+.yarn/
+.pnp.*
+
+# =============================================================================
+# RUNTIME STATE
+# =============================================================================
+# Pear/Corestore per-peer stores (created by npm run seed:peer-*)
+.store-peer-*/
+.demo-store/
+.pear/
+pear-store/
+.corestore/
+# QVAC model mirror + backend tmp
+tmp/
+.tmp/
+.cache/
+**/tmp/qvac-models/
+
+# =============================================================================
+# LOGS
+# =============================================================================
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+pnpm-debug.log*
+
+# =============================================================================
+# OS + EDITOR
+# =============================================================================
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.cursorignore
+
+# =============================================================================
+# CLAUDE / ASSISTANT ARTIFACTS
+# =============================================================================
+.claude/
+CLAUDE.md
+**/CLAUDE.md
+# NOTE: CLAUDE.md files contain project-specific coaching for AI agents.
+# They are not user-facing docs; keep them local so the public repo stays clean.
+
+# =============================================================================
+# TEMP AND SCRATCH
+# =============================================================================
+count.txt
+todos.json
+temp/
+scratch/
+*.bak
+
+# =============================================================================
+# BUNDLED BARE ARTIFACTS
+# =============================================================================
+*.bundle
+*.bundle.map
+
+# =============================================================================
+# PLAYWRIGHT MCP CACHE (design research screenshots)
+# =============================================================================
+.playwright-mcp/
+
+# =============================================================================
+# CODE REVIEW + SECURITY AUDIT LOCAL ARTEFACTS
+# =============================================================================
+# These files were generated locally during development. Keep private
+# so we can be honest in them without wasteful public speculation.
+backend/CODE_REVIEW.md
+backend/SECURITY_AUDIT.md
+
+# =============================================================================
+# OLD SPEC BACKUPS
+# =============================================================================
+CURVA_TECHNICAL_SPEC_*.md
+
+# =============================================================================
+# INTERNAL PLANNING + PITCH DOCS (do not publish)
+# =============================================================================
+# These live locally so the team can iterate. The public repo only ships
+# README.md and SKILL.md.
+00_OVERVIEW.md
+10_WDK_IDEAS.md
+11_QVAC_IDEAS.md
+12_PEARS_IDEAS.md
+99_WINNING_PICK.md
+CLAWHUB_SUBMISSION.md
+CURVA_TECHNICAL_SPEC.md
+DEMO_SCRIPT.md
+PITCHDECK.md
+SUBMISSION.md
+backend/ARCHITECTURE.md
+pear-app/ARCHITECTURE.md
+tech/
+web/DESIGN_RESEARCH.md
+web/FRONTEND_STRUCTURE_GUIDE.md
+web/curvaWebTask.md
