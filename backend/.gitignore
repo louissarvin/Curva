@@ -1,0 +1,19 @@
+node_modules
+# Keep environment variables out of version control
+.env
+.env.local
+.env.production
+.env.*.local
+
+# Prisma generated client
+prisma/generated
+
+# Build artifacts
+dist/
+*.log
+
+# Memory notes (agent scratchpad)
+memory/
+
+# Seeder runtime temp dirs (created by bareSeeder subprocesses)
+/tmp/curva-seeder-*
