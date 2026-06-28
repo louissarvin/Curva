@@ -1,0 +1,169 @@
+{
+  "common": {
+    "ok": "ok",
+    "degraded": "degradato",
+    "down": "fuori uso",
+    "enabled": "attivo",
+    "disabled": "disattivato",
+    "loading": "Caricamento",
+    "yes": "si",
+    "no": "no"
+  },
+  "errors": {
+    "NOT_FOUND": "Non trovato",
+    "VALIDATION_ERROR": "Richiesta non valida",
+    "MISSING_FIELDS": "Campo obbligatorio mancante: {field}",
+    "UNAUTHORIZED": "Non autorizzato",
+    "FORBIDDEN": "Vietato",
+    "RATE_LIMIT_EXCEEDED": "Troppe richieste, rallenta",
+    "INTERNAL_ERROR": "Qualcosa e' andato storto",
+    "SERVICE_UNAVAILABLE": "Servizio non disponibile",
+    "SLUG_TAKEN": "Quello slug della stanza e' gia' in uso",
+    "MATCH_NOT_FOUND": "Partita non trovata",
+    "ROOM_NOT_FOUND": "Stanza non trovata",
+    "SEEDER_FULL": "Seeder pieno, riprova piu' tardi",
+    "AUTO_WARMED_PROTECTED": "Le stanze pre-attivate non possono essere eliminate",
+    "RESERVED_SLUG_PREFIX": "Quel prefisso di slug e' riservato",
+    "CHAIN_UNSUPPORTED": "Catena non supportata",
+    "CHAIN_DISABLED": "Catena attualmente disattivata",
+    "LIVE_DATA_UNAVAILABLE": "I dati live delle partite non sono configurati su questa istanza",
+    "INVALID_SIGNATURE": "La firma non corrisponde al firmatario atteso",
+    "NONCE_ALREADY_USED": "Quel nonce dell'autorizzazione e' gia' stato usato",
+    "AMOUNT_EXCEEDS_CAP": "L'importo supera il limite del facilitatore",
+    "TOKEN_NOT_ALLOWED": "Il contratto del token non e' consentito dal facilitatore",
+    "HOST_NOT_REGISTERED": "Il destinatario non e' un ospite Curva registrato",
+    "FACILITATOR_DISABLED": "Il facilitatore di relay non e' attivo su questa istanza",
+    "SPONSOR_INSUFFICIENT_FUNDS": "Lo sponsor del relay e' senza gas; riprova piu' tardi",
+    "RPC_SUBMIT_FAILED": "Invio della transazione alla rete fallito",
+    "TOKEN_METADATA_UNAVAILABLE": "Impossibile leggere i metadati EIP-712 del token",
+    "TX_NOT_FOUND": "Transazione non trovata",
+    "FACILITATOR_PERSIST_FAILED": "Inviata on-chain ma salvataggio del record fallito",
+    "MODEL_NOT_FOUND": "Modello non trovato",
+    "MODEL_NOT_YET_PUBLISHED": "Modello non ancora pubblicato dalla sorgente",
+    "MODEL_MIRROR_UNAVAILABLE": "Mirror non disponibile, reindirizzato alla sorgente",
+    "MODEL_INTEGRITY_UNVERIFIED": "Integrità del modello non verificabile; rifiuto di servire",
+    "INVALID_RANGE": "Richiesta di intervallo non valida"
+  },
+  "matches": {
+    "status": {
+      "scheduled": "In programma",
+      "in_progress": "Dal vivo",
+      "live": "Dal vivo",
+      "halftime": "Intervallo",
+      "finished": "Terminata",
+      "postponed": "Rinviata",
+      "cancelled": "Annullata"
+    },
+    "stage": {
+      "group": "Fase a gironi",
+      "r16": "Ottavi di finale",
+      "qf": "Quarti di finale",
+      "sf": "Semifinale",
+      "third_place": "Finale per il terzo posto",
+      "final": "Finale"
+    },
+    "label": {
+      "kickoff_in": "Inizio fra {minutes} min",
+      "minute": "{minute}'",
+      "ft": "FT",
+      "ht": "Intervallo"
+    }
+  },
+  "rooms": {
+    "handle": {
+      "default": "ospite-curva"
+    },
+    "auto_warmed_note": "Pre-attivata da Curva Companion",
+    "expires_in": "Scade fra {hours}h"
+  },
+  "tips": {
+    "received": "Ricevute",
+    "sent": "Inviate",
+    "lifetime_total": "Totale storico",
+    "today": "Oggi"
+  },
+  "status": {
+    "title": "Stato Curva Companion",
+    "last_updated": "Ultimo aggiornamento",
+    "service_health": "Stato dei servizi",
+    "live_metrics": "Metriche dal vivo",
+    "recent_activity": "Attivita recente",
+    "third_party": "Servizi di terze parti",
+    "versions": "Versioni",
+    "forza_curva": "Forza Curva",
+    "built_for": "Realizzato per la Tether Developers Cup 2026",
+    "ok": "ok",
+    "degraded": "degradato",
+    "down": "fuori uso",
+    "active_rooms": "Stanze attive",
+    "total_rooms": "Stanze totali",
+    "total_tips_lifetime": "Mance totali",
+    "total_tips_today": "Mance oggi",
+    "active_peers": "Peer attivi",
+    "api": "API",
+    "db": "Database",
+    "seeder": "Seeder",
+    "indexer": "Indicizzatore mance",
+    "catalog": "Sincronizzazione catalogo",
+    "no_recent_events": "Nessun evento recente",
+    "chains": "Catene"
+  },
+  "chains": {
+    "CHAIN_NOT_SUPPORTED": "Catena {chainId} non supportata",
+    "CHAIN_DISABLED": "Catena {chainId} attualmente disabilitata",
+    "health": {
+      "healthy": "Operativa",
+      "unhealthy": "Inattiva",
+      "unknown": "Sconosciuta"
+    }
+  },
+  "phrases": {
+    "demo_close": "Cosi il calcio doveva essere.",
+    "tweet_quote": "La curva dove gli ultras stanno insieme e' ora la curva dove i tifosi di tutto il mondo stanno insieme.",
+    "ardoino_pure_freedom": "Nessun vincolo, pura liberta'"
+  },
+  "live": {
+    "no_data": "Nessun dato live disponibile",
+    "goal": "GOL",
+    "kickoff": "Calcio d'inizio",
+    "halftime": "Intervallo",
+    "fulltime": "Tempo pieno"
+  },
+  "distribution": {
+    "title": "Distribuzione App Curva",
+    "description": "Curva - watch-party P2P per il Mondiale, per la Tether Developers Cup",
+    "status": {
+      "enabled": "App disponibile",
+      "disabled": "In arrivo",
+      "seeder_running": "Seeder attivo",
+      "seeder_stopped": "Seeder inattivo"
+    },
+    "install": {
+      "pear": "npm i -g pear && pear run pear://{appKey}"
+    }
+  },
+  "dashboard": {
+    "title": "Pannello Curva Companion",
+    "live_matches": "Partite in corso",
+    "activity_feed": "Flusso attivita",
+    "active_rooms": "Stanze attive",
+    "active_peers": "Peer attivi",
+    "lifetime_tips": "Mance totali",
+    "tips_count": "Numero mance",
+    "live_now": "In diretta",
+    "disconnected": "Disconnesso, riconnessione...",
+    "enable_sound": "Attiva audio",
+    "chains": "Catene",
+    "forza_curva": "Forza Curva",
+    "no_events": "In attesa di attivita...",
+    "no_matches": "Nessuna partita in corso"
+  },
+  "mcp": {
+    "unauthorized": "Token di accesso MCP mancante o non valido",
+    "disabled": "Server MCP disabilitato",
+    "tool_not_found": "Strumento non trovato: {name}",
+    "resource_not_found": "Risorsa non trovata: {uri}",
+    "invalid_arguments": "Argomenti dello strumento non validi",
+    "prepare_tip_unavailable": "Facilitator disabilitato - impossibile preparare la mancia"
+  }
+}
