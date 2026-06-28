@@ -1,0 +1,42 @@
+{
+  "$comment": "Static chain manifest for the multi-chain USDT tip indexer (F10, ADR-009). Each entry is overridable via env: CHAIN_<chainId>_RPC_URLS (comma-separated), CHAIN_<chainId>_ENABLED (true|false), CHAIN_<chainId>_USDT (0x...). At least one chain must be enabled at boot; Sepolia is the demo default per spec.",
+  "chains": [
+    {
+      "chainId": 11155111,
+      "name": "Sepolia",
+      "shortName": "sepolia",
+      "isTestnet": true,
+      "isDefault": true,
+      "enabled": true,
+      "rpcUrls": [
+        "https://ethereum-sepolia-rpc.publicnode.com",
+        "https://rpc.sepolia.org"
+      ],
+      "usdtAddress": "0xd077a400968890eacc75cdc901f0356c943e4fdb",
+      "tokenDecimals": 6,
+      "blockConfirmations": 5,
+      "bootstrapBackfillBlocks": 1000,
+      "maxBlockSpan": 2000,
+      "explorerBase": "https://sepolia.etherscan.io",
+      "notes": "Hackathon demo chain. WDK + Candide ERC-4337 are documented and stable on Sepolia."
+    },
+    {
+      "chainId": 9746,
+      "name": "Plasma Testnet",
+      "shortName": "plasma-testnet",
+      "isTestnet": true,
+      "isDefault": false,
+      "enabled": false,
+      "rpcUrls": [
+        "https://testnet-rpc.plasma.to"
+      ],
+      "usdtAddress": "",
+      "tokenDecimals": 6,
+      "blockConfirmations": 5,
+      "bootstrapBackfillBlocks": 1000,
+      "maxBlockSpan": 2000,
+      "explorerBase": "https://testnet.plasmascan.to",
+      "notes": "Plasma testnet chainId verified at docs.plasma.org/docs/guides/network-configuration/testnet-details.md (9746, NOT 9745). USDT0 testnet contract is in development as of June 2026; set usdtAddress + flip enabled=true via CHAIN_9746_USDT and CHAIN_9746_ENABLED when published. ERC-4337 on Plasma is provided by Gelato / Thirdweb / ZeroDev (NOT Candide); tipping flow defaults to Sepolia."
+    }
+  ]
+}
