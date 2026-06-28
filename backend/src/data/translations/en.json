@@ -1,0 +1,167 @@
+{
+  "common": {
+    "ok": "ok",
+    "degraded": "degraded",
+    "down": "down",
+    "enabled": "enabled",
+    "disabled": "disabled",
+    "loading": "Loading",
+    "yes": "yes",
+    "no": "no"
+  },
+  "errors": {
+    "NOT_FOUND": "Not found",
+    "VALIDATION_ERROR": "Invalid request",
+    "MISSING_FIELDS": "Missing required field: {field}",
+    "UNAUTHORIZED": "Not authorised",
+    "FORBIDDEN": "Forbidden",
+    "RATE_LIMIT_EXCEEDED": "Too many requests, slow down",
+    "INTERNAL_ERROR": "Something went wrong",
+    "SERVICE_UNAVAILABLE": "Service unavailable",
+    "SLUG_TAKEN": "That room slug is already in use",
+    "MATCH_NOT_FOUND": "Match not found",
+    "ROOM_NOT_FOUND": "Room not found",
+    "SEEDER_FULL": "Seeder is full, try again later",
+    "AUTO_WARMED_PROTECTED": "Auto-warmed rooms cannot be deleted",
+    "RESERVED_SLUG_PREFIX": "That slug prefix is reserved",
+    "CHAIN_UNSUPPORTED": "Chain not supported",
+    "CHAIN_DISABLED": "Chain currently disabled",
+    "LIVE_DATA_UNAVAILABLE": "Live match data is not configured on this instance",
+    "INVALID_SIGNATURE": "Signature does not match the expected signer",
+    "NONCE_ALREADY_USED": "That authorisation nonce has already been used",
+    "AMOUNT_EXCEEDS_CAP": "Amount exceeds the facilitator cap",
+    "TOKEN_NOT_ALLOWED": "Token contract is not permitted by the facilitator",
+    "HOST_NOT_REGISTERED": "Recipient is not a registered Curva host",
+    "FACILITATOR_DISABLED": "The relay facilitator is not enabled on this instance",
+    "SPONSOR_INSUFFICIENT_FUNDS": "The relay sponsor is out of gas; please retry later",
+    "RPC_SUBMIT_FAILED": "Failed to submit the transaction to the network",
+    "TOKEN_METADATA_UNAVAILABLE": "Could not read the token's EIP-712 metadata",
+    "TX_NOT_FOUND": "Transaction not found",
+    "FACILITATOR_PERSIST_FAILED": "Submitted on-chain but failed to persist the record",
+    "MODEL_NOT_FOUND": "Model not found",
+    "MODEL_NOT_YET_PUBLISHED": "Model is not yet published upstream",
+    "MODEL_MIRROR_UNAVAILABLE": "Mirror unavailable, redirected to upstream",
+    "MODEL_INTEGRITY_UNVERIFIED": "Model integrity cannot be verified; refusing to serve",
+    "INVALID_RANGE": "Invalid range request"
+  },
+  "matches": {
+    "status": {
+      "scheduled": "Scheduled",
+      "in_progress": "Live",
+      "live": "Live",
+      "halftime": "Half-time",
+      "finished": "Finished",
+      "postponed": "Postponed",
+      "cancelled": "Cancelled"
+    },
+    "stage": {
+      "group": "Group stage",
+      "r16": "Round of 16",
+      "qf": "Quarter-final",
+      "sf": "Semi-final",
+      "third_place": "Third-place play-off",
+      "final": "Final"
+    },
+    "label": {
+      "kickoff_in": "Kicks off in {minutes} min",
+      "minute": "{minute}'",
+      "ft": "FT",
+      "ht": "HT"
+    }
+  },
+  "rooms": {
+    "handle": {
+      "default": "curva-host"
+    },
+    "auto_warmed_note": "Pre-warmed by Curva Companion",
+    "expires_in": "Expires in {hours}h"
+  },
+  "tips": {
+    "received": "Received",
+    "sent": "Sent",
+    "lifetime_total": "Lifetime total",
+    "today": "Today"
+  },
+  "status": {
+    "title": "Curva Companion · Status",
+    "last_updated": "Last updated",
+    "service_health": "Service health",
+    "live_metrics": "Live metrics",
+    "recent_activity": "Recent activity",
+    "third_party": "Third-party services",
+    "versions": "Versions",
+    "forza_curva": "Forza Curva",
+    "built_for": "Built for Tether Developers Cup 2026",
+    "ok": "ok",
+    "degraded": "degraded",
+    "down": "down",
+    "active_rooms": "Active rooms",
+    "total_rooms": "Total rooms",
+    "total_tips_lifetime": "Tips lifetime",
+    "total_tips_today": "Tips today",
+    "active_peers": "Active peers",
+    "api": "API",
+    "db": "Database",
+    "seeder": "Seeder",
+    "indexer": "Tip indexer",
+    "catalog": "Catalog sync",
+    "no_recent_events": "No recent events",
+    "chains": "Chains"
+  },
+  "chains": {
+    "CHAIN_NOT_SUPPORTED": "Chain {chainId} is not supported",
+    "CHAIN_DISABLED": "Chain {chainId} is currently disabled",
+    "health": {
+      "healthy": "Healthy",
+      "unhealthy": "Unhealthy",
+      "unknown": "Unknown"
+    }
+  },
+  "phrases": {
+    "ardoino_pure_freedom": "No string attached, pure freedom"
+  },
+  "live": {
+    "no_data": "No live data available",
+    "goal": "GOAL",
+    "kickoff": "Kick-off",
+    "halftime": "Half-time",
+    "fulltime": "Full-time"
+  },
+  "distribution": {
+    "title": "Curva App Distribution",
+    "description": "Curva P2P World Cup watch-party for the Tether Developers Cup",
+    "status": {
+      "enabled": "App available",
+      "disabled": "Coming soon",
+      "seeder_running": "Seeder online",
+      "seeder_stopped": "Seeder offline"
+    },
+    "install": {
+      "pear": "npm i -g pear && pear run pear://{appKey}"
+    }
+  },
+  "dashboard": {
+    "title": "Curva Companion Dashboard",
+    "live_matches": "Live matches",
+    "activity_feed": "Activity feed",
+    "active_rooms": "Active rooms",
+    "active_peers": "Active peers",
+    "lifetime_tips": "Lifetime tips",
+    "tips_count": "Tips count",
+    "live_now": "Live now",
+    "disconnected": "Disconnected, reconnecting...",
+    "enable_sound": "Enable sound",
+    "chains": "Chains",
+    "forza_curva": "Forza Curva",
+    "no_events": "Waiting for activity...",
+    "no_matches": "No live matches right now"
+  },
+  "mcp": {
+    "unauthorized": "Missing or invalid MCP access token",
+    "disabled": "MCP server is disabled",
+    "tool_not_found": "Tool not found: {name}",
+    "resource_not_found": "Resource not found: {uri}",
+    "invalid_arguments": "Invalid tool arguments",
+    "prepare_tip_unavailable": "Facilitator disabled - cannot prepare tip"
+  }
+}

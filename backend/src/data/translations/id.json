@@ -1,0 +1,170 @@
+{
+  "_meta": {
+    "reviewed": false
+  },
+  "common": {
+    "ok": "ok",
+    "degraded": "menurun",
+    "down": "mati",
+    "enabled": "aktif",
+    "disabled": "nonaktif",
+    "loading": "Memuat",
+    "yes": "ya",
+    "no": "tidak"
+  },
+  "errors": {
+    "NOT_FOUND": "Tidak ditemukan",
+    "VALIDATION_ERROR": "Permintaan tidak valid",
+    "MISSING_FIELDS": "Field wajib hilang: {field}",
+    "UNAUTHORIZED": "Tidak diizinkan",
+    "FORBIDDEN": "Dilarang",
+    "RATE_LIMIT_EXCEEDED": "Terlalu banyak permintaan, pelan-pelan",
+    "INTERNAL_ERROR": "Terjadi kesalahan",
+    "SERVICE_UNAVAILABLE": "Layanan tidak tersedia",
+    "SLUG_TAKEN": "Slug ruangan itu sudah dipakai",
+    "MATCH_NOT_FOUND": "Pertandingan tidak ditemukan",
+    "ROOM_NOT_FOUND": "Ruangan tidak ditemukan",
+    "SEEDER_FULL": "Seeder penuh, coba lagi nanti",
+    "AUTO_WARMED_PROTECTED": "Ruangan pre-warm tidak bisa dihapus",
+    "RESERVED_SLUG_PREFIX": "Prefiks slug itu dipesan",
+    "CHAIN_UNSUPPORTED": "Chain tidak didukung",
+    "CHAIN_DISABLED": "Chain sedang nonaktif",
+    "LIVE_DATA_UNAVAILABLE": "Data pertandingan live belum dikonfigurasi",
+    "INVALID_SIGNATURE": "Tanda tangan tidak sesuai dengan penanda tangan yang diharapkan",
+    "NONCE_ALREADY_USED": "Nonce otorisasi tersebut sudah pernah digunakan",
+    "AMOUNT_EXCEEDS_CAP": "Jumlah melebihi batas facilitator",
+    "TOKEN_NOT_ALLOWED": "Kontrak token tidak diizinkan oleh facilitator",
+    "HOST_NOT_REGISTERED": "Penerima bukan host Curva yang terdaftar",
+    "FACILITATOR_DISABLED": "Facilitator relay tidak aktif di instance ini",
+    "SPONSOR_INSUFFICIENT_FUNDS": "Sponsor relay kehabisan gas; coba lagi nanti",
+    "RPC_SUBMIT_FAILED": "Gagal mengirim transaksi ke jaringan",
+    "TOKEN_METADATA_UNAVAILABLE": "Tidak dapat membaca metadata EIP-712 token",
+    "TX_NOT_FOUND": "Transaksi tidak ditemukan",
+    "FACILITATOR_PERSIST_FAILED": "Terkirim on-chain tetapi gagal menyimpan catatan",
+    "MODEL_NOT_FOUND": "Model tidak ditemukan",
+    "MODEL_NOT_YET_PUBLISHED": "Model belum dipublikasikan",
+    "MODEL_MIRROR_UNAVAILABLE": "Mirror tidak tersedia, dialihkan ke sumber",
+    "MODEL_INTEGRITY_UNVERIFIED": "Integritas model tidak dapat diverifikasi; menolak melayani",
+    "INVALID_RANGE": "Permintaan rentang tidak valid"
+  },
+  "matches": {
+    "status": {
+      "scheduled": "Terjadwal",
+      "in_progress": "Live",
+      "live": "Live",
+      "halftime": "Turun minum",
+      "finished": "Selesai",
+      "postponed": "Ditunda",
+      "cancelled": "Dibatalkan"
+    },
+    "stage": {
+      "group": "Babak grup",
+      "r16": "16 besar",
+      "qf": "Perempat final",
+      "sf": "Semifinal",
+      "third_place": "Perebutan tempat ketiga",
+      "final": "Final"
+    },
+    "label": {
+      "kickoff_in": "Mulai dalam {minutes} menit",
+      "minute": "menit {minute}",
+      "ft": "FT",
+      "ht": "HT"
+    }
+  },
+  "rooms": {
+    "handle": {
+      "default": "host-curva"
+    },
+    "auto_warmed_note": "Sudah dihidupkan oleh Curva Companion",
+    "expires_in": "Kedaluwarsa dalam {hours} jam"
+  },
+  "tips": {
+    "received": "Diterima",
+    "sent": "Dikirim",
+    "lifetime_total": "Total keseluruhan",
+    "today": "Hari ini"
+  },
+  "status": {
+    "title": "Status Curva Companion",
+    "last_updated": "Diperbarui terakhir",
+    "service_health": "Kesehatan layanan",
+    "live_metrics": "Metrik live",
+    "recent_activity": "Aktivitas terbaru",
+    "third_party": "Layanan pihak ketiga",
+    "versions": "Versi",
+    "forza_curva": "Forza Curva",
+    "built_for": "Dibangun untuk Tether Developers Cup 2026",
+    "ok": "ok",
+    "degraded": "menurun",
+    "down": "mati",
+    "active_rooms": "Ruangan aktif",
+    "total_rooms": "Total ruangan",
+    "total_tips_lifetime": "Total tip",
+    "total_tips_today": "Tip hari ini",
+    "active_peers": "Peer aktif",
+    "api": "API",
+    "db": "Database",
+    "seeder": "Seeder",
+    "indexer": "Indexer tip",
+    "catalog": "Sinkronisasi katalog",
+    "no_recent_events": "Belum ada aktivitas",
+    "chains": "Rantai"
+  },
+  "chains": {
+    "CHAIN_NOT_SUPPORTED": "Rantai {chainId} tidak didukung",
+    "CHAIN_DISABLED": "Rantai {chainId} sedang dinonaktifkan",
+    "health": {
+      "healthy": "Sehat",
+      "unhealthy": "Tidak sehat",
+      "unknown": "Tidak diketahui"
+    }
+  },
+  "phrases": {
+    "ardoino_pure_freedom": "Tanpa ikatan, kebebasan murni"
+  },
+  "live": {
+    "no_data": "Tidak ada data langsung tersedia",
+    "goal": "GOL",
+    "kickoff": "Mulai",
+    "halftime": "Babak pertama selesai",
+    "fulltime": "Pertandingan selesai"
+  },
+  "distribution": {
+    "title": "Distribusi Aplikasi Curva",
+    "description": "Curva - watch-party P2P untuk Piala Dunia di Tether Developers Cup",
+    "status": {
+      "enabled": "Aplikasi tersedia",
+      "disabled": "Segera hadir",
+      "seeder_running": "Seeder aktif",
+      "seeder_stopped": "Seeder tidak aktif"
+    },
+    "install": {
+      "pear": "npm i -g pear && pear run pear://{appKey}"
+    }
+  },
+  "dashboard": {
+    "title": "Dasbor Curva Companion",
+    "live_matches": "Pertandingan langsung",
+    "activity_feed": "Aliran aktivitas",
+    "active_rooms": "Ruang aktif",
+    "active_peers": "Peer aktif",
+    "lifetime_tips": "Tip seumur hidup",
+    "tips_count": "Jumlah tip",
+    "live_now": "Sedang berlangsung",
+    "disconnected": "Terputus, menyambung ulang...",
+    "enable_sound": "Aktifkan suara",
+    "chains": "Rantai",
+    "forza_curva": "Forza Curva",
+    "no_events": "Menunggu aktivitas...",
+    "no_matches": "Tidak ada pertandingan langsung"
+  },
+  "mcp": {
+    "unauthorized": "Token akses MCP hilang atau tidak valid",
+    "disabled": "Server MCP dinonaktifkan",
+    "tool_not_found": "Alat tidak ditemukan: {name}",
+    "resource_not_found": "Sumber daya tidak ditemukan: {uri}",
+    "invalid_arguments": "Argumen alat tidak valid",
+    "prepare_tip_unavailable": "Facilitator dinonaktifkan - tidak bisa menyiapkan tip"
+  }
+}
