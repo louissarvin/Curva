@@ -1,0 +1,440 @@
+// Curva Companion - public-good infrastructure layer
+// This database NEVER stores chat, playhead, or clips. Those live in Autobase / Hyperbee / Hyperdrive.
+// This database stores ONLY: World Cup catalog data, opt-in room directory listings,
+// on-chain tip event mirror, and operational telemetry.
+//
+// Conventions:
+// - snake_case columns mapped to camelCase fields via @map
+// - cuid() ids for catalog tables, nanoid slugs for user-supplied identifiers
+// - Foreign keys + indexes on every join column
+// - Soft delete (deletedAt) on user-controllable rows (rooms)
+// - created_at / updated_at on every table
+// - Down-migration path: every additive change is reversible; if a column is renamed,
+//   ship a new column + dual-write + drop later (never rename in place).
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "./generated"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// =============================================================================
+// SECTION A: World Cup catalog (read-only mirror, populated by catalog worker)
+// =============================================================================
+
+// Team = a national team participating in the World Cup.
+model Team {
+  id          String   @id @default(cuid())
+  // ISO 3166-1 alpha-3 code, e.g. "ARG", "ITA", "BRA" (uppercase)
+  code        String   @unique
+  name        String
+  flagUrl     String?  @map("flag_url")
+  // Group label A..L (some teams have null group until draw is final)
+  groupLabel  String?  @map("group_label")
+  // Foreign source id (football-data.org team id) for upsert reconciliation
+  externalId  Int?     @unique @map("external_id")
+
+  homeMatches Match[]  @relation("HomeTeam")
+  awayMatches Match[]  @relation("AwayTeam")
+
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt      @map("updated_at")
+
+  @@index([groupLabel])
+  @@map("teams")
+}
+
+// Match = one fixture of FIFA World Cup 2026.
+model Match {
+  id           String      @id @default(cuid())
+  // Foreign source id (football-data.org match id); unique for idempotent upsert
+  externalId   Int         @unique @map("external_id")
+  homeTeamId   String      @map("home_team_id")
+  awayTeamId   String      @map("away_team_id")
+  // Kickoff in UTC. Always store UTC; clients render in local TZ.
+  kickoffUtc   DateTime    @map("kickoff_utc")
+  // group | r16 | qf | sf | third_place | final
+  stage        MatchStage
+  // scheduled | live | finished | postponed | cancelled
+  status       MatchStatus @default(scheduled)
+  // Group label for group-stage matches (null for knockout)
+  groupLabel   String?     @map("group_label")
+  // Final score (null until finished); kept for completeness
+  homeScore    Int?        @map("home_score")
+  awayScore    Int?        @map("away_score")
+  venue        String?
+  // F7 (live match pulse): current in-match minute, populated by the
+  // liveMatchPulseWorker while status='live'. Null while scheduled or after
+  // the match ends. Additive nullable, safe to push without backfill.
+  currentMinute Int?       @map("current_minute")
+  // F7: timestamp of the last successful football-data.org sync for this
+  // match. Used by the pulse worker to skip matches synced within the cache
+  // window and by /matches/:id/live to expose freshness. Additive nullable.
+  lastSyncedAt  DateTime?  @map("last_synced_at")
+
+  homeTeam     Team        @relation("HomeTeam", fields: [homeTeamId], references: [id], onDelete: Restrict)
+  awayTeam     Team        @relation("AwayTeam", fields: [awayTeamId], references: [id], onDelete: Restrict)
+  rooms        Room[]
+
+  createdAt    DateTime    @default(now()) @map("created_at")
+  updatedAt    DateTime    @updatedAt      @map("updated_at")
+
+  @@index([kickoffUtc])
+  @@index([stage, kickoffUtc])
+  @@index([status, kickoffUtc])
+  @@index([homeTeamId])
+  @@index([awayTeamId])
+  // F7: live-pulse worker scans (status, kickoffUtc, lastSyncedAt) every tick
+  // to find currently-live matches whose last sync is older than the cache
+  // TTL. Composite index avoids a seq scan on the matches table.
+  @@index([status, kickoffUtc, lastSyncedAt])
+  @@map("matches")
+}
+
+enum MatchStage {
+  group
+  r16
+  qf
+  sf
+  third_place
+  final
+}
+
+enum MatchStatus {
+  scheduled
+  live
+  finished
+  postponed
+  cancelled
+}
+
+// =============================================================================
+// SECTION B: Public Room Directory (opt-in listings; truth-of-record is Hyperbee)
+// =============================================================================
+
+// A host explicitly publishes their room slug to make it discoverable through the API.
+// The actual room state (chat, playhead, peers) lives in Autobase/Hyperbee.
+// This table is ONLY a discovery index. Auto-purged 24h after the match ends.
+model Room {
+  id               String   @id @default(cuid())
+  // Human-typed match-ID slug used as the Hyperswarm topic seed; nanoid(12)+ in API
+  slug             String   @unique
+  matchId          String   @map("match_id")
+  // Display handle the host wants shown (no auth, free text, max 32 chars)
+  hostHandle       String   @map("host_handle")
+  // EVM smart-account address (lowercase 0x...) used for tip indexing (Transfer.to).
+  hostSmartAddress String   @map("host_smart_address")
+  // EVM owner EOA (lowercase 0x...) that controls the WDK Safe smart-account. This is
+  // the key that produces EIP-191 personal_sign signatures used by the delete flow.
+  // Nullable for backward compatibility with rooms created before this column was added:
+  // those rooms cannot be deleted via signature until the host re-registers.
+  // ERC-1271 smart-account direct signing is v2; for v1 we recover the EOA.
+  hostOwnerAddress String?  @map("host_owner_address")
+  // Optional pear:// deeplink hint; not validated beyond max length
+  pearLink         String?  @map("pear_link")
+  // Hard expiry; cleanup worker hard-deletes after this
+  expiresAt        DateTime @map("expires_at")
+  // Soft-delete column (per database rules: prefer soft-delete over DELETE)
+  deletedAt        DateTime? @map("deleted_at")
+  // F2 (auto-warm): true when the room was created automatically by the
+  // matchAutoWarmWorker (not by a real host). Auto-warmed rooms cannot be
+  // deleted via the public DELETE flow; only the cleanup worker can remove
+  // them. Defaults to false so all existing rooms remain non-auto. Additive
+  // change, safe to push without backfill.
+  isAutoWarmed     Boolean  @default(false) @map("is_auto_warmed")
+  // F5 (demo seed): flag rows that belong to the demo-seed scenarios so the
+  // public leaderboard, /metrics/live, and other tip aggregations can filter
+  // them out. The reset path uses this flag (NOT a slug prefix) so a legit
+  // user-registered room named `demo-foo` is never collateral damage. See
+  // SECURITY_AUDIT.md W2-HIGH-03. Additive nullable-default-safe.
+  isDemo           Boolean  @default(false) @map("is_demo")
+
+  match            Match    @relation(fields: [matchId], references: [id], onDelete: Cascade)
+
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt      @map("updated_at")
+
+  @@index([slug, expiresAt])
+  @@index([matchId, deletedAt])
+  @@index([hostSmartAddress])
+  @@index([expiresAt])
+  // Cleanup worker filters by (isAutoWarmed, expiresAt) to find expired
+  // auto-rooms it owns. Composite index avoids a sequential scan once the
+  // table exceeds a few hundred rooms.
+  @@index([isAutoWarmed, expiresAt])
+  // F5: surgical reset path scans `(isDemo, deletedAt)` to find live demo
+  // rooms without touching user rows.
+  @@index([isDemo, deletedAt])
+  @@map("rooms")
+}
+
+// =============================================================================
+// SECTION C: WDK Tip Indexer (on-chain Transfer event mirror)
+// =============================================================================
+
+// One row per observed USDT ERC-20 Transfer to a registered host address.
+// On-chain is the source of truth; this is a read-only paginated mirror.
+// Uniqueness: (txHash, logIndex) handles re-orgs cleanly via upsert.
+model TipEvent {
+  id            String   @id @default(cuid())
+  chainId       Int      @map("chain_id")
+  // Lowercase 0x... checksum-free for stable indexing
+  tokenAddress  String   @map("token_address")
+  fromAddress   String   @map("from_address")
+  toAddress     String   @map("to_address")
+  // Amount in token base units (6 decimals for USDT) as string to avoid precision loss
+  amount        String
+  txHash        String   @map("tx_hash")
+  logIndex      Int      @map("log_index")
+  blockNumber   Int      @map("block_number")
+  // Block timestamp in UTC (from provider.getBlock)
+  blockTime     DateTime @map("block_time")
+  // FK to Room.id at the time of indexing (nullable; room may not be registered)
+  roomId        String?  @map("room_id")
+  // F5 (demo seed): tip rows produced by the demo-seed endpoint are tagged so
+  // the public leaderboard SQL and other tip aggregations can filter them out.
+  // Real on-chain tips set this to the default false. See SECURITY_AUDIT.md
+  // W2-HIGH-03. Additive nullable-default-safe.
+  isDemo        Boolean  @default(false) @map("is_demo")
+
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt      @map("updated_at")
+
+  @@unique([txHash, logIndex])
+  @@index([toAddress, blockNumber])
+  @@index([toAddress, blockTime])
+  @@index([roomId])
+  @@index([blockNumber])
+  // F5: leaderboard / metrics aggregates filter on (isDemo, blockTime) — the
+  // composite index keeps these queries planar even after demo seeds run.
+  @@index([isDemo, blockTime])
+  @@map("tip_events")
+}
+
+// Tracks the indexer cursor per (chainId, tokenAddress). One row per token.
+// Lets the worker resume from the last-scanned block on restart.
+model IndexerCursor {
+  id              String   @id @default(cuid())
+  chainId         Int      @map("chain_id")
+  tokenAddress    String   @map("token_address")
+  lastBlockNumber Int      @map("last_block_number")
+
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt      @map("updated_at")
+
+  @@unique([chainId, tokenAddress])
+  @@map("indexer_cursors")
+}
+
+// =============================================================================
+// SECTION D: Catalog Sync telemetry
+// =============================================================================
+
+// One row per catalog sync run. Lets /health report freshness.
+model CatalogSync {
+  id            String   @id @default(cuid())
+  // 'football_data' | 'json_seed'
+  source        String
+  status        String   // 'ok' | 'error'
+  matchesUpserted Int    @default(0) @map("matches_upserted")
+  teamsUpserted Int      @default(0) @map("teams_upserted")
+  errorMessage  String?  @map("error_message")
+
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt      @map("updated_at")
+
+  @@index([createdAt])
+  @@map("catalog_syncs")
+}
+
+// =============================================================================
+// SECTION E: Pre-existing operational tables (kept; required by errorHandler)
+// =============================================================================
+
+model ErrorLog {
+  id         String   @id @default(cuid())
+  errorCode  String   @map("error_code")
+  message    String
+  statusCode Int      @map("status_code")
+  stack      String?  @db.Text
+  context    String?  @db.Text
+  userId     String?  @map("user_id")
+  method     String?
+  path       String?
+  userAgent  String?  @db.Text @map("user_agent")
+  ip         String?
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([errorCode])
+  @@index([createdAt])
+  @@map("error_logs")
+}
+
+// =============================================================================
+// SECTION F: Wave 4 - EIP-3009 Facilitator (F11)
+// =============================================================================
+
+// One row per signed EIP-3009 transferWithAuthorization message submitted by
+// the backend on behalf of a peer. The peer signs locally with their EOA
+// (owner of a Safe smart-account or a plain EOA); the backend relays the
+// signed message on-chain from a sponsor wallet.
+//
+// On-chain is the source of truth for the resulting Transfer event; the
+// existing tipIndexerWorker will pick it up and create a TipEvent row keyed
+// on (txHash, logIndex). This table is the pre-broadcast + confirmation
+// mirror only. It is NOT a duplicate tip counter.
+//
+// Nonce replay protection is enforced via the composite @@unique([chainId, nonce])
+// constraint. See ADR-010 for the sponsor-wallet risk model.
+model FacilitatorTx {
+  id             String    @id @default(cuid())
+  chainId        Int       @map("chain_id")
+  // Ethereum transaction hash returned by the RPC after submit. Unique so a
+  // re-broadcast of the same signed authorization (same nonce) always resolves
+  // to the same row.
+  txHash         String    @unique @map("tx_hash")
+  // Lowercase 0x... EIP-3009 signer / payer
+  fromAddress    String    @map("from_address")
+  // Lowercase 0x... recipient (must be a registered host address unless
+  // RELAY_ONLY_REGISTERED_HOSTS=false)
+  toAddress      String    @map("to_address")
+  // USDT amount in base units (6 decimals) as string to avoid precision loss
+  amount         String
+  // Lowercase 0x... token contract that the message authorises
+  tokenAddress   String    @map("token_address")
+  // EIP-3009 nonce - hex bytes32 lowercase (0x...64hex). Composite-unique with
+  // chainId to prevent replay across restarts and across sponsor wallets.
+  nonce          String
+  // Unix seconds (EIP-3009 field on the signed message)
+  validAfter     Int       @map("valid_after")
+  validBefore    Int       @map("valid_before")
+  // 'submitted' | 'confirmed' | 'failed'
+  status         String    @default("submitted")
+  submittedAt    DateTime  @default(now()) @map("submitted_at")
+  confirmedAt    DateTime? @map("confirmed_at")
+  confirmedBlock Int?      @map("confirmed_block")
+  errorMessage   String?   @map("error_message")
+
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt      @map("updated_at")
+
+  // Nonce replay protection - the EIP-3009 spec uses random bytes32 nonces,
+  // so a single sponsor may relay millions of distinct authorizations, but
+  // the SAME (chainId, nonce) tuple must never be accepted twice.
+  @@unique([chainId, nonce])
+  @@index([fromAddress, submittedAt])
+  @@index([toAddress, submittedAt])
+  @@index([status, submittedAt])
+  @@map("facilitator_txs")
+}
+
+// =============================================================================
+// SECTION G: Wave 10 — Match Prediction Pool
+// =============================================================================
+//
+// A PredictionPool is opened by a room host for a scheduled match. Peers stake
+// USDT (via existing F11 EIP-3009 facilitator) into a sponsor-controlled pool
+// address before the match deadline. When the host publishes the result, the
+// settlement worker computes winners and dispatches ERC-20 batch payouts via
+// the same sponsor path.
+//
+// Hackathon simplification (documented in predictionPool.ts): the "pool
+// address" is a sponsor sub-address controlled by the backend, NOT a
+// deployed escrow contract. Production would use a real escrow with slashing
+// and time-locked withdrawals; the hackathon scope trades that for shipping
+// real on-chain settlement in a week.
+//
+// Chat autobase surface (documented in bare/chat.js):
+//   system:pool-opened   host-only writer
+//   prediction           any writer (through Pattern A proxy or Pattern B addWriter)
+//   system:match-result  host-only writer
+//   system:pool-payout   host-only writer (backend orchestrates, host publishes)
+//
+// Feature flag: CURVA_PREDICTIONS_ENABLED. When false, /predictions/* routes
+// return 503 FEATURE_DISABLED and the settlement worker no-ops.
+model PredictionPool {
+  id                String   @id @default(cuid())
+  matchId           String   @map("match_id")
+  roomSlug          String   @map("room_slug")
+  // EOA that opened the pool. Lowercase 0x...; nullable so a demo host that
+  // has not registered their owner address can still open a pool.
+  hostAddress       String   @map("host_address")
+  // Sponsor sub-address holding the pool funds. Lowercase 0x...
+  // Currently every pool routes to a single sponsor address (RELAY_SPONSOR_PK).
+  // See predictionPool.ts for the derivation strategy.
+  poolAddress       String   @map("pool_address")
+  chainId           Int      @map("chain_id")
+  // Lowercase 0x... USDT contract on the target chain.
+  stakeToken        String   @map("stake_token")
+  // Base units (e.g. 1000000 = 1 USDT). String for precision.
+  entryStakeAtomic  String   @map("entry_stake_atomic")
+  // 'winner-only' | 'exact-score'
+  mode              String
+  // Match result deadline (unix millis). After this, no entries are accepted
+  // and the settlement worker moves the pool to 'locked'.
+  deadlineMs        BigInt   @map("deadline_ms")
+  // 'open' | 'locked' | 'settled' | 'refunded'
+  status            String   @default("open")
+  // Confirmed stake total. Only stakes with confirmed txHash count.
+  totalStakedAtomic String   @default("0") @map("total_staked_atomic")
+  // Host-published match result (set when status transitions to 'settled').
+  resultWinner      String?  @map("result_winner")  // 'HOME' | 'AWAY' | 'DRAW'
+  resultHomeGoals   Int?     @map("result_home_goals")
+  resultAwayGoals   Int?     @map("result_away_goals")
+
+  createdAt         DateTime @default(now()) @map("created_at")
+  settledAt         DateTime? @map("settled_at")
+  updatedAt         DateTime @updatedAt      @map("updated_at")
+
+  predictions       Prediction[]
+
+  // A room can host exactly one pool per match. Prevents double-open on the
+  // same (room, match) tuple, which is the anti-spam bar for host-side abuse.
+  @@unique([roomSlug, matchId])
+  @@index([status])
+  @@index([chainId, status])
+  @@index([matchId])
+  @@map("prediction_pools")
+}
+
+model Prediction {
+  id                 String   @id @default(cuid())
+  poolId             String   @map("pool_id")
+  // Lowercase 0x... peer's signing address (from the EIP-3009 authorization).
+  peerAddress        String   @map("peer_address")
+  // Display handle from the pear app. Free text, max 64 chars, control-char
+  // strippped by the route validator.
+  peerHandle         String   @map("peer_handle")
+  // 'HOME' | 'AWAY' | 'DRAW'
+  winner             String
+  homeGoals          Int?     @map("home_goals")
+  awayGoals          Int?     @map("away_goals")
+  // Base units string. Must equal PredictionPool.entryStakeAtomic (validated
+  // at ingress); stored per-row so a mode change on the pool doesn't corrupt
+  // past entries.
+  stakeAtomic        String   @map("stake_atomic")
+  // Real Sepolia txHash for the EIP-3009 relay that funded this entry.
+  txHash             String   @map("tx_hash")
+  // 'pending' | 'confirmed' | 'refunded' | 'won'
+  status             String   @default("pending")
+  payoutTxHash       String?  @map("payout_tx_hash")
+  payoutAmountAtomic String?  @map("payout_amount_atomic")
+
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt      @map("updated_at")
+
+  pool               PredictionPool @relation(fields: [poolId], references: [id], onDelete: Cascade)
+
+  // A peer can only submit ONE entry per pool per (winner, homeGoals, awayGoals)
+  // combination. This is enforced at the route layer via a lookup on
+  // (poolId, peerAddress, winner, homeGoals, awayGoals) rather than a DB
+  // unique constraint because homeGoals/awayGoals are nullable in
+  // winner-only mode.
+  @@index([poolId, status])
+  @@index([txHash])
+  @@index([peerAddress])
+  @@map("predictions")
+}
