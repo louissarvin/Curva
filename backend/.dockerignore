@@ -1,0 +1,17 @@
+node_modules
+.git
+.gitignore
+.env
+.env.*
+*.log
+README.md
+ARCHITECTURE.md
+SECURITY_AUDIT.md
+CODE_REVIEW.md
+CLAUDE.md
+test
+memory
+tmp
+.DS_Store
+Dockerfile*
+.dockerignore
