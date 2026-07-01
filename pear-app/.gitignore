@@ -1,0 +1,45 @@
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json
+
+# Electron Forge
+out/
+.webpack/
+
+# Pear
+.pear/
+pear-store/
+.store-peer-*/
+.corestore/
+
+# Bare-pack artifacts
+*.bundle
+*.bundle.map
+
+# Local dev
+tmp/
+dist/
+.tmp/
+.cache/
+
+# OS
+.DS_Store
+Thumbs.db
+*.log
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Secrets (belt-and-braces; no secret should ever live in the repo)
+.env
+.env.local
+.env.*.local
+secrets/
+*.seed
+*.mnemonic

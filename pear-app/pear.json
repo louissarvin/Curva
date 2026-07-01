@@ -1,0 +1,7 @@
+{
+  "multisig": {
+    "publicKeys": [],
+    "namespace": "curva",
+    "quorum": 0
+  }
+}
