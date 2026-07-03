@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Curva</title>
+    <!-- Urbanist (body) + Playfair Display (headings) from Google Fonts.
+         preconnect is safe here: we only contact fonts.googleapis.com and
+         fonts.gstatic.com. No user-supplied data is sent.
+         font-display:swap ensures text is readable before fonts arrive.
+    -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Urbanist:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Playfair+Display:wght@700;900&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <!-- Phase 4 boot splash: full-viewport, hides once the Bare worker emits `ready`. -->
+    <div class="curva-boot" data-boot>
+      <div class="curva-boot__mark">
+        <!-- Stylized wine-red "C" for Curva. Simple inline SVG so we don't ship
+             an image asset just for the splash. -->
+        <svg viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <circle cx="60" cy="60" r="52" fill="none" stroke="#8b0e2b" stroke-width="10" stroke-dasharray="220 60" stroke-linecap="round" transform="rotate(-90 60 60)" />
+          <text x="60" y="76" text-anchor="middle" fill="#e6e6e6" font-family="ui-monospace, Menlo, monospace" font-size="52" font-weight="700">C</text>
+        </svg>
+      </div>
+      <div class="curva-boot__title">CURVA</div>
+      <div class="curva-boot__tag">watch the world cup with friends</div>
+      <div class="curva-boot__status" data-boot-status>Booting Curva runtime…</div>
+      <div class="curva-boot__hint" data-boot-hint>this may take 5-45s on first launch (DHT bootstrap)</div>
+      <div class="curva-boot__dots"><span></span><span></span><span></span></div>
+    </div>
+
+    <div id="app"></div>
+
+    <!-- Phase 2 shell: header bar + browser (pre-room) OR room grid (in room) -->
+    <template id="app-shell">
+      <main class="curva-app">
+        <header class="curva-app__topbar">
+          <div class="curva-app__brand">
+            <span class="curva-app__brand-mark">CURVA</span>
+            <span class="curva-app__brand-tag">watch the world cup with friends</span>
+          </div>
+          <div class="curva-app__topbar-meta">
+            <span class="curva-app__topbar-item" data-topbar="dht"></span>
+            <span class="curva-app__topbar-item" data-topbar="pubkey"></span>
+            <span class="curva-app__topbar-item" data-version></span>
+          </div>
+        </header>
+
+        <div class="curva-app__body">
+          <!-- Left column: room content OR browser -->
+          <section class="curva-app__main">
+            <div class="curva-app__browser" data-mount="browser"></div>
+            <div class="curva-app__room" data-mount="room" hidden>
+              <div class="curva-app__room-header" data-mount="room-header"></div>
+              <div class="curva-app__room-grid">
+                <div class="curva-app__video" data-mount="video"></div>
+                <div class="curva-app__chat" data-mount="chat"></div>
+              </div>
+              <div class="curva-app__clips" data-mount="clips"></div>
+            </div>
+          </section>
+
+          <!-- Right column: activity feed + event log -->
+          <aside class="curva-app__aside">
+            <div class="curva-app__feed" data-mount="feed"></div>
+            <div class="curva-app__log-panel">
+              <h3 class="curva-app__log-title">events</h3>
+              <ul class="curva-app__log" data-log></ul>
+            </div>
+          </aside>
+        </div>
+
+        <!-- Dev-only diagnostic footer (activated by ?diag=1). -->
+        <footer class="curva-diag" data-mount="diag" hidden></footer>
+      </main>
+    </template>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
