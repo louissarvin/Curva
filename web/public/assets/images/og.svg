@@ -1,0 +1,47 @@
+<svg width="1200" height="630" viewBox="0 0 1200 630" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background -->
+  <rect width="1200" height="630" fill="#0a0a0a"/>
+
+  <!-- Chalk stripe texture -->
+  <defs>
+    <pattern id="stripes" patternUnits="userSpaceOnUse" width="40" height="40" patternTransform="rotate(-55)">
+      <rect width="2" height="40" fill="rgba(255,255,255,0.025)"/>
+    </pattern>
+  </defs>
+  <rect width="1200" height="630" fill="url(#stripes)"/>
+
+  <!-- Red accent left bar -->
+  <rect x="0" y="0" width="6" height="630" fill="#c8102e"/>
+
+  <!-- Top red line -->
+  <rect x="80" y="80" width="120" height="3" fill="#c8102e"/>
+
+  <!-- CURVA wordmark -->
+  <text x="80" y="200" font-family="Georgia, serif" font-size="96" font-weight="700" fill="#f5f5f0" letter-spacing="8">CURVA</text>
+
+  <!-- 8-word pitch -->
+  <text x="80" y="280" font-family="Georgia, serif" font-size="32" font-weight="400" font-style="italic" fill="#f5f5f0" opacity="0.85">Watch the World Cup with friends, peer-to-peer.</text>
+
+  <!-- Divider -->
+  <rect x="80" y="320" width="1040" height="1" fill="rgba(255,255,255,0.1)"/>
+
+  <!-- Ardoino quote -->
+  <text x="80" y="380" font-family="Georgia, serif" font-size="22" font-style="italic" fill="#d4af37">"Trillions of self-custodial wallets. No string attached. Pure freedom."</text>
+  <text x="80" y="412" font-family="-apple-system, sans-serif" font-size="15" fill="#8a8a8a">Paolo Ardoino, X post, 2025-10-04</text>
+
+  <!-- Pillar chips -->
+  <rect x="80" y="460" width="100" height="32" rx="4" fill="rgba(200,16,46,0.2)" stroke="#c8102e" stroke-width="1"/>
+  <text x="130" y="481" font-family="-apple-system, sans-serif" font-size="13" fill="#c8102e" text-anchor="middle">Pears</text>
+
+  <rect x="196" y="460" width="76" height="32" rx="4" fill="rgba(200,16,46,0.1)" stroke="rgba(200,16,46,0.4)" stroke-width="1"/>
+  <text x="234" y="481" font-family="-apple-system, sans-serif" font-size="13" fill="#8a8a8a" text-anchor="middle">WDK</text>
+
+  <rect x="288" y="460" width="82" height="32" rx="4" fill="rgba(200,16,46,0.1)" stroke="rgba(200,16,46,0.4)" stroke-width="1"/>
+  <text x="329" y="481" font-family="-apple-system, sans-serif" font-size="13" fill="#8a8a8a" text-anchor="middle">QVAC</text>
+
+  <!-- Nation + track -->
+  <text x="80" y="560" font-family="-apple-system, sans-serif" font-size="16" fill="#8a8a8a">Pears Track · Tether Developers Cup 2026 · Nation: Italy</text>
+
+  <!-- Italian sign-off -->
+  <text x="1120" y="560" font-family="Georgia, serif" font-size="15" font-style="italic" fill="rgba(245,245,240,0.35)" text-anchor="end">Cosi il calcio doveva essere.</text>
+</svg>
