@@ -15,7 +15,8 @@
     "db:migrate": "bunx prisma migrate dev --name init --config prisma/prisma.config.ts",
     "generate:secrets": "bun scripts/generate-secrets.ts",
     "prewarm:models": "bun scripts/prewarm-models.ts",
-    "verify:qvac-models": "bun scripts/verify-qvac-models.ts"
+    "verify:qvac-models": "bun scripts/verify-qvac-models.ts",
+    "preflight": "bun scripts/preflight.ts"
   },
   "keywords": [],
   "author": "",
