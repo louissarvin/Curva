@@ -86,5 +86,14 @@
       "text": "La curva dove gli ultras stanno insieme e' ora la curva dove i tifosi di tutto il mondo stanno insieme.",
       "translation": "The curve where ultras stand together is now the curve where fans worldwide stand together."
     }
-  ]
+  ],
+  "goal_templates": {
+    "en": "Goal! {scorer} scores for {team}. {score}.",
+    "it": "Gol! {scorer} segna per {team}. {score}.",
+    "id": "Gol! {scorer} cetak gol untuk {team}. {score}.",
+    "es": "¡Gol! {scorer} anota para {team}. {score}.",
+    "pt": "Golo! {scorer} marca para {team}. {score}.",
+    "de": "Tor! {scorer} trifft für {team}. {score}.",
+    "fr": "But! {scorer} marque pour {team}. {score}."
+  }
 }
