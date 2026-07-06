@@ -18,6 +18,7 @@ import { DEFAULT_LANG, resolveLang } from './src/lib/i18n/index.ts';
 // Routes
 import { matchRoutes } from './src/routes/matchRoutes.ts';
 import { matchLiveRoutes } from './src/routes/matchLiveRoutes.ts';
+import { matchLiveStreamRoutes } from './src/routes/matchLiveStreamRoutes.ts';
 import { teamRoutes } from './src/routes/teamRoutes.ts';
 import { roomRoutes } from './src/routes/roomRoutes.ts';
 import { tipRoutes } from './src/routes/tipRoutes.ts';
@@ -32,6 +33,7 @@ import { chainsRoutes } from './src/routes/chainsRoutes.ts';
 import { dashboardRoutes } from './src/routes/dashboardRoutes.ts';
 import { facilitatorRoutes } from './src/routes/facilitatorRoutes.ts';
 import { wdkVerifyRoutes } from './src/routes/wdkVerifyRoutes.ts';
+import { wdkAttributionRoutes } from './src/routes/wdkAttributionRoutes.ts';
 import { tokenDomainRoutes } from './src/routes/tokenDomainRoutes.ts';
 import { qvacRoutes } from './src/routes/qvacRoutes.ts';
 import { distributionRoutes } from './src/routes/distributionRoutes.ts';
@@ -195,6 +197,10 @@ await fastify.register(matchRoutes, { prefix: '/matches' });
 // F7: live match snapshot endpoint, mounted under the same /matches prefix so
 // the final URL reads `/matches/:id/live`.
 await fastify.register(matchLiveRoutes, { prefix: '/matches' });
+// F3: SSE stream of match.goal / match.score / match.pulse. Mounted alongside
+// the REST /matches/:id/live endpoint so the final URL reads
+// `/matches/live/stream`.
+await fastify.register(matchLiveStreamRoutes, { prefix: '/matches' });
 await fastify.register(teamRoutes, { prefix: '/teams' });
 await fastify.register(roomRoutes, { prefix: '/rooms' });
 await fastify.register(tipRoutes, { prefix: '/tips' });
@@ -223,6 +229,11 @@ await fastify.register(facilitatorRoutes, { prefix: '/wdk/relay' });
 // Room, so it stays available whether the facilitator itself is enabled or not
 // (as long as historical rows exist in the DB).
 await fastify.register(wdkVerifyRoutes, { prefix: '/wdk/verify' });
+// F15 Wave 11 add-on: attribution verification. Decodes the abstractionkit
+// onChainIdentifier marker from an ERC-4337 UserOp callData and compares
+// against the locally-computed Curva marker. Public, rate-limited to
+// 60/min/IP. See src/routes/wdkAttributionRoutes.ts for the docs trail.
+await fastify.register(wdkAttributionRoutes, { prefix: '/wdk' });
 // Fix Wave B / T3: on-chain EIP-712 domain probe for EIP-3009 tokens. Lets the
 // Pear-app wallet fetch the token's actual name()/EIP712_VERSION() at init so
 // its client-side digest matches the F11 facilitator's recovery domain.
