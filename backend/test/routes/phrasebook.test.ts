@@ -61,6 +61,29 @@ describe('GET /phrasebook', () => {
     }
   });
 
+  test('Wave 15 goal_templates ships all 7 target locales', async () => {
+    const res = await app.inject({ method: 'GET', url: '/phrasebook' });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as {
+      data: { goal_templates: Record<string, string> };
+    };
+    expect(body.data.goal_templates).toBeDefined();
+    const locales = Object.keys(body.data.goal_templates);
+    expect(locales.sort()).toEqual(['de', 'en', 'es', 'fr', 'id', 'it', 'pt']);
+    // Every template contains all four placeholder tokens (except {minute},
+    // which the memo lists as optional in the current template shape).
+    for (const [locale, tmpl] of Object.entries(body.data.goal_templates)) {
+      expect(typeof tmpl).toBe('string');
+      expect(tmpl).toContain('{scorer}');
+      expect(tmpl).toContain('{team}');
+      expect(tmpl).toContain('{score}');
+      // Locale-specific sanity checks to catch accidental swaps.
+      if (locale === 'en') expect(tmpl.startsWith('Goal!')).toBe(true);
+      if (locale === 'it') expect(tmpl.startsWith('Gol!')).toBe(true);
+      if (locale === 'de') expect(tmpl.startsWith('Tor!')).toBe(true);
+    }
+  });
+
   test('every pillared quote is attributed to Ardoino or Curva team (verified sources only)', async () => {
     // Every quote with a pillar must have a real, human speaker. Accept both
     // "Paolo Ardoino" (verified public quotes) and "Curva team" (internal copy
