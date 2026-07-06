@@ -242,3 +242,73 @@ describe('FootballDataClient', () => {
     expect(stub.calls.length).toBe(0);
   });
 });
+
+// =============================================================================
+// F2: slugForMatch, deterministic slug derivation for the fixture warmer.
+// =============================================================================
+
+describe('slugForMatch', () => {
+  test('final has no ordinal suffix', async () => {
+    const { slugForMatch } = await import('../../../src/lib/integrations/footballData.ts');
+    expect(slugForMatch({ stage: 'final', phaseOrdinal: 1, externalId: 100103 })).toBe(
+      'wc2026-final'
+    );
+    // Ordinal is ignored for the unique-fixture stages.
+    expect(slugForMatch({ stage: 'final', phaseOrdinal: 999 })).toBe('wc2026-final');
+  });
+
+  test('third-place has no ordinal suffix', async () => {
+    const { slugForMatch } = await import('../../../src/lib/integrations/footballData.ts');
+    expect(slugForMatch({ stage: 'third_place', phaseOrdinal: 1 })).toBe('wc2026-third');
+    expect(slugForMatch({ stage: 'third_place', phaseOrdinal: 7, externalId: 100102 })).toBe(
+      'wc2026-third'
+    );
+  });
+
+  test('sf and qf use compact no-dash form', async () => {
+    const { slugForMatch } = await import('../../../src/lib/integrations/footballData.ts');
+    expect(slugForMatch({ stage: 'sf', phaseOrdinal: 1 })).toBe('wc2026-sf1');
+    expect(slugForMatch({ stage: 'sf', phaseOrdinal: 2 })).toBe('wc2026-sf2');
+    expect(slugForMatch({ stage: 'qf', phaseOrdinal: 1 })).toBe('wc2026-qf1');
+    expect(slugForMatch({ stage: 'qf', phaseOrdinal: 4 })).toBe('wc2026-qf4');
+  });
+
+  test('r16 uses dashed readable form', async () => {
+    const { slugForMatch } = await import('../../../src/lib/integrations/footballData.ts');
+    expect(slugForMatch({ stage: 'r16', phaseOrdinal: 1 })).toBe('wc2026-r16-1');
+    expect(slugForMatch({ stage: 'r16', phaseOrdinal: 16 })).toBe('wc2026-r16-16');
+  });
+
+  test('group uses externalId as tail', async () => {
+    const { slugForMatch } = await import('../../../src/lib/integrations/footballData.ts');
+    expect(
+      slugForMatch({ stage: 'group', phaseOrdinal: 0, externalId: 100034 })
+    ).toBe('wc2026-g-100034');
+  });
+
+  test('group falls back to phaseOrdinal when externalId is missing', async () => {
+    const { slugForMatch } = await import('../../../src/lib/integrations/footballData.ts');
+    expect(
+      slugForMatch({ stage: 'group', phaseOrdinal: 7, externalId: null })
+    ).toBe('wc2026-g-7');
+    expect(
+      slugForMatch({ stage: 'group', phaseOrdinal: 7 })
+    ).toBe('wc2026-g-7');
+  });
+
+  test('every slug satisfies the renderer ROOM_SLUG_REGEX', async () => {
+    const { slugForMatch } = await import('../../../src/lib/integrations/footballData.ts');
+    const ROOM_SLUG_REGEX = /^[a-z0-9-]{3,32}$/;
+    const samples = [
+      slugForMatch({ stage: 'final', phaseOrdinal: 1 }),
+      slugForMatch({ stage: 'third_place', phaseOrdinal: 1 }),
+      slugForMatch({ stage: 'sf', phaseOrdinal: 2 }),
+      slugForMatch({ stage: 'qf', phaseOrdinal: 3 }),
+      slugForMatch({ stage: 'r16', phaseOrdinal: 12 }),
+      slugForMatch({ stage: 'group', phaseOrdinal: 0, externalId: 100034 }),
+    ];
+    for (const slug of samples) {
+      expect(ROOM_SLUG_REGEX.test(slug)).toBe(true);
+    }
+  });
+});
