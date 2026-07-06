@@ -13,7 +13,13 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-export type QvacModelFamily = 'bergamot' | 'whisper' | 'llama';
+export type QvacModelFamily =
+  | 'bergamot'
+  | 'whisper'
+  | 'llama'
+  | 'parakeet'
+  | 'silero-vad'
+  | 'tts-supertonic';
 export type QvacModelStatus = 'ready' | 'pending-upstream' | 'deprecated';
 
 export interface QvacModel {
@@ -44,7 +50,14 @@ export interface QvacRegistry {
 // Parsing helpers
 // -----------------------------------------------------------------------------
 
-const KNOWN_FAMILIES: ReadonlySet<QvacModelFamily> = new Set(['bergamot', 'whisper', 'llama']);
+const KNOWN_FAMILIES: ReadonlySet<QvacModelFamily> = new Set([
+  'bergamot',
+  'whisper',
+  'llama',
+  'parakeet',
+  'silero-vad',
+  'tts-supertonic',
+]);
 const KNOWN_STATUSES: ReadonlySet<QvacModelStatus> = new Set([
   'ready',
   'pending-upstream',
