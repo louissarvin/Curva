@@ -43,7 +43,10 @@ describe('GET /qvac/models', () => {
     // real EN-hub pairs (en-{it,id,es,pt,de,fr} + reverse).
     expect(body.data.version).toBe('1.2.0');
     expect(body.data.mirrorEnabled).toBe(false);
-    expect(body.data.models.length).toBe(12);
+    // Wave 14 added whisper-tiny + vad-silero-5-1-2 + parakeet-ctc-en on top
+    // of the 12 EN-hub Bergamot pairs. Wave 15 adds tts-supertonic-multilingual.
+    // Total is 16.
+    expect(body.data.models.length).toBe(16);
     const ids = body.data.models.map((m) => m.id);
     // Legacy pseudo-entries removed.
     expect(ids).not.toContain('bergamot-itid');
@@ -61,8 +64,15 @@ describe('GET /qvac/models', () => {
     expect(ids).toContain('bergamot-pt-en');
     expect(ids).toContain('bergamot-de-en');
     expect(ids).toContain('bergamot-fr-en');
+    // Wave 14 STT registry constants.
+    expect(ids).toContain('whisper-tiny');
+    expect(ids).toContain('vad-silero-5-1-2');
+    expect(ids).toContain('parakeet-ctc-en');
+    // Wave 15 TTS registry constant.
+    expect(ids).toContain('tts-supertonic-multilingual');
+    const families = new Set(body.data.models.map((m) => m.family));
+    expect(families.has('tts-supertonic')).toBe(true);
     for (const m of body.data.models) {
-      expect(m.family).toBe('bergamot');
       // Mirror disabled → mirrorUrl always null regardless of JSON value.
       expect(m.mirrorUrl).toBeNull();
     }
@@ -77,13 +87,23 @@ describe('GET /qvac/models', () => {
   });
 
   test('filters by family', async () => {
-    const res = await app.inject({
+    const resWhisper = await app.inject({
       method: 'GET',
       url: '/qvac/models?family=whisper',
     });
-    expect(res.statusCode).toBe(200);
-    const body = res.json() as { data: { models: unknown[] } };
-    expect(body.data.models).toHaveLength(0);
+    expect(resWhisper.statusCode).toBe(200);
+    const bodyWhisper = resWhisper.json() as { data: { models: Array<{ id: string }> } };
+    // Wave 14: whisper family now has exactly one entry (whisper-tiny).
+    expect(bodyWhisper.data.models).toHaveLength(1);
+    expect(bodyWhisper.data.models[0].id).toBe('whisper-tiny');
+
+    const resLlama = await app.inject({
+      method: 'GET',
+      url: '/qvac/models?family=llama',
+    });
+    expect(resLlama.statusCode).toBe(200);
+    const bodyLlama = resLlama.json() as { data: { models: unknown[] } };
+    expect(bodyLlama.data.models).toHaveLength(0);
   });
 
   test('filters by capability', async () => {
