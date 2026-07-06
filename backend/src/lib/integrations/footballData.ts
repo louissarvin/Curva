@@ -61,6 +61,11 @@ export interface FdMatch {
   status: FdMatchStatus;
   utcDate: string;
   minute?: number | null;
+  // Added-time minutes marker. Populated by football-data v4 at half-end
+  // boundaries (typically minute 45 or 90). Nullable because the free tier
+  // and most non-live states omit the field. Verified against
+  // https://docs.football-data.org/general/v4/match.html on 2026-07-06.
+  injuryTime?: number | null;
   homeTeam: FdTeam;
   awayTeam: FdTeam;
   score: {
@@ -228,4 +233,67 @@ export class FootballDataClient {
     console.warn(`[footballData] unexpected status ${response.status} on ${url}`);
     return null;
   }
+}
+
+// =============================================================================
+// F2: Deterministic slug derivation for the World Cup 2026 fixture warmer.
+//
+// Slug shape (see memory/impl_fixture_deeplinks_sse.md):
+//   wc2026-<phase>[-<matchNumber>]
+//
+// Phase codes match backend/prisma/schema.prisma MatchStage enum:
+//   group -> g, r16 -> r16, qf -> qf, sf -> sf, third_place -> third, final -> final
+//
+// Examples:
+//   wc2026-final           (unique fixture, no ordinal)
+//   wc2026-third           (unique fixture, no ordinal)
+//   wc2026-sf2             (2 semi-finals, compact form)
+//   wc2026-qf3             (4 quarter-finals, compact form)
+//   wc2026-r16-5           (16 R16 matches, readable dashed form)
+//   wc2026-r32-12          (32 R32 matches, readable dashed form)
+//   wc2026-g-100034        (group stage, externalId as tail)
+//
+// Slugs must satisfy the renderer's ROOM_SLUG_REGEX (^[a-z0-9-]{3,32}$).
+// =============================================================================
+
+export type CurvaMatchStage =
+  | 'group'
+  | 'r16'
+  | 'qf'
+  | 'sf'
+  | 'third_place'
+  | 'final';
+
+export const PHASE_SLUG_CODE: Record<CurvaMatchStage, string> = {
+  group: 'g',
+  r16: 'r16',
+  qf: 'qf',
+  sf: 'sf',
+  third_place: 'third',
+  final: 'final',
+};
+
+// Unused position argument names are still emitted at type check for clarity.
+export function slugForMatch(opts: {
+  stage: CurvaMatchStage;
+  phaseOrdinal: number; // 1-indexed within phase (ignored for unique phases)
+  externalId?: number | null; // used as tail for the group stage
+}): string {
+  const code = PHASE_SLUG_CODE[opts.stage];
+  if (opts.stage === 'final' || opts.stage === 'third_place') {
+    return `wc2026-${code}`;
+  }
+  if (opts.stage === 'group') {
+    // Group stage: 48 matches; externalId is the compact stable disambiguator.
+    // Fallback to phaseOrdinal only if externalId is missing so the slug still
+    // renders (should never happen with a hydrated DB row).
+    const tail = opts.externalId ?? opts.phaseOrdinal;
+    return `wc2026-${code}-${tail}`;
+  }
+  // sf/qf are two- and four-phase; drop the dash for hand-typeable compactness.
+  if (opts.stage === 'sf' || opts.stage === 'qf') {
+    return `wc2026-${code}${opts.phaseOrdinal}`;
+  }
+  // r16 / r32: keep the dash for readability at the 16- and 32-match count.
+  return `wc2026-${code}-${opts.phaseOrdinal}`;
 }
