@@ -193,6 +193,11 @@ interface DbMatchSlim {
 const MAX_REASONABLE_SCORE = 50;
 const MAX_GOALS_PER_TICK = 10;
 const MAX_REASONABLE_MINUTE = 200;
+// Football referees typically allow at most ~15 minutes of added time even in
+// hostile edge cases. 30 is a generous ceiling that still filters out obvious
+// upstream corruption (e.g. accidental seconds-cast). Anything above is coerced
+// to null so the badge falls back to a plain minute display.
+const MAX_REASONABLE_INJURY_TIME = 30;
 
 const processMatch = async (dbMatch: DbMatchSlim, fd: FdMatch, now: number): Promise<void> => {
   const prev = lastSeen.get(dbMatch.id) ?? {
@@ -403,6 +408,31 @@ const processMatch = async (dbMatch: DbMatchSlim, fd: FdMatch, now: number): Pro
     awayScore: fdAway,
     minute: fdMinute,
   });
+
+  // ---------------------------------------------------------------------------
+  // Live minute pulse (Cup Final overlay). Publishes on every tick per
+  // in-window match so the SSE route can re-emit it as an enriched
+  // `match.pulse` frame. Bounds-check injuryTime the same way we bounds-check
+  // score and minute upstream (OWASP API10:2023).
+  // ---------------------------------------------------------------------------
+  const fdInjuryRaw = (fd as { injuryTime?: number | null }).injuryTime;
+  const fdInjury: number | null =
+    typeof fdInjuryRaw === 'number' &&
+    Number.isInteger(fdInjuryRaw) &&
+    fdInjuryRaw >= 0 &&
+    fdInjuryRaw <= MAX_REASONABLE_INJURY_TIME
+      ? fdInjuryRaw
+      : null;
+  try {
+    eventBus.publish('match.minute', {
+      matchId: dbMatch.id,
+      minute: fdMinute,
+      status: fdStatus,
+      injuryTime: fdInjury,
+    });
+  } catch (err) {
+    console.warn('[liveMatchPulseWorker] minute publish failed:', (err as Error)?.message);
+  }
 };
 
 // -----------------------------------------------------------------------------
