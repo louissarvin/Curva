@@ -25,6 +25,7 @@ const rooms = new Map<string, {
   expiresAt: Date;
   deletedAt: Date | null;
   createdAt: Date;
+  visibility: string;
 }>();
 
 const fakePrisma = {
@@ -40,8 +41,23 @@ const fakePrisma = {
       }
       return r;
     },
-    findMany: async () => Array.from(rooms.values()),
-    count: async () => rooms.size,
+    findMany: async (args?: { where?: Record<string, unknown> }) => {
+      const all = Array.from(rooms.values());
+      const w = args?.where || {};
+      return all.filter((r) => {
+        if (w.visibility && r.visibility !== w.visibility) return false;
+        return true;
+      });
+    },
+    count: async (args?: { where?: Record<string, unknown> }) => {
+      const w = args?.where || {};
+      let n = 0;
+      for (const r of rooms.values()) {
+        if (w.visibility && r.visibility !== w.visibility) continue;
+        n++;
+      }
+      return n;
+    },
     create: async (args: { data: Record<string, unknown> }) => {
       const slug = args.data.slug as string;
       if (rooms.has(slug)) {
@@ -64,6 +80,7 @@ const fakePrisma = {
         expiresAt: args.data.expiresAt as Date,
         deletedAt: null,
         createdAt: new Date(),
+        visibility: ((args.data.visibility as string | undefined) ?? 'private'),
       };
       rooms.set(slug, row);
       return row;
@@ -314,5 +331,118 @@ describe('DELETE /rooms/:slug', () => {
       payload: { challenge, signature: sig },
     });
     expect([401, 404]).toContain(replay.statusCode);
+  });
+});
+
+// TIER 4: Autopass spectator tier visibility.
+describe('Autopass visibility field', () => {
+  test('POST /rooms defaults visibility to private when unset', async () => {
+    rooms.delete('vis-default-1');
+    const res = await app.inject({
+      method: 'POST',
+      url: '/rooms',
+      payload: {
+        slug: 'vis-default-1',
+        matchId: fakeMatch.id,
+        hostHandle: 'host',
+        hostSmartAddress: smartAccountAddress,
+        hostOwnerAddress: ownerWallet.address,
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    const body = res.json() as { data: { room: { visibility: string } } };
+    expect(body.data.room.visibility).toBe('private');
+  });
+
+  test('POST /rooms accepts and persists visibility: public', async () => {
+    rooms.delete('vis-public-1');
+    const res = await app.inject({
+      method: 'POST',
+      url: '/rooms',
+      payload: {
+        slug: 'vis-public-1',
+        matchId: fakeMatch.id,
+        hostHandle: 'host',
+        hostSmartAddress: smartAccountAddress,
+        hostOwnerAddress: ownerWallet.address,
+        visibility: 'public',
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    const body = res.json() as { data: { room: { slug: string; visibility: string } } };
+    expect(body.data.room.visibility).toBe('public');
+    expect(rooms.get('vis-public-1')?.visibility).toBe('public');
+  });
+
+  test('POST /rooms rejects malformed visibility values', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/rooms',
+      payload: {
+        slug: 'vis-bad-1',
+        matchId: fakeMatch.id,
+        hostHandle: 'host',
+        hostSmartAddress: smartAccountAddress,
+        hostOwnerAddress: ownerWallet.address,
+        visibility: 'unlisted',
+      },
+    });
+    expect(res.statusCode).toBe(400);
+    const body = res.json() as { error: { code: string } };
+    expect(body.error.code).toBe('VALIDATION_ERROR');
+  });
+
+  test('GET /rooms?visibility=public only returns public rooms', async () => {
+    // Ensure both categories present.
+    rooms.delete('vis-pub-2');
+    rooms.delete('vis-priv-2');
+    await app.inject({
+      method: 'POST',
+      url: '/rooms',
+      payload: {
+        slug: 'vis-pub-2',
+        matchId: fakeMatch.id,
+        hostHandle: 'host',
+        hostSmartAddress: smartAccountAddress,
+        hostOwnerAddress: ownerWallet.address,
+        visibility: 'public',
+      },
+    });
+    await app.inject({
+      method: 'POST',
+      url: '/rooms',
+      payload: {
+        slug: 'vis-priv-2',
+        matchId: fakeMatch.id,
+        hostHandle: 'host',
+        hostSmartAddress: smartAccountAddress,
+        hostOwnerAddress: ownerWallet.address,
+        visibility: 'private',
+      },
+    });
+    // Bypass the activeOnly filter (the fake findMany ignores it, so the
+    // in-memory list contains every row; we only test the visibility filter).
+    const res = await app.inject({
+      method: 'GET',
+      url: '/rooms?visibility=public&activeOnly=false',
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as {
+      data: { rooms: Array<{ slug: string; visibility: string }> };
+    };
+    const slugs = body.data.rooms.map((r) => r.slug);
+    expect(slugs).toContain('vis-pub-2');
+    expect(slugs).not.toContain('vis-priv-2');
+    for (const r of body.data.rooms) {
+      expect(r.visibility).toBe('public');
+    }
+  });
+
+  test('GET /rooms?visibility=invalid returns 400', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: '/rooms?visibility=unlisted',
+    });
+    expect(res.statusCode).toBe(400);
   });
 });
