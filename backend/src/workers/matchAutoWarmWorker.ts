@@ -16,13 +16,32 @@ import { prismaQuery } from '../lib/prisma.ts';
 import { seederSupervisor } from '../lib/pears/seeder.ts';
 import { eventBus } from '../lib/activity/eventBus.ts';
 import {
+  slugForMatch,
+  type CurvaMatchStage,
+} from '../lib/integrations/footballData.ts';
+import {
   AUTO_WARM_HOST_OWNER_ADDRESS,
   AUTO_WARM_HOST_SMART_ADDRESS,
   MATCH_AUTO_WARM_CRON,
   MATCH_AUTO_WARM_LEAD_MINUTES,
   ROOM_MATCH_DURATION_HOURS,
   ROOM_POST_MATCH_BUFFER_HOURS,
+  SEEDER_MAX_ROOMS,
 } from '../config/main-config.ts';
+
+// F2 knockout warm horizon. The 24h window covers the full WC 2026 knockout
+// bracket ordinal counters for a single tick without ever calling the
+// football-data.org API (worker reads only DB rows). Group-stage matches keep
+// the tighter MATCH_AUTO_WARM_LEAD_MINUTES horizon to protect the 10 req/min
+// free-tier budget elsewhere.
+const KNOCKOUT_WARM_HORIZON_MS = 24 * 3_600_000;
+const KNOCKOUT_STAGES: readonly CurvaMatchStage[] = [
+  'r16',
+  'qf',
+  'sf',
+  'third_place',
+  'final',
+];
 
 let isRunning = false;
 
@@ -67,19 +86,90 @@ export const runAutoWarmTick = async (): Promise<void> => {
     const nowDate = new Date(now);
     const matchDurationMs =
       (ROOM_MATCH_DURATION_HOURS + ROOM_POST_MATCH_BUFFER_HOURS) * 3_600_000;
-    const warmWindowEnd = new Date(now + MATCH_AUTO_WARM_LEAD_MINUTES * 60_000);
+    const shortWarmEnd = new Date(now + MATCH_AUTO_WARM_LEAD_MINUTES * 60_000);
+    const longWarmEnd = new Date(now + KNOCKOUT_WARM_HORIZON_MS);
 
-    // ----- Warm pass: create or reactivate auto-rooms for upcoming matches.
-    const upcoming = await prismaQuery.match.findMany({
-      where: {
-        status: 'scheduled',
-        kickoffUtc: { gt: nowDate, lt: warmWindowEnd },
-      },
-      select: { id: true, kickoffUtc: true },
-    });
+    // ----- Warm pass -----
+    //
+    // Two DB reads (no football-data.org calls):
+    //   1. Group-stage matches inside the tight lead window (legacy path).
+    //   2. Knockout matches inside the 24h window (F2 addition).
+    //
+    // Ordinal counter is derived from kickoffUtc ordering within each stage,
+    // so `wc2026-sf1` and `wc2026-sf2` are stable across ticks (sf1 kicks off
+    // Jul 14, sf2 kicks off Jul 15). We compute ordinals per tick from the
+    // knockout query result rather than storing them, so the slug is a pure
+    // function of stage + externalId + kickoff order.
+    const [groupUpcoming, knockoutUpcoming] = await Promise.all([
+      prismaQuery.match.findMany({
+        where: {
+          status: 'scheduled',
+          stage: 'group',
+          kickoffUtc: { gt: nowDate, lt: shortWarmEnd },
+        },
+        select: { id: true, kickoffUtc: true, stage: true, externalId: true },
+        orderBy: { kickoffUtc: 'asc' },
+      }),
+      prismaQuery.match.findMany({
+        where: {
+          status: 'scheduled',
+          stage: { in: ['r16', 'qf', 'sf', 'third_place', 'final'] },
+          kickoffUtc: { gt: nowDate, lt: longWarmEnd },
+        },
+        select: { id: true, kickoffUtc: true, stage: true, externalId: true },
+        orderBy: [{ stage: 'asc' }, { kickoffUtc: 'asc' }],
+      }),
+    ]);
 
-    for (const m of upcoming) {
-      const slug = `auto-${m.id}`;
+    // Assign per-stage ordinals to knockout matches based on kickoff order.
+    const ordinalByStage = new Map<string, number>();
+    const toWarm: Array<{
+      id: string;
+      slug: string;
+      kickoffUtc: Date;
+    }> = [];
+    for (const m of groupUpcoming) {
+      toWarm.push({
+        id: m.id,
+        kickoffUtc: m.kickoffUtc,
+        slug: slugForMatch({
+          stage: 'group',
+          phaseOrdinal: 0,
+          externalId: m.externalId,
+        }),
+      });
+    }
+    for (const m of knockoutUpcoming) {
+      const stage = m.stage as CurvaMatchStage;
+      // Skip stages we do not recognise as knockout (defence in depth against
+      // schema drift). The DB filter above should already prevent this.
+      if (!KNOCKOUT_STAGES.includes(stage)) continue;
+      const nextOrdinal = (ordinalByStage.get(stage) ?? 0) + 1;
+      ordinalByStage.set(stage, nextOrdinal);
+      toWarm.push({
+        id: m.id,
+        kickoffUtc: m.kickoffUtc,
+        slug: slugForMatch({
+          stage,
+          phaseOrdinal: nextOrdinal,
+          externalId: m.externalId,
+        }),
+      });
+    }
+
+    // Cap total warmed rooms per tick by SEEDER_MAX_ROOMS. The seeder itself
+    // enforces its own cap; ours is the upstream guard so the DB never grows
+    // past what the seeder pool can serve.
+    let warmedThisTick = 0;
+
+    for (const m of toWarm) {
+      if (warmedThisTick >= SEEDER_MAX_ROOMS) {
+        console.log(
+          `[matchAutoWarmWorker] SEEDER_MAX_ROOMS=${SEEDER_MAX_ROOMS} reached; skipping ${toWarm.length - warmedThisTick} rooms`
+        );
+        break;
+      }
+      const slug = m.slug;
 
       // Idempotency + slug-squat defense in depth: skip if an active auto-room
       // already exists. If a row exists with the auto- slug but is NOT owned by
@@ -113,7 +203,7 @@ export const runAutoWarmTick = async (): Promise<void> => {
             // We assert AUTO_WARM_HOST_*_ADDRESS are set in isEnabled() above.
             hostSmartAddress: AUTO_WARM_HOST_SMART_ADDRESS as string,
             hostOwnerAddress: AUTO_WARM_HOST_OWNER_ADDRESS as string,
-            pearLink: `pear://curva?room=${slug}`,
+            pearLink: `pear://curva/room/${slug}?warm=true`,
             expiresAt,
             isAutoWarmed: true,
           },
@@ -126,6 +216,8 @@ export const runAutoWarmTick = async (): Promise<void> => {
         );
         continue;
       }
+
+      warmedThisTick += 1;
 
       // Best-effort seeder spawn. If the supervisor refuses (cap, disabled)
       // we still keep the row — the seederReconcileWorker will retry on its
