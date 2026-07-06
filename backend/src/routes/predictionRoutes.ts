@@ -79,7 +79,11 @@ const prismaQuery = _prismaQuery as unknown as typeof _prismaQuery & {
   };
 };
 import { validateRequiredFields } from '../utils/validationUtils.ts';
-import { handleError, handleServerError } from '../utils/errorHandler.ts';
+import {
+  handleError,
+  handleServerError,
+  handleUnauthorizedError,
+} from '../utils/errorHandler.ts';
 import {
   isValidEvmAddress,
   isValidSlug,
@@ -112,6 +116,7 @@ import {
 } from '../lib/evm/predictionPool.ts';
 import {
   CURVA_PREDICTIONS_ENABLED,
+  IS_PROD,
   PREDICTIONS_AUTHORIZATION_BUFFER_MIN,
   PREDICTIONS_CHAIN_ID,
   PREDICTIONS_ENTRY_RATE_LIMIT_MAX,
@@ -801,6 +806,181 @@ export const predictionRoutes: FastifyPluginCallback = (
         } catch (err) {
           return handleServerError(reply, err as Error);
         }
+      } catch (err) {
+        return handleServerError(reply, err as Error);
+      }
+    }
+  );
+
+  // ---------------------------------------------------------------------------
+  // POST /predictions/force-settle/:poolId (D2 debug endpoint)
+  //
+  // Body: { score: [homeScore, awayScore] }
+  // Auth: bearer token via CURVA_DEBUG_BEARER env var.
+  //
+  // Runs the settlement pipeline synchronously with a caller-provided score.
+  // Returns the settlement receipt including winner addresses + tx hashes.
+  //
+  // Gate contract (defence in depth):
+  //   1. When CURVA_DEBUG_BEARER is unset AND NODE_ENV=production, the route
+  //      returns 404 (hide-existence, matches the F11 facilitator pattern).
+  //   2. When CURVA_DEBUG_BEARER is unset AND NODE_ENV != production, the
+  //      route returns 503 FEATURE_DISABLED so a dev sees a helpful error
+  //      instead of a mysterious 404.
+  //   3. When CURVA_DEBUG_BEARER is set, the request MUST send
+  //      `Authorization: Bearer <token>` verbatim.
+  //   4. The route ALWAYS refuses when CURVA_PREDICTIONS_ENABLED is false.
+  // ---------------------------------------------------------------------------
+  app.post(
+    '/force-settle/:poolId',
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      try {
+        if (!CURVA_PREDICTIONS_ENABLED) return sendFeatureDisabled(reply);
+
+        const debugBearer = process.env.CURVA_DEBUG_BEARER;
+        if (!debugBearer || debugBearer.length === 0) {
+          // Hide-existence in prod; helpful signal in dev.
+          if (IS_PROD) {
+            return reply.code(404).send({
+              success: false,
+              error: { code: 'NOT_FOUND', message: 'Not Found' },
+              data: null,
+            });
+          }
+          return handleError(
+            reply,
+            503,
+            'Debug endpoint disabled: set CURVA_DEBUG_BEARER to enable',
+            'DEBUG_DISABLED'
+          );
+        }
+
+        // Constant-time-ish bearer check. String equality is fine at this
+        // token length (128 bit) because the attacker cannot mount a
+        // timing oracle over the network to distinguish 32-byte prefixes.
+        // If we ever move to session tokens, switch to crypto.timingSafeEqual.
+        const authHeader = request.headers.authorization ?? '';
+        const bearer = authHeader.replace(/^Bearer\s+/i, '').trim();
+        if (!bearer || bearer !== debugBearer) {
+          return handleUnauthorizedError(reply, 'Invalid debug bearer');
+        }
+
+        const { poolId } = request.params as { poolId: string };
+        if (!isValidCuid(poolId)) {
+          return handleError(reply, 400, 'poolId must be a valid CUID', 'VALIDATION_ERROR');
+        }
+
+        const body = (request.body || {}) as { score?: unknown };
+        const score = body.score;
+        if (!Array.isArray(score) || score.length !== 2) {
+          return handleError(
+            reply,
+            400,
+            'score must be a tuple [homeScore, awayScore]',
+            'VALIDATION_ERROR'
+          );
+        }
+        const homeGoals = Number(score[0]);
+        const awayGoals = Number(score[1]);
+        if (!isValidGoals(homeGoals) || !isValidGoals(awayGoals)) {
+          return handleError(
+            reply,
+            400,
+            'score entries must be integers 0..30',
+            'VALIDATION_ERROR'
+          );
+        }
+        const winner = deriveWinnerSide(homeGoals, awayGoals);
+
+        // Move the pool to `locked` with the forced result so the settlement
+        // worker's next tick picks it up. We invoke the worker's tick
+        // synchronously via its exported test entrypoint.
+        const pool = await prismaQuery.predictionPool.findUnique({ where: { id: poolId } });
+        if (!pool) {
+          return handleError(reply, 404, 'Pool not found', 'POOL_NOT_FOUND');
+        }
+        if (pool.status === 'settled' || pool.status === 'refunded') {
+          return handleError(
+            reply,
+            409,
+            `Pool is already ${pool.status}`,
+            'POOL_ALREADY_FINAL'
+          );
+        }
+
+        await prismaQuery.predictionPool.update({
+          where: { id: poolId },
+          data: {
+            status: 'locked',
+            resultWinner: winner,
+            resultHomeGoals: homeGoals,
+            resultAwayGoals: awayGoals,
+          },
+        });
+
+        // Run the settlement pipeline once, in-process. The worker export is
+        // idempotent under isRunning guard. A concurrent tick may lose the
+        // race here, in which case we still return the current pool state
+        // (the tick that wins updates the DB rows we then read below).
+        const settlementWorker = await import(
+          '../workers/predictionSettlementWorker.ts'
+        );
+        await settlementWorker.__runOnceForTest();
+
+        // Rehydrate the pool + predictions so the receipt carries the real
+        // per-winner payout tx hashes.
+        const settled = await prismaQuery.predictionPool.findUnique({
+          where: { id: poolId },
+          include: {
+            predictions: {
+              select: {
+                id: true,
+                peerAddress: true,
+                peerHandle: true,
+                winner: true,
+                homeGoals: true,
+                awayGoals: true,
+                stakeAtomic: true,
+                txHash: true,
+                status: true,
+                payoutTxHash: true,
+                payoutAmountAtomic: true,
+                createdAt: true,
+              },
+            },
+          },
+        });
+        if (!settled) {
+          return handleError(
+            reply,
+            500,
+            'Pool disappeared during force-settle',
+            'POOL_MISSING_POST_SETTLE'
+          );
+        }
+
+        const winners = (settled.predictions ?? [])
+          .filter((p) => p.status === 'won')
+          .map((p) => ({
+            predictionId: p.id,
+            peerAddress: p.peerAddress,
+            payoutTxHash: p.payoutTxHash,
+            payoutAmountAtomic: p.payoutAmountAtomic,
+          }));
+
+        return reply.code(200).send({
+          success: true,
+          error: null,
+          data: {
+            poolId: settled.id,
+            status: settled.status,
+            resultWinner: settled.resultWinner,
+            resultHomeGoals: settled.resultHomeGoals,
+            resultAwayGoals: settled.resultAwayGoals,
+            settledAt: settled.settledAt ? settled.settledAt.toISOString() : null,
+            winners,
+          },
+        });
       } catch (err) {
         return handleServerError(reply, err as Error);
       }
