@@ -111,6 +111,23 @@ export interface MatchFulltimePayload {
   score: { home: number; away: number };
 }
 
+/**
+ * Cup Final: live match minute pulse. Published by liveMatchPulseWorker once
+ * per tick per in-window match so the SSE route can re-emit it as an enriched
+ * `match.pulse` heartbeat. The renderer's floating minute badge consumes this
+ * to display the on-field clock ("34'", "45+3'", "HT", "FT", etc.). All values
+ * are bounds-checked at the publisher, never trusted verbatim from upstream.
+ */
+export interface MatchMinutePayload {
+  matchId: string;
+  // Null when the match has not started or the upstream feed omits minute.
+  minute: number | null;
+  // Football-data.org v4 lookup_tables status enum. See docs verified 2026-07-06.
+  status: string;
+  // Added time at the current half boundary. Null outside stoppage windows.
+  injuryTime: number | null;
+}
+
 // =============================================================================
 // Wave 4 / F11 EIP-3009 facilitator payloads. Published by the relay route
 // (submitted) and the confirmation worker (confirmed / failed). All addresses
@@ -256,6 +273,13 @@ export type EventBusEvent =
     }
   | {
       id: string;
+      type: 'match.minute';
+      topic: 'matches';
+      ts: number;
+      payload: MatchMinutePayload;
+    }
+  | {
+      id: string;
       type: 'facilitator.submitted';
       topic: 'tips';
       ts: number;
@@ -325,6 +349,7 @@ const TYPE_TO_TOPIC: Record<EventType, EventTopic> = {
   'match.score_changed': 'matches',
   'match.halftime': 'matches',
   'match.fulltime': 'matches',
+  'match.minute': 'matches',
   'facilitator.submitted': 'tips',
   'facilitator.confirmed': 'tips',
   'facilitator.failed': 'tips',
