@@ -52,6 +52,17 @@ const TEAM_SELECT = {
   flagUrl: true,
 } as const;
 
+// TIER 4: Room.visibility for Autopass spectator tier. Two values only.
+// Pre-migration the column may not yet exist on the DB; the view coerces
+// undefined to 'private' so old rows still render sanely.
+type RoomVisibility = 'public' | 'private';
+
+const normalizeVisibility = (v: unknown): RoomVisibility => {
+  if (typeof v !== 'string') return 'private';
+  const lower = v.toLowerCase();
+  return lower === 'public' ? 'public' : 'private';
+};
+
 const buildRoomView = (
   r: {
     id: string;
@@ -63,6 +74,7 @@ const buildRoomView = (
     pearLink: string | null;
     expiresAt: Date;
     createdAt: Date;
+    visibility?: string | null;
     match?: {
       id: string;
       kickoffUtc: Date;
@@ -84,6 +96,7 @@ const buildRoomView = (
   expiresAt: r.expiresAt.toISOString(),
   createdAt: r.createdAt.toISOString(),
   peerCount: peerCount ?? 0,
+  visibility: normalizeVisibility(r.visibility),
   match: r.match
     ? {
         id: r.match.id,
@@ -124,6 +137,36 @@ export const roomRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts, d
         const hostOwnerAddressRaw = String(body.hostOwnerAddress);
         const hostOwnerAddress = normalizeAddress(hostOwnerAddressRaw);
         const pearLinkRaw = body.pearLink ? String(body.pearLink) : null;
+
+        // TIER 4: optional visibility field, defaults to 'private' for backward
+        // compat. Anything other than exact 'public' collapses to 'private' so
+        // typos never accidentally publish a room to the STADIUM directory.
+        const visibilityInput = body.visibility;
+        if (
+          visibilityInput !== undefined &&
+          visibilityInput !== null &&
+          typeof visibilityInput !== 'string'
+        ) {
+          return handleError(
+            reply,
+            400,
+            "visibility must be 'public' or 'private'",
+            'VALIDATION_ERROR'
+          );
+        }
+        if (
+          typeof visibilityInput === 'string' &&
+          visibilityInput.toLowerCase() !== 'public' &&
+          visibilityInput.toLowerCase() !== 'private'
+        ) {
+          return handleError(
+            reply,
+            400,
+            "visibility must be 'public' or 'private'",
+            'VALIDATION_ERROR'
+          );
+        }
+        const visibility: RoomVisibility = normalizeVisibility(visibilityInput);
 
         if (!isValidSlug(slug)) {
           return handleError(
@@ -212,7 +255,8 @@ export const roomRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts, d
               hostOwnerAddress,
               pearLink: pearLinkRaw,
               expiresAt,
-            },
+              visibility,
+            } as unknown as Parameters<typeof prismaQuery.room.create>[0]['data'],
           });
         } catch (err) {
           // Prisma unique-constraint failure => 409
@@ -278,6 +322,23 @@ export const roomRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts, d
       const limit = parseBoundedInt(q.limit, 1, 100, 50);
       const offset = parseBoundedInt(q.offset, 0, 100000, 0);
 
+      // TIER 4: optional visibility filter for the STADIUM directory. Absence
+      // preserves existing behavior (return all visibilities).
+      const visibilityRaw =
+        typeof q.visibility === 'string' ? q.visibility.toLowerCase() : undefined;
+      if (
+        visibilityRaw !== undefined &&
+        visibilityRaw !== 'public' &&
+        visibilityRaw !== 'private'
+      ) {
+        return handleError(
+          reply,
+          400,
+          "visibility must be 'public' or 'private'",
+          'VALIDATION_ERROR'
+        );
+      }
+
       if (matchId !== undefined && !isValidCuid(matchId)) {
         return handleError(reply, 400, 'Invalid matchId', 'VALIDATION_ERROR');
       }
@@ -292,6 +353,7 @@ export const roomRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts, d
       }
       if (matchId) where.matchId = matchId;
       if (stage) where.match = { stage };
+      if (visibilityRaw) where.visibility = visibilityRaw;
 
       const [rooms, total] = await Promise.all([
         prismaQuery.room.findMany({
