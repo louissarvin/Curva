@@ -36,7 +36,7 @@
       "bootstrapBackfillBlocks": 1000,
       "maxBlockSpan": 2000,
       "explorerBase": "https://testnet.plasmascan.to",
-      "notes": "Plasma testnet chainId verified at docs.plasma.org/docs/guides/network-configuration/testnet-details.md (9746, NOT 9745). USDT0 testnet contract is in development as of June 2026; set usdtAddress + flip enabled=true via CHAIN_9746_USDT and CHAIN_9746_ENABLED when published. ERC-4337 on Plasma is provided by Gelato / Thirdweb / ZeroDev (NOT Candide); tipping flow defaults to Sepolia."
+      "notes": "Plasma testnet USDT0 contract in development as of 2026-07-06 per docs.plasma.org. Flip enabled to true and set usdt0Address when the contract publishes. Chain id verified 9746 (NOT 9745) at docs.plasma.org/docs/guides/network-configuration/testnet-details.md. Use env CHAIN_9746_USDT and CHAIN_9746_ENABLED to activate. ERC-4337 on Plasma is provided by Gelato / Thirdweb / ZeroDev (NOT Candide); tipping flow defaults to Sepolia."
     }
   ]
 }
