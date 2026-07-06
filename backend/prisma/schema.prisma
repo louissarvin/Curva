@@ -152,6 +152,17 @@ model Room {
   // SECURITY_AUDIT.md W2-HIGH-03. Additive nullable-default-safe.
   isDemo           Boolean  @default(false) @map("is_demo")
 
+  // TIER 4: Add Room.visibility for Autopass spectator tier (memo-only,
+  // executed by the user via `bun run db:push`). This is the exact diff the
+  // spec at memory/impl_autopass_reader.md pins:
+  //
+  //   visibility  String  @default("private")  // 'private' | 'public'
+  //   @@index([visibility, deletedAt])
+  //
+  // Behavior when the column is not yet migrated: the route handlers coerce
+  // undefined to 'private' on read and skip the field on write, preserving
+  // full backward compatibility with the pre-migration table.
+
   match            Match    @relation(fields: [matchId], references: [id], onDelete: Cascade)
 
   createdAt        DateTime @default(now()) @map("created_at")
