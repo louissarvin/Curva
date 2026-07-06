@@ -42,9 +42,14 @@ interface PhrasebookPhrase {
   translation: string;
 }
 
+// Wave 15: goal_templates keyed by locale; used by the Supertonic TTS
+// announcer to interpolate {team}/{scorer}/{score}/{minute} at synthesis time.
+type PhrasebookGoalTemplates = Record<string, string>;
+
 interface PhrasebookData {
   quotes: PhrasebookQuote[];
   italian_phrases: PhrasebookPhrase[];
+  goal_templates?: PhrasebookGoalTemplates;
 }
 
 // Read once at boot and freeze. If the file is missing or malformed we log and
@@ -56,10 +61,11 @@ const loadPhrasebook = (): Readonly<PhrasebookData> => {
     return Object.freeze({
       quotes: Object.freeze([...(parsed.quotes ?? [])]) as PhrasebookQuote[],
       italian_phrases: Object.freeze([...(parsed.italian_phrases ?? [])]) as PhrasebookPhrase[],
+      goal_templates: Object.freeze({ ...(parsed.goal_templates ?? {}) }) as PhrasebookGoalTemplates,
     });
   } catch (err) {
     console.warn('[Phrasebook] failed to load src/data/phrasebook.json:', (err as Error)?.message);
-    return Object.freeze({ quotes: [], italian_phrases: [] });
+    return Object.freeze({ quotes: [], italian_phrases: [], goal_templates: {} });
   }
 };
 
