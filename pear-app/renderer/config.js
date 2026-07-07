@@ -21,3 +21,11 @@ export const THEME = {
 }
 
 // Renderer never reads env vars directly. Everything comes via bridge.bootConfig().
+
+// Deep-link scheme constants. `pear://` is the sidecar-native scheme routed via
+// pear.links + pear.routes in package.json (see docs.pears.com/reference/pear/configuration/).
+// `curva://` is the Electron custom scheme kept as an OS-handler fallback for
+// the "already running" case where the sidecar cannot re-navigate an open instance.
+export const PEAR_LINK_SCHEME = 'pear://'
+export const CURVA_LINK_SCHEME = 'curva://'
+export const ROOM_PATH_PREFIX = '/room/'

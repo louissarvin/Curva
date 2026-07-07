@@ -4,6 +4,20 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Curva</title>
+    <!--
+      Content Security Policy. Strict by design: no unsafe-inline for scripts,
+      no wildcards on script-src, object-src disabled. Loopback allowances for
+      hypercore-blob-server (127.0.0.1:49833 by default, plus 127.0.0.1:* to
+      cover anyPort:true fallback when the default port is taken). connect-src
+      lets the renderer talk to the local backend (localhost:3700). Docs:
+        https://www.electronjs.org/docs/latest/tutorial/security#5-do-not-disable-websecurity
+        https://cheatsheetseries.owasp.org/cheatsheets/Content_Security_Policy_Cheat_Sheet.html
+        https://github.com/holepunchto/hypercore-blob-server
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob: http://127.0.0.1:49833 http://127.0.0.1:*; media-src 'self' blob: http://127.0.0.1:49833 http://127.0.0.1:*; connect-src 'self' http://localhost:3700 http://127.0.0.1:3700 https://fonts.googleapis.com https://fonts.gstatic.com; object-src 'none'"
+    />
     <!-- Urbanist (body) + Playfair Display (headings) from Google Fonts.
          preconnect is safe here: we only contact fonts.googleapis.com and
          fonts.gstatic.com. No user-supplied data is sent.
@@ -21,12 +35,9 @@
     <!-- Phase 4 boot splash: full-viewport, hides once the Bare worker emits `ready`. -->
     <div class="curva-boot" data-boot>
       <div class="curva-boot__mark">
-        <!-- Stylized wine-red "C" for Curva. Simple inline SVG so we don't ship
-             an image asset just for the splash. -->
-        <svg viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-          <circle cx="60" cy="60" r="52" fill="none" stroke="#8b0e2b" stroke-width="10" stroke-dasharray="220 60" stroke-linecap="round" transform="rotate(-90 60 60)" />
-          <text x="60" y="76" text-anchor="middle" fill="#e6e6e6" font-family="ui-monospace, Menlo, monospace" font-size="52" font-weight="700">C</text>
-        </svg>
+        <!-- Curva brand mark. Ships as a self-contained SVG next to index.html so
+             the splash renders even before the Bare worker starts. -->
+        <img class="curva-boot__logo" src="./logo-index.svg" alt="Curva" />
       </div>
       <div class="curva-boot__title">CURVA</div>
       <div class="curva-boot__tag">watch the world cup with friends</div>
@@ -42,8 +53,11 @@
       <main class="curva-app">
         <header class="curva-app__topbar">
           <div class="curva-app__brand">
-            <span class="curva-app__brand-mark">CURVA</span>
-            <span class="curva-app__brand-tag">watch the world cup with friends</span>
+            <img class="curva-app__brand-logo" src="./logo-index.svg" alt="Curva" />
+            <div class="curva-app__brand-text">
+              <span class="curva-app__brand-mark">CURVA</span>
+              <span class="curva-app__brand-tag">watch the world cup with friends</span>
+            </div>
           </div>
           <div class="curva-app__topbar-meta">
             <span class="curva-app__topbar-item" data-topbar="dht"></span>
