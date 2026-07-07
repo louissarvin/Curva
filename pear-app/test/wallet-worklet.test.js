@@ -306,9 +306,16 @@ test('createWalletAdapter.init succeeds with stub deps + returns addresses', asy
   t.is(constructorArgs.length, 1, 'WalletFactory constructor called once')
   t.is(constructorArgs[0].cfg.chainId, 11155111)
   t.is(constructorArgs[0].cfg.paymasterToken.address, SEPOLIA.usdtAddress)
-  // Fix Wave B / T2: onChainIdentifier is threaded into the factory options
-  // so any WDK-relayed UserOperation carries the "curva" project marker.
-  t.is(constructorArgs[0].cfg.onChainIdentifier, 'curva', 'onChainIdentifier passed to WalletFactory')
+  // C3.a: onChainIdentifier is passed as an OBJECT (not a string) so the
+  // platform enum can be set correctly. `platform` must be one of the closed
+  // enum values: 'Web' | 'Mobile' | 'Safe App' | 'Widget'. We use 'Widget' for
+  // the Pear runtime and stash the Pear identity in `tool`.
+  const oci = constructorArgs[0].cfg.onChainIdentifier
+  t.is(typeof oci, 'object', 'onChainIdentifier is object form')
+  t.is(oci.project, 'curva', 'project = curva')
+  t.is(oci.platform, 'Widget', "platform = 'Widget' (NOT 'Pear-runtime' — enum closed)")
+  t.is(oci.tool, 'curva-wallet', 'tool = curva-wallet')
+  t.is(oci.toolVersion, '0.1.0', 'toolVersion = 0.1.0')
 
   // signEip3009 should return a v/r/s tuple whose `from` matches ownerAddress.
   const sig = await w.signEip3009({
