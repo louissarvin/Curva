@@ -162,3 +162,33 @@ web/curvaWebTask.md
 PRESENTER_CHEAT_SHEET.md
 FALLBACK_VIDEO_SHOTLIST.md
 pitch-assets/
+
+# =============================================================================
+# RUNTIME ARTIFACTS
+# =============================================================================
+.blind-peer-storage/
+/tmp/curva-peer-*
+
+# =============================================================================
+# CONTRACTS BUILD
+# =============================================================================
+contracts/cache/
+contracts/foundry.lock
+contracts/out/
+contracts/CurvaUSDT.flat.sol
+
+# =============================================================================
+# OPERATIONAL DOCS (private prep material, not for submission)
+# =============================================================================
+NEXT_STEPS.md
+DEMO_VIDEO_SCRIPT.md
+DEMO_SCRIPT.md
+CROSS_MACHINE_TEST.md
+CLAWHUB_SUBMISSION.md
+PITCHDECK.md
+CURVA_TECHNICAL_SPEC.md
+99_WINNING_PICK.md
+00_OVERVIEW.md
+10_WDK_IDEAS.md
+11_QVAC_IDEAS.md
+12_PEARS_IDEAS.md
