@@ -2,7 +2,7 @@
   "name": "curva",
   "productName": "Curva",
   "version": "0.1.0",
-  "upgrade": "pear://<CURVA_APP_KEY>",
+  "upgrade": "pear://hcg8oftrk7hps1z4x9pprf4jhk7mitohjort6csfpjwjjo3ynomy",
   "description": "Watch the World Cup with friends, peer-to-peer.",
   "license": "MIT",
   "author": "",
@@ -28,7 +28,7 @@
     ],
     "assets": {
       "branding": {
-        "link": "pear://REPLACE_WITH_VERSIONED_LINK_AFTER_PEAR_STAGE",
+        "link": "pear://0.22823.hcg8oftrk7hps1z4x9pprf4jhk7mitohjort6csfpjwjjo3ynomy",
         "name": "Curva branding pack (Curva Nord Jakarta and Curva Sud Torino crests, WC26 team crests)"
       }
     }

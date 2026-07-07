@@ -1031,8 +1031,18 @@ contextBridge.exposeInMainWorld('curva', {
   // by the timeline on every step boundary. Renderer uses this to drive the
   // floating "elapsed / step of totalSteps" label.
   onDemoTimelineTick(cb) { return onEvent('demo:tick', cb) },
-  onDemoTimelineStatus(cb) { return onEvent('demo:status', cb) }
+  onDemoTimelineStatus(cb) { return onEvent('demo:status', cb) },
   // -- end Demo automation (Tier polish) ---
+
+  // Feature 1 (WC reel on Hyperdrive): emitted once per room open when the
+  // host's (or this peer's) blob-server URL is ready. Payload: { url, driveKey, drivePath }.
+  // The renderer's VideoPlayer swaps src from the local file to this URL.
+  // textContent/setAttribute only — URL is from a local loopback server.
+  onWcReelLink(cb) { return onEvent('wc-reel:link', cb) },
+
+  // Feature 3 (HUD overlay): emitted on room open + on every addWriter.
+  // Payload: { writerCount } (total Autobase writer slots; divide by 2 for peer count).
+  onWritersUpdate(cb) { return onEvent('room:writers-update', cb) }
 })
 
 // Allowlist for openExternal. Enforced on BOTH sides — the renderer preload

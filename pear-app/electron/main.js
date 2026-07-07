@@ -178,9 +178,9 @@ function parseDemoFlag(cliValue, envValue) {
   if (raw === undefined || raw === null || raw === '') return null
   const n = Number(raw)
   if (!Number.isInteger(n) || n < 2) return null
-  // Hard cap at 4 today. Bumping this without also expanding label lists
-  // would push windows off-screen on 1080p displays.
-  if (n !== 4) return null
+  // Supports n=2 (split screen) or n=4 (2x2 grid). Higher counts would push
+  // windows off-screen on 1080p displays; block them.
+  if (n !== 2 && n !== 4) return null
   return n
 }
 
@@ -196,11 +196,33 @@ ipcMain.on('pkg', (evt) => {
 // Renderer asks for the boot config (room slug, host flag, backend URL).
 // Never expose secrets or filesystem paths here - this crosses the contextBridge.
 ipcMain.on('curva:boot-config', (evt) => {
+  // Renderer feature flags. Anything the UI needs to gate on at boot time
+  // must be forwarded from process.env here; the sandboxed renderer has no
+  // access to process.env directly. Never leak secrets — only booleans and
+  // low-cardinality identifiers.
   evt.returnValue = {
     room: roomSlug,
     isHost,
     backend: backendUrl,
-    version
+    version,
+    // Demo automation button (top-left floating "Run demo" control). Gated
+    // by CURVA_DEMO_AUTOMATION_ENABLED so production builds ship without it.
+    // The 4-peer demo runner (scripts/demo-4peer.js) sets this to 'true'.
+    CURVA_DEMO_AUTOMATION_ENABLED: String(process.env.CURVA_DEMO_AUTOMATION_ENABLED).toLowerCase() === 'true',
+    // Master demo flag. Renderer components (IdentityWizard, boot splash
+    // timeout, other opt-in overrides) read this to short-circuit prompts
+    // that would otherwise block the 3-minute pitch. Never enable in prod.
+    CURVA_DEMO_MODE: String(process.env.CURVA_DEMO_MODE).toLowerCase() === 'true',
+    // Optional overlay flags that some components read at mount time.
+    CURVA_TACTICAL_ENABLED: String(process.env.CURVA_TACTICAL_ENABLED).toLowerCase() === 'true',
+    CURVA_LIVE_MINUTE_OVERLAY_ENABLED: String(process.env.CURVA_LIVE_MINUTE_OVERLAY_ENABLED).toLowerCase() !== 'false',
+    // Video source override. Renderer resolves this against '../assets/*.mp4'
+    // relative paths OR full https/file URLs. Falls back to sample-clip.mp4.
+    CURVA_DEMO_VIDEO_PATH: process.env.CURVA_DEMO_VIDEO_PATH || null,
+    // Feature 3 (HUD overlay): floating live-primitives status panel. Off by
+    // default. Enable via CURVA_DEMO_HUD_ENABLED=true (demo runner) or ?hud=1
+    // in the renderer URL for ad-hoc testing.
+    CURVA_DEMO_HUD_ENABLED: String(process.env.CURVA_DEMO_HUD_ENABLED).toLowerCase() === 'true'
   }
 })
 
@@ -417,7 +439,16 @@ async function createWindow() {
 // window fits within the OS-usable region (accounts for macOS menu bar +
 // dock). Windows overlap the app icon by default on macOS; we don't fight
 // that here.
-function demoGridRects(workAreaSize) {
+function demoGridRects(workAreaSize, count) {
+  // For n=2: side-by-side full-height. For n=4: 2x2 grid.
+  if (count === 2) {
+    const w = Math.floor(workAreaSize.width / 2)
+    const h = workAreaSize.height
+    return [
+      { x: 0, y: 0, width: w, height: h },
+      { x: w, y: 0, width: w, height: h }
+    ]
+  }
   const w = Math.floor(workAreaSize.width / 2)
   const h = Math.floor(workAreaSize.height / 2)
   return [
@@ -467,7 +498,7 @@ async function bootstrapDemoMode() {
   const { screen } = require('electron')
   const fs = require('node:fs')
   const primary = screen.getPrimaryDisplay()
-  const rects = demoGridRects(primary.workAreaSize)
+  const rects = demoGridRects(primary.workAreaSize, demoCount)
 
   const baseDir = path.resolve(process.cwd(), '.demo-store')
   if (demoClean) {
@@ -475,7 +506,7 @@ async function bootstrapDemoMode() {
   }
   fs.mkdirSync(baseDir, { recursive: true })
 
-  console.log('[Curva] demo mode enabled: 4 peers, 2x2 grid', primary.workAreaSize)
+  console.log('[Curva] demo mode enabled: ' + demoCount + ' peers', primary.workAreaSize)
 
   // Sequential launch so we don't blast four Electron windows into a race
   // (each triggers its own Bare worker spawn under the hood; sequential
