@@ -214,13 +214,14 @@ web/
 ### Install
 
 ```bash
+cd web
 bun install
 ```
 
 ### Develop
 
 ```bash
-bun dev
+bun run dev
 ```
 
 Dev server runs on **port 3200**: <http://localhost:3200>.
@@ -231,15 +232,15 @@ in `src/routes/`.
 ### Build
 
 ```bash
-bun build
+bun run build
 ```
 
-Output lands in `.output/` (Nitro build). This is what gets deployed.
+Output lands in `.output/` (Nitro build). This is what gets deployed. Use `bun run build`, not `bun build`, so Bun runs the npm script instead of its built-in bundler.
 
 ### Preview
 
 ```bash
-bun preview
+bun run preview
 ```
 
 Serves the production build locally to sanity-check SSR before shipping.
@@ -253,13 +254,13 @@ Serves the production build locally to sanity-check SSR before shipping.
 
 | Command | What it does |
 |---|---|
-| `bun dev` | Vite dev server on port 3200 |
-| `bun build` | Production build to `.output/` |
-| `bun preview` | Preview the production build |
-| `bun test` | Run Vitest suite |
-| `bun lint` | Run ESLint |
-| `bun format` | Run Prettier |
-| `bun check` | `prettier --write . && eslint --fix` |
+| `bun run dev` | Vite dev server on port 3200 |
+| `bun run build` | Production build to `.output/` |
+| `bun run preview` | Preview the production build |
+| `bun run test` | Run Vitest suite |
+| `bun run lint` | Run ESLint |
+| `bun run format` | Run Prettier |
+| `bun run check` | `prettier --write . && eslint --fix` |
 
 </details>
 
@@ -269,9 +270,9 @@ Serves the production build locally to sanity-check SSR before shipping.
 
 **Vercel** is the default target. `vercel.json` rewrites every path to `/` so the
 TanStack Router client picks up deep links after hydration. Push to `main`, Vercel
-picks it up.
+picks it up. Zero-config deploy: `vercel --prod` from `web/`.
 
-**Any Node 20+ host** works too. Run `bun build` and serve the resulting `.output/`
+**Any Node 20+ host** works too. Run `bun run build` and serve the resulting `.output/`
 directory. Nitro produces a standard Node server entry.
 
 Meta tags, OG image (`/assets/images/og.png`), and Twitter card are declared in

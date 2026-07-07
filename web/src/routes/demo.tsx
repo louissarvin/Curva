@@ -1,5 +1,5 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { Play } from 'lucide-react'
+import { ExternalLink, Play } from 'lucide-react'
 import AnimateComponent from '@/components/elements/AnimateComponent'
 import { cnm } from '@/utils/style'
 
@@ -98,7 +98,7 @@ const SCENES = [
     title: 'Close',
     pillar: 'Narrative',
     script:
-      'Nine Pears building blocks. Two WDK settlement paths. One QVAC pivot model. 414 backend tests and 246 pear-app tests, all green. Team Indonesia ships a synchronised watch-party where all three Tether pillars work in one demo. Bola untuk semua. And in the language of the SDK we chose: Cosi il calcio doveva essere. Forza Curva.',
+      '13 Holepunch primitives. Two WDK settlement paths. One QVAC pivot model. 414 backend tests and 246 pear-app tests, all green. Team Indonesia ships a synchronised watch-party where all three Tether pillars work in one demo. Bola untuk semua. And in the language of the SDK we chose: Cosi il calcio doveva essere. Forza Curva.',
     screen:
       'README building blocks table + test-status. Fade to pear://curva?room=demo-final-2026 deep link and QR code.',
     quote: null,
@@ -125,6 +125,57 @@ const CUTS = [
     scenes: 3,
     target: '1:00',
     note: 'Short-form clip. Three beats: show + tell, tip beat, close. Speak fast.',
+  },
+]
+
+const SEPOLIA_TX =
+  '0xf2a04d0126068769d88d027e5407bdd578ed6986a220907bc7bc5960b963f40e'
+
+const PEARS_TIMELINE = [
+  {
+    time: '0:00',
+    moment: 'App launch',
+    primitives: 'pear-electron, pear-updater',
+  },
+  {
+    time: '0:20',
+    moment: 'Room join — swarm discovery',
+    primitives: 'Hyperswarm, HyperDHT, Corestore',
+  },
+  {
+    time: '0:35',
+    moment: 'Autobase writer promotion',
+    primitives: 'Autobase (Pattern B), Hypercore',
+  },
+  {
+    time: '0:50',
+    moment: 'Blind peer registration',
+    primitives: 'blind-peering, HyperDHT',
+  },
+  {
+    time: '1:05',
+    moment: 'Chat messages sync',
+    primitives: 'Autobase, Hyperbee',
+  },
+  {
+    time: '1:30',
+    moment: 'Goal clip captured + replicated',
+    primitives: 'Hyperdrive, Hyperblobs, hypercore-blob-server',
+  },
+  {
+    time: '1:55',
+    moment: 'Friend-peer deep link join (Autobase writer promotion)',
+    primitives: 'Autobase, keet-identity-key',
+  },
+  {
+    time: '2:15',
+    moment: 'OTA update notification',
+    primitives: 'pear-updater',
+  },
+  {
+    time: '2:25',
+    moment: 'Cross-pillar tip beat (EIP-3009 on Sepolia)',
+    primitives: 'Autobase, Hyperbee (system:tip write)',
   },
 ]
 
@@ -383,6 +434,91 @@ function DemoPage() {
               </AnimateComponent>
             ))}
           </div>
+        </section>
+
+        <Divider />
+
+        {/* Pears primitives timeline */}
+        <section aria-label="Pears primitives exercised">
+          <AnimateComponent onScroll entry="fadeInUp">
+            <SectionLabel>Pears</SectionLabel>
+            <h2 className="font-display text-3xl font-bold text-[#f5f5f0] mb-4 curva-underline">
+              Primitives exercised.
+            </h2>
+            <p className="text-[#8a8a8a] text-base max-w-xl leading-relaxed mb-8">
+              Which Holepunch primitives fire at each moment of the 3-minute
+              demo. 13 building blocks, all live.
+            </p>
+          </AnimateComponent>
+
+          <AnimateComponent onScroll entry="fadeInUp" delay={60}>
+            <div className="overflow-x-auto">
+              <table
+                className="w-full text-sm"
+                aria-label="Pears primitives timeline"
+              >
+                <thead>
+                  <tr className="border-b border-[rgba(255,255,255,0.07)]">
+                    <th className="text-left text-xs font-medium text-[#8a8a8a] py-3 pr-4 whitespace-nowrap">
+                      Time
+                    </th>
+                    <th className="text-left text-xs font-medium text-[#8a8a8a] py-3 pr-4">
+                      Moment
+                    </th>
+                    <th className="text-left text-xs font-medium text-[#8a8a8a] py-3">
+                      Primitives
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {PEARS_TIMELINE.map((row) => (
+                    <tr
+                      key={row.time}
+                      className="border-b border-[rgba(255,255,255,0.04)] hover:bg-[rgba(255,255,255,0.02)] transition-colors"
+                    >
+                      <td className="py-3 pr-4 font-mono-code text-[11px] text-[#c8102e] whitespace-nowrap align-top">
+                        {row.time}
+                      </td>
+                      <td className="py-3 pr-4 text-xs text-[#f5f5f0] align-top">
+                        {row.moment}
+                      </td>
+                      <td className="py-3 font-mono-code text-[10px] text-[rgba(212,175,55,0.75)] align-top leading-relaxed">
+                        {row.primitives}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </AnimateComponent>
+
+          <AnimateComponent onScroll entry="fadeInUp" delay={120}>
+            <div className="mt-8 p-4 rounded-lg bg-[rgba(200,16,46,0.04)] border border-[rgba(200,16,46,0.15)]">
+              <p className="text-xs text-[#8a8a8a] leading-relaxed mb-3">
+                <span className="text-[#f5f5f0] font-medium">
+                  WDK path confirmed live on Sepolia.
+                </span>{' '}
+                The tip at t=2:25 lands on-chain via our custom EIP-3009 USDT
+                contract (0x6F51d2…7739). The sample tx shows both
+                AuthorizationUsed and Transfer events.
+              </p>
+              <a
+                href={`https://sepolia.etherscan.io/tx/${SEPOLIA_TX}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className={cnm(
+                  'inline-flex items-center gap-2 text-xs font-mono-code',
+                  'text-[rgba(212,175,55,0.8)] hover:text-[rgba(212,175,55,1)] transition-colors',
+                )}
+              >
+                <ExternalLink size={11} aria-hidden="true" />
+                {SEPOLIA_TX.slice(0, 18)}...{SEPOLIA_TX.slice(-8)}
+                <span className="text-[#8a8a8a] font-sans not-italic">
+                  (sepolia.etherscan.io)
+                </span>
+              </a>
+            </div>
+          </AnimateComponent>
         </section>
 
         <Divider />

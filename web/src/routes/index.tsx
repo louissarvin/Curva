@@ -26,10 +26,12 @@ const PILLARS: Array<PillarCard> = [
     pillar: 'Pears',
     product: 'Holepunch Pears Stack',
     summary:
-      'Autobase Pattern B multi-writer sync for video playhead and chat. Hyperswarm discovery on sha256 match-room topic with relayThrough NAT fallback. Per-peer Hyperdrive clip sharing via findingPeers cold-start. Nine Pears building blocks exercised at runtime.',
+      '13 Holepunch primitives exercised at runtime — Hyperswarm discovery, Autobase Pattern B multi-writer sync, blind-peering unattended replication, keet-identity-key 3.2.0 attested chat, Hyperdrive P2P video reel, pear-updater OTA. Published as a versioned pear:// app link — judges can `pear run pear://...` from any machine.',
     evidence: [
-      'pear-app/bare/swarmLifecycle.js — relayThrough NAT fallback',
-      'pear-app/bare/playhead.js — Autobase Pattern B linearised playhead',
+      'pear run pear://0.22823.hcg8oftrk7hps1z4x9pprf4jhk7mitohjort6csfpjwjjo3ynomy',
+      'blind peer key: nm5j8618…t1fy (workers/main.js:809)',
+      'pear-app/bare/blindPeering.js — unattended replication',
+      'pear-app/bare/keetIdentity.js:29 — keet-identity-key 3.2.0',
     ],
     docsUrl: 'https://docs.pears.com/reference/#building-blocks',
     docsLabel: 'docs.pears.com',
@@ -100,48 +102,68 @@ const TIP_FLOW_STEPS = [
 const BUILDING_BLOCKS = [
   {
     block: 'Hyperswarm',
-    file: 'pear-app/bare/swarmLifecycle.js',
-    purpose: 'Match-room discovery, relayThrough NAT fallback',
+    file: 'workers/main.js:40,183',
+    purpose: 'Match-room discovery on sha256 topic, relayThrough NAT fallback',
+  },
+  {
+    block: 'HyperDHT',
+    file: 'bare/blindPeering.js:142',
+    purpose: 'DHT instance passed directly to blind-peering client',
   },
   {
     block: 'Corestore',
-    file: 'pear-app/bare/room.js',
+    file: 'workers/main.js:41,153',
     purpose: 'Per-room namespaces on one disk root',
   },
   {
     block: 'Hypercore',
-    file: 'pear-app/bare/playhead.js + chat.js',
-    purpose: 'Named cores for playhead, chat, clips, room state',
-  },
-  {
-    block: 'Autobase',
-    file: 'pear-app/bare/playhead.js + chat.js',
-    purpose: 'Multi-writer Pattern B, pure reducers, deterministic replay',
+    file: 'bare/playhead.js:17 + chat.js',
+    purpose: 'Named append-only logs for playhead, chat, clips, room state',
   },
   {
     block: 'Hyperbee',
-    file: 'pear-app/bare/chat.js + tip.js',
+    file: 'bare/chat.js:17 + tip.js',
     purpose: 'Chat view, tip log, writer roster, reactions bucket',
   },
   {
+    block: 'Autobase',
+    file: 'bare/playhead.js:80 + chat.js',
+    purpose: 'Pattern B multi-writer, pure reducers, deterministic replay',
+  },
+  {
     block: 'Hyperdrive',
-    file: 'pear-app/bare/clips.js',
+    file: 'bare/clips.js:27,85',
     purpose: 'Per-peer clip filesystem, findingPeers cold-start',
   },
   {
     block: 'Hyperblobs',
-    file: 'pear-app/bare/clips.js',
+    file: 'bare/clips.js:28,92',
     purpose: '128x72 ffmpeg-baseline clip thumbnails',
   },
   {
-    block: 'hypercore-crypto',
-    file: 'pear-app/bare/topics.js + writerInvitation.js',
-    purpose: 'Topic derivation + ed25519 writer invitations',
+    block: 'hypercore-blob-server',
+    file: 'bare/clips.js:36,111',
+    purpose: 'Loopback HTTP server for RFC 7233 range-request clip streaming',
   },
   {
-    block: 'pear-runtime-updater',
-    file: 'pear-app/electron/main.js',
-    purpose: 'OTA renderer toast; in-process seeder daemon',
+    block: 'blind-peering',
+    file: 'bare/blindPeering.js:98 + workers/main.js:809',
+    purpose: 'Registers chat + playhead Autobases; rooms persist without host',
+  },
+  {
+    block: 'keet-identity-key',
+    file: 'bare/keetIdentity.js:29',
+    purpose: 'keet-identity-key 3.2.0: BIP-39 mnemonic-rooted peer identity',
+  },
+  {
+    block: 'pear-updater',
+    file: 'workers/main.js:313,371-374',
+    purpose: 'OTA events: updating/updated; renderer toast on new version',
+  },
+  {
+    block: 'pear-electron',
+    file: 'electron/main.js:4,11',
+    purpose: 'Electron + Bare dual-runtime; PearRuntime spawns Bare workers',
   },
 ]
 
@@ -215,7 +237,7 @@ function Divider() {
 // ─── Marquee Ticker ───────────────────────────────────────────────────────────
 
 const MARQUEE_CONTENT =
-  'PEARS + WDK + QVAC · WATCH THE WORLD CUP WITH FRIENDS · BOLA UNTUK SEMUA · COSI IL CALCIO DOVEVA ESSERE · FORZA CURVA · NINE BUILDING BLOCKS · JAKARTA · TORINO · ZERO SERVERS · '
+  'PEARS + WDK + QVAC · WATCH THE WORLD CUP WITH FRIENDS · BOLA UNTUK SEMUA · COSI IL CALCIO DOVEVA ESSERE · FORZA CURVA · 13 BUILDING BLOCKS · JAKARTA · TORINO · ZERO SERVERS · '
 
 function Marquee() {
   return (
@@ -299,7 +321,7 @@ function Hero() {
 
         <AnimateComponent entry="fadeInUp" delay={240} duration={600}>
           <div className="flex flex-col sm:flex-row gap-4 items-start">
-            <CopyButton value="pear run pear://curva" />
+            <CopyButton value="pear run pear://hcg8oftrk7hps1z4x9pprf4jhk7mitohjort6csfpjwjjo3ynomy" />
             <a
               href="#demo"
               className={cnm(
@@ -312,9 +334,9 @@ function Hero() {
             </a>
           </div>
           <p className="mt-3 text-xs text-[#8a8a8a] font-mono-code">
-            pear://curva?room=demo-final-2026
-            <span className="ml-2 text-[rgba(138,138,138,0.5)]">
-              [live after Companion seeder is up]
+            versioned:{' '}
+            <span className="text-[rgba(212,175,55,0.7)]">
+              pear://0.22823.hcg8oftrk7hps1z4x9pprf4jhk7mitohjort6csfpjwjjo3ynomy
             </span>
           </p>
         </AnimateComponent>
@@ -624,10 +646,11 @@ function ArchitectureGlance() {
         <div className="mt-8 p-4 rounded-lg bg-[#141414] border border-[rgba(255,255,255,0.07)]">
           <p className="text-xs text-[#8a8a8a] leading-relaxed">
             <span className="text-[#f5f5f0] font-medium">
-              Nine Pears building blocks exercised at runtime.
+              13 Holepunch primitives exercised at runtime.
             </span>{' '}
-            Hyperswarm, Corestore, Hypercore, Autobase, Hyperbee, Hyperdrive,
-            Hyperblobs, hypercore-crypto, pear-runtime-updater.
+            Hyperswarm, HyperDHT, Corestore, Hypercore, Hyperbee, Autobase,
+            Hyperdrive, Hyperblobs, hypercore-blob-server, blind-peering,
+            keet-identity-key, pear-updater, pear-electron.
           </p>
         </div>
       </AnimateComponent>
@@ -780,9 +803,9 @@ const NUMBERS = [
     sub: 'All five track slots filled',
   },
   {
-    value: '9',
+    value: '13',
     label: 'Building blocks',
-    sub: 'All nine exercised at runtime',
+    sub: 'All 13 Holepunch primitives at runtime',
   },
 ]
 
