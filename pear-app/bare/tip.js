@@ -17,6 +17,9 @@
 
 const b4a = require('b4a')
 const { randomNonce, SEPOLIA, DEMO_AMOUNT_BASE_UNITS } = require('./wallet/eip3009.js')
+// Tier 4 Round 2: keet portable identity attestations. Sits behind the
+// CURVA_KEET_IDENTITY_ENABLED feature flag; a null handle means "skip".
+const { getKeetIdentity } = require('./identity.js')
 
 const LOG = '[Curva][Tip]'
 
@@ -276,7 +279,7 @@ function createTipService(opts = {}) {
     // treat this as pure display state, not a signal to re-tip.
     if (chat) {
       try {
-        await chat.sendSystem({
+        const tipMsg = {
           type: 'system:tip',
           by_peer: tipperPubkey,
           match_time_ms: 0,
@@ -289,7 +292,21 @@ function createTipService(opts = {}) {
           // Wave 8C: which submit path produced this tx. Debug consoles show
           // both possible routes so judges can see the fallback engage live.
           route: row.route
-        })
+        }
+        // Tier 4 Round 2: attest the tip payload with keet portable identity
+        // when the feature flag is on. attest() returns null when disabled or
+        // when the identity handle has not been loaded yet -> field is dropped.
+        try {
+          const keet = getKeetIdentity()
+          if (keet && typeof keet.attest === 'function') {
+            const proof = keet.attest(tipMsg)
+            if (proof) tipMsg.identity_proof = proof
+          }
+        } catch (err) {
+          // Never let attestation errors block a tip announcement.
+          console.warn(LOG, 'keet-identity attest (system:tip) failed:', err?.message)
+        }
+        await chat.sendSystem(tipMsg)
       } catch (err) {
         console.warn(LOG, 'system:tip chat append failed:', err.message)
       }
@@ -318,6 +335,161 @@ function createTipService(opts = {}) {
       }
     }
 
+    return row
+  }
+
+  // ---------------------------------------------------------------------------
+  // Tier 4: ERC-4337 batch tip.
+  //
+  // Ships N recipient transfers as a SINGLE UserOperation. The wallet worklet
+  // composes the multi-call and submits it via account.sendTransaction (which
+  // routes through Safe's MultiSend DELEGATECALL under the hood). Rationale
+  // for bypassing the F11 facilitator: EIP-3009's transferWithAuthorization
+  // is one-transfer-per-signature by design, so batching there requires N
+  // signatures AND N HTTP calls with no atomicity guarantee. The ERC-4337
+  // path is the only way to guarantee "one signature, one on-chain tx, N
+  // Transfer events".
+  //
+  // Input: { recipients: Array<{ address, handle?, amountAtomicUsdt }> }
+  //   - handle: optional display string (for UI feed rendering only).
+  //   - address + amountAtomicUsdt: validated identically to the worklet.
+  //
+  // Guards enforced here:
+  //   - service not closed, room-state Hyperbee still writable
+  //   - recipients.length in [2..5]
+  //   - each amount is a positive integer decimal string, each <= per-tip cap
+  //   - total across all recipients <= 15 USDT (worklet re-checks; belt AND
+  //     braces because the worklet is the on-wire signer)
+  //
+  // Does NOT touch the single-recipient proposeTip flow.
+  // ---------------------------------------------------------------------------
+  async function tipBatch({ recipients } = {}) {
+    if (closed) throw new TipError('TIP_CLOSED', 'tip service closed')
+    if (typeof wallet.signAndSendBatch !== 'function') {
+      throw new TipError('BATCH_UNSUPPORTED', 'wallet does not support ERC-4337 batch tips')
+    }
+    if (!Array.isArray(recipients) || recipients.length < 2 || recipients.length > 5) {
+      throw new TipError('BATCH_SIZE_INVALID', 'recipients must be an array of 2..5 entries')
+    }
+
+    // Normalize + validate. Per-tip cap mirrors the single-tip demo cap so a
+    // batch cannot smuggle a >100 USDT single transfer past the ceiling; total
+    // cap is 15 USDT per the batch spec.
+    let totalAtomic = 0n
+    const normalized = []
+    for (let i = 0; i < recipients.length; i++) {
+      const r = recipients[i]
+      if (!r || typeof r !== 'object') {
+        throw new TipError('BATCH_INVALID_RECIPIENT', `recipients[${i}] must be an object`)
+      }
+      if (typeof r.address !== 'string' || !HEX_ADDR.test(r.address)) {
+        throw new TipError('BATCH_INVALID_RECIPIENT', `recipients[${i}].address invalid`)
+      }
+      if (typeof r.amountAtomicUsdt !== 'string' || !/^[1-9][0-9]*$/.test(r.amountAtomicUsdt)) {
+        throw new TipError(
+          'BATCH_INVALID_AMOUNT',
+          `recipients[${i}].amountAtomicUsdt must be a positive integer string`
+        )
+      }
+      let amt
+      try { amt = BigInt(r.amountAtomicUsdt) } catch {
+        throw new TipError('BATCH_INVALID_AMOUNT', `recipients[${i}].amountAtomicUsdt not a valid uint`)
+      }
+      if (amt <= 0n || amt > MAX_DEMO_AMOUNT_BASE) {
+        throw new TipError(
+          'BATCH_AMOUNT_OUT_OF_RANGE',
+          `recipients[${i}].amountAtomicUsdt must be in (0, ${MAX_DEMO_AMOUNT_BASE}]`
+        )
+      }
+      totalAtomic += amt
+      normalized.push({
+        address: r.address.toLowerCase(),
+        handle: typeof r.handle === 'string' ? r.handle.slice(0, 64) : null,
+        amountAtomicUsdt: String(amt)
+      })
+    }
+    const BATCH_TOTAL_CAP = 15_000000n
+    if (totalAtomic > BATCH_TOTAL_CAP) {
+      throw new TipError('BATCH_TOTAL_EXCEEDED', `batch total ${totalAtomic} exceeds 15 USDT cap`)
+    }
+
+    // Pre-broadcast a pending row so the renderer can show instant feedback.
+    const nowMs = Date.now()
+    const synthHash = 'batch-pending-' + randomNonce().slice(2, 18)
+    const key = tipKey(nowMs, synthHash)
+    const row = {
+      from_peer: tipperPubkey,
+      from_address: null,
+      to_address: null,           // batch has no single recipient
+      recipients: normalized,
+      total_base: totalAtomic.toString(),
+      token: tokenAddress,
+      chainId,
+      tx_hash: synthHash,
+      status: 'pending',
+      route: 'erc4337-batch',
+      created_at: nowMs,
+      submitted_at: null,
+      confirmed_at: null
+    }
+    await beePut(key, row)
+    fire('batch-pending', row)
+
+    // Sign + submit via the wallet worklet. The wallet returns userOpHash,
+    // fee, recipientCount, totalAtomic.
+    let batchRes
+    try {
+      const pairs = normalized.map(({ address, amountAtomicUsdt }) => ({ address, amountAtomicUsdt }))
+      batchRes = await wallet.signAndSendBatch(pairs)
+    } catch (err) {
+      // Sanitize: never leak wallet internals or provider URLs to the emitted
+      // event. Keep the error CODE (structured) and a short generic message.
+      const code = (err && err.code) ? String(err.code) : 'BATCH_FAILED'
+      const shortMsg = code === 'BATCH_INSUFFICIENT_BALANCE'
+        ? 'insufficient USDT balance to cover batch + paymaster fee'
+        : code === 'BATCH_FEE_EXCEEDED'
+          ? 'batch fee exceeded configured maximum'
+          : code === 'BATCH_SIZE_INVALID' || code === 'BATCH_INVALID_RECIPIENT' || code === 'BATCH_INVALID_AMOUNT'
+            ? 'batch validation failed'
+            : 'batch submission failed'
+      row.status = 'failed'
+      row.error = { code, message: shortMsg }
+      try { await beePut(key, row) } catch { /* noop */ }
+      fire('batch-failed', row)
+      return row
+    }
+
+    if (!batchRes || !batchRes.userOpHash) {
+      row.status = 'failed'
+      row.error = { code: 'BATCH_BAD_RESPONSE', message: 'no userOpHash returned from wallet' }
+      try { await beePut(key, row) } catch { /* noop */ }
+      fire('batch-failed', row)
+      return row
+    }
+
+    row.status = 'submitted'
+    row.submitted_at = Date.now()
+    row.tx_hash = batchRes.userOpHash
+    row.user_op_hash = batchRes.userOpHash
+    if (batchRes.fee) row.userop_fee = batchRes.fee
+    try { await bee.del(key) } catch { /* noop */ }
+    const finalKey = tipKey(row.created_at, batchRes.userOpHash)
+    await beePut(finalKey, row)
+
+    const etherscanUrl = 'https://sepolia.etherscan.io/tx/' + batchRes.userOpHash
+    const confirmedPayload = {
+      userOpHash: batchRes.userOpHash,
+      count: batchRes.recipientCount,
+      totalAtomic: batchRes.totalAtomic || totalAtomic.toString(),
+      etherscanUrl,
+      recipients: normalized,
+      fee: batchRes.fee || null,
+      created_at: row.created_at
+    }
+    // Emit BOTH the raw row (for durable bookkeeping via onStateChange
+    // subscribers) and the display-shaped confirmed payload. The main-worker
+    // shim decides which channel forwards to the renderer.
+    fire('batch-confirmed', confirmedPayload)
     return row
   }
 
@@ -418,6 +590,7 @@ function createTipService(opts = {}) {
 
   return {
     proposeTip,
+    tipBatch,
     markConfirmed,
     listTips,
     close,
