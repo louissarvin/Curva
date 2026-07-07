@@ -44,12 +44,15 @@ const SEPOLIA = Object.freeze({
   bundlerUrl: 'https://api.candide.dev/public/v3/11155111',
   paymasterUrl: 'https://api.candide.dev/public/v3/11155111',
   paymasterAddress: '0x8b1f6cb5d062aa2ce8d581942bbb960420d875ba',
-  usdtAddress: '0xd077a400968890eacc75cdc901f0356c943e4fdb',
+  usdtAddress: '0x6F51d2428AD208eb1cdE38e5CF7C0D7E2c5E7739',
   // The backend F11 fetches token name+version from the contract via `name()`
-  // + `EIP712_VERSION()`/`version()`. For the demo, USDT on Sepolia matches
-  // "USDT" v1 — same convention Circle uses for USDC. If the facilitator's
-  // domain probe disagrees we surface TOKEN_METADATA_UNAVAILABLE and abort.
-  tokenName: 'USDT',
+  // + `EIP712_VERSION()`/`version()`. Verified via `cast call name()` on
+  // 0x6F51d2428AD208eb1cdE38e5CF7C0D7E2c5E7739 (Sepolia): the contract returns
+  // the string "Tether USD" (10 bytes) and version "1". Prior fallback of
+  // "USDT" caused ECDSA recovery mismatch on the facilitator side because the
+  // EIP-712 domain hash differs when `name` differs. If the runtime probe of
+  // /wdk/token-domain succeeds it still overrides these defaults.
+  tokenName: 'Tether USD',
   tokenVersion: '1',
   onChainIdentifier: 'curva'
 })

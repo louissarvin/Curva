@@ -12,7 +12,7 @@ const test = require('brittle')
 const { createX402Client, X402Error, parseX402Challenge } = require('../bare/x402Client.js')
 
 const CHAIN_ID = 11155111
-const TOKEN = '0xd077a400968890eacc75cdc901f0356c943e4fdb'
+const TOKEN = '0x6F51d2428AD208eb1cdE38e5CF7C0D7E2c5E7739'
 const PAY_TO = '0x' + '77'.repeat(20)
 const OWNER = '0x' + 'aa'.repeat(20)
 

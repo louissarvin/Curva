@@ -24,7 +24,7 @@ const { createWalletAdapter, WalletError } = require('../bare/wallet/worklet.js'
 test('buildTypedData returns EIP-712 shape matching F11 facilitator', (t) => {
   const td = buildTypedData({
     chainId: 11155111,
-    tokenAddress: '0xd077a400968890eacc75cdc901f0356c943e4fdb',
+    tokenAddress: '0x6F51d2428AD208eb1cdE38e5CF7C0D7E2c5E7739',
     tokenName: 'USDT',
     tokenVersion: '1',
     from: '0x1111111111111111111111111111111111111111',
@@ -39,7 +39,7 @@ test('buildTypedData returns EIP-712 shape matching F11 facilitator', (t) => {
   t.is(td.domain.name, 'USDT')
   t.is(td.domain.version, '1')
   t.is(td.domain.chainId, 11155111)
-  t.is(td.domain.verifyingContract, '0xd077a400968890eacc75cdc901f0356c943e4fdb')
+  t.is(td.domain.verifyingContract, '0x6F51d2428AD208eb1cdE38e5CF7C0D7E2c5E7739')
 
   // Types object matches backend/src/lib/evm/eip3009.ts EXACTLY (field order + names).
   const fields = td.types.TransferWithAuthorization.map((f) => f.name + ':' + f.type)
@@ -63,7 +63,7 @@ test('buildTypedData rejects invalid inputs', (t) => {
   t.exception.all(
     () => buildTypedData({
       chainId: 0,
-      tokenAddress: '0xd077a400968890eacc75cdc901f0356c943e4fdb',
+      tokenAddress: '0x6F51d2428AD208eb1cdE38e5CF7C0D7E2c5E7739',
       tokenName: 'USDT',
       tokenVersion: '1',
       from: '0x1111111111111111111111111111111111111111',
@@ -93,7 +93,7 @@ test('buildTypedData rejects invalid inputs', (t) => {
   t.exception.all(
     () => buildTypedData({
       chainId: 11155111,
-      tokenAddress: '0xd077a400968890eacc75cdc901f0356c943e4fdb',
+      tokenAddress: '0x6F51d2428AD208eb1cdE38e5CF7C0D7E2c5E7739',
       tokenName: 'USDT',
       tokenVersion: '1',
       from: '0x1111111111111111111111111111111111111111',
@@ -108,7 +108,7 @@ test('buildTypedData rejects invalid inputs', (t) => {
   t.exception.all(
     () => buildTypedData({
       chainId: 11155111,
-      tokenAddress: '0xd077a400968890eacc75cdc901f0356c943e4fdb',
+      tokenAddress: '0x6F51d2428AD208eb1cdE38e5CF7C0D7E2c5E7739',
       tokenName: 'USDT',
       tokenVersion: '1',
       from: '0x1111111111111111111111111111111111111111',
@@ -123,7 +123,7 @@ test('buildTypedData rejects invalid inputs', (t) => {
   t.exception.all(
     () => buildTypedData({
       chainId: 11155111,
-      tokenAddress: '0xd077a400968890eacc75cdc901f0356c943e4fdb',
+      tokenAddress: '0x6F51d2428AD208eb1cdE38e5CF7C0D7E2c5E7739',
       tokenName: 'USDT',
       tokenVersion: '1',
       from: '0x1111111111111111111111111111111111111111',
@@ -138,7 +138,7 @@ test('buildTypedData rejects invalid inputs', (t) => {
   t.exception.all(
     () => buildTypedData({
       chainId: 11155111,
-      tokenAddress: '0xd077a400968890eacc75cdc901f0356c943e4fdb',
+      tokenAddress: '0x6F51d2428AD208eb1cdE38e5CF7C0D7E2c5E7739',
       tokenName: 'USDT',
       tokenVersion: '1',
       from: '0x1111111111111111111111111111111111111111',
@@ -198,8 +198,8 @@ test('splitSignature rejects malformed input', (t) => {
 
 test('SEPOLIA config points at the right USDT contract + chainId', (t) => {
   t.is(SEPOLIA.chainId, 11155111)
-  t.is(SEPOLIA.usdtAddress, '0xd077a400968890eacc75cdc901f0356c943e4fdb')
-  t.is(SEPOLIA.tokenName, 'USDT')
+  t.is(SEPOLIA.usdtAddress, '0x6F51d2428AD208eb1cdE38e5CF7C0D7E2c5E7739')
+  t.is(SEPOLIA.tokenName, 'Tether USD')
   t.is(SEPOLIA.tokenVersion, '1')
   t.is(DEMO_AMOUNT_BASE_UNITS, '1000000')
   // Fix Wave B / T2: WDK on-chain attribution marker.
@@ -476,7 +476,7 @@ test('createWalletAdapter.init falls back to chain defaults when probe fails', a
     to: '0x2222222222222222222222222222222222222222',
     value: '1000000'
   })
-  t.is(sig.typedData.domain.name, 'USDT', 'digest uses fallback name')
+  t.is(sig.typedData.domain.name, 'Tether USD', 'digest uses fallback name')
   t.is(sig.typedData.domain.version, '1', 'digest uses fallback version')
   w.dispose()
 })

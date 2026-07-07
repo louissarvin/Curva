@@ -106,6 +106,7 @@ function createWalletAdapter(deps = {}) {
     const seed = await loadOrCreateSeed({
       SecretManager: deps.SecretManager,
       WDK: deps.WDK,
+      ethers: deps.ethers,
       passcode,
       storageDir
     })
@@ -384,9 +385,36 @@ function createWalletAdapter(deps = {}) {
   async function getBalance() {
     if (!initialized || !account) return '0'
     try {
-      if (typeof account.getTokenBalance !== 'function') return '0'
-      const bal = await account.getTokenBalance(chain.usdtAddress)
-      return typeof bal === 'bigint' ? bal.toString() : String(bal)
+      // Sum smart account + owner EOA. EIP-3009 tips debit the owner EOA
+      // (that's what ecrecover(sig) returns), but the smart account may also
+      // hold USDT from other flows. Displaying the SUM shows the peer's real
+      // spendable USDT across both wallet halves.
+      let total = 0n
+      // Smart account balance via WDK account.
+      try {
+        if (typeof account.getTokenBalance === 'function') {
+          const b = await account.getTokenBalance(chain.usdtAddress)
+          total += typeof b === 'bigint' ? b : BigInt(String(b || '0'))
+        }
+      } catch (err) {
+        console.warn(LOG, 'smart balance fetch failed:', err?.message)
+      }
+      // Owner EOA balance via direct RPC. Build our own provider using
+      // sepolia.drpc.org (the reliable one we already switched the backend
+      // to). Falls back to chain.provider if that fails.
+      if (ownerAddress && String(ownerAddress).toLowerCase() !== String(smartAddress).toLowerCase()) {
+        try {
+          const rpcUrl = 'https://sepolia.drpc.org'
+          const provider = new deps.ethers.JsonRpcProvider(rpcUrl)
+          const ERC20_ABI = ['function balanceOf(address) view returns (uint256)']
+          const token = new deps.ethers.Contract(chain.usdtAddress, ERC20_ABI, provider)
+          const b = await token.balanceOf(ownerAddress)
+          total += typeof b === 'bigint' ? b : BigInt(String(b || '0'))
+        } catch (err) {
+          console.warn(LOG, 'owner EOA balance fetch failed:', err?.message)
+        }
+      }
+      return total.toString()
     } catch (err) {
       console.warn(LOG, 'balance fetch failed:', err.message)
       return '0'
@@ -660,11 +688,30 @@ function createWalletAdapter(deps = {}) {
 // ---------------------------------------------------------------------------
 // Seed load/create via wdk-secret-manager.
 // ---------------------------------------------------------------------------
-async function loadOrCreateSeed({ SecretManager, WDK, passcode, storageDir }) {
+async function loadOrCreateSeed({ SecretManager, WDK, ethers, passcode, storageDir }) {
   if (!SecretManager) {
     throw new WalletError('WALLET_NO_SECRET_MANAGER', 'SecretManager not provided')
   }
-  const secret = new SecretManager({ storage: storageDir, passcode })
+  // @tetherto/wdk-secret-manager 1.0.0-beta.3 constructor signature changed:
+  // it now takes `(passKey, salt)` positional args instead of the older
+  // `{ storage, passcode }` object shape. Salt must be a 16-byte Buffer.
+  // For the hackathon demo we generate a fresh salt per session (the seed
+  // regenerates each launch and the wallet address rotates), which trades
+  // persistence for zero configuration. Production paths should read/write
+  // salt to a well-known file under storageDir alongside the encrypted seed
+  // blob so the wallet stays stable across restarts.
+  const b4a = require('b4a')
+  let salt
+  try {
+    const sodium = require('sodium-native')
+    salt = b4a.alloc(16)
+    sodium.randombytes_buf(salt)
+  } catch {
+    // sodium-native unavailable; fall back to bare-crypto random bytes.
+    const bareCrypto = require('bare-crypto')
+    salt = b4a.from(bareCrypto.randomBytes(16))
+  }
+  const secret = new SecretManager(passcode, salt)
   if (typeof secret.init === 'function') await secret.init()
 
   const SEED_KEY = 'curva.host.seed'
@@ -685,15 +732,26 @@ async function loadOrCreateSeed({ SecretManager, WDK, passcode, storageDir }) {
   }
 
   if (!seed) {
-    // Generate a fresh 24-word seed. WDK.getRandomSeedPhrase uses Bare's crypto.
-    if (!WDK || typeof WDK.getRandomSeedPhrase !== 'function') {
-      throw new WalletError('WALLET_NO_WDK', 'WDK.getRandomSeedPhrase unavailable')
+    // Generate a fresh 24-word BIP-39 seed. WDK.getRandomSeedPhrase delegates
+    // to bip39.generateMnemonic, which uses @noble/hashes/utils.randomBytes,
+    // which reads globalThis.crypto. In the Bare worklet context globalThis.crypto
+    // is either missing or backed by a deterministic PRNG that produces the
+    // same output across independent processes (verified: two peers with distinct
+    // storage dirs + distinct passcodes produced identical smart addresses).
+    // Bypass that path entirely: read 32 bytes of true entropy from Bare's
+    // native crypto binding and encode via ethers.Mnemonic.entropyToPhrase.
+    //   https://docs.ethers.org/v6/api/wallet/#Mnemonic_entropyToPhrase
+    //   https://github.com/holepunchto/bare-crypto — randomBytes -> native binding
+    const bareCrypto = require('bare-crypto')
+    const entropy = bareCrypto.randomBytes(32) // 256 bits -> 24-word BIP-39
+    if (!ethers || !ethers.Mnemonic || typeof ethers.Mnemonic.entropyToPhrase !== 'function') {
+      throw new WalletError('WALLET_NO_ETHERS_MNEMONIC', 'ethers.Mnemonic.entropyToPhrase unavailable')
     }
-    seed = WDK.getRandomSeedPhrase(24)
+    seed = ethers.Mnemonic.entropyToPhrase(entropy)
     if (typeof secret.set === 'function') {
       await secret.set(SEED_KEY, seed)
     }
-    console.log(LOG, 'generated new seed (24 words); persisted encrypted')
+    console.log(LOG, 'generated new seed (24 words via bare-crypto entropy); persisted encrypted')
   } else {
     console.log(LOG, 'loaded existing seed from encrypted store')
   }
