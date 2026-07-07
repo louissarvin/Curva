@@ -170,4 +170,40 @@ function toBuffer(pubkey) {
   throw new TypeError('pubkey must be hex string or Uint8Array')
 }
 
-module.exports = { handleFromPubkey, WORDS, COLORS }
+// -- Keet portable identity handle (Tier 4 Round 2) ---
+// Module-scoped keet-identity handle. Populated at boot when the feature flag
+// is enabled and the wallet passcode has been supplied. Consumers (tip.js,
+// attendance.js, chat.js read path) call getKeetIdentity() and treat a null
+// return as "feature off / not yet loaded" -> skip attestation gracefully.
+//
+// The handle itself is created by bare/keetIdentity.js.createKeetIdentity();
+// this module is the process-wide singleton pointer so downstream code does
+// not have to plumb a handle through every constructor.
+
+let keetIdentityHandle = null
+
+/**
+ * Return the currently loaded keet identity handle, or null when the feature
+ * flag is off / identity has not been bootstrapped yet. Callers MUST tolerate
+ * a null return.
+ */
+function getKeetIdentity() {
+  return keetIdentityHandle
+}
+
+/**
+ * Install the keet identity handle for the lifetime of this Bare worker.
+ * Called by the boot flow after wallet passcode is known and the feature flag
+ * is on. Passing null clears the handle (used on wallet reset / logout).
+ */
+function setKeetIdentity(handle) {
+  keetIdentityHandle = handle || null
+}
+
+module.exports = {
+  handleFromPubkey,
+  WORDS,
+  COLORS,
+  getKeetIdentity,
+  setKeetIdentity
+}
