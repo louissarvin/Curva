@@ -26,6 +26,14 @@
 
 const Hyperdrive = require('hyperdrive')
 const Hyperblobs = require('hyperblobs')
+// hypercore-blob-server serves clip bytes over loopback HTTP with RFC 7233
+// Range support. Constructor + getLink() signatures verified against
+// https://github.com/holepunchto/hypercore-blob-server (index.js on main).
+// Optional at load time so brittle tests without the module still boot the
+// clips helpers; when missing, getClipLink returns a structured unavailable
+// error instead of throwing at import.
+let HypercoreBlobServer = null
+try { HypercoreBlobServer = require('hypercore-blob-server') } catch { /* optional */ }
 // Dual-runtime module resolution. Bare runtime resolves only `bare-*` names;
 // Node (used by brittle tests) does not implement Bare's `require.addon` so
 // loading bare-* modules in Node throws. Prefer bare-* at runtime, fall back
@@ -88,6 +96,39 @@ async function createClips(store, opts) {
   // Peer thumbnail cores we've opened for read.
   const trackedThumbCores = new Map()
   trackedThumbCores.set(myThumbCoreKeyHex, myThumbBlobs)
+
+  // hypercore-blob-server: one instance per corestore, bound to loopback,
+  // token-gated. Docs verified against holepunchto/hypercore-blob-server
+  // (constructor defaults: host 127.0.0.1, port 49833, anyPort:true, sandbox:true,
+  // token = crypto.randomBytes(32) z32-encoded). The token rides on the query
+  // string of every URL getLink() returns; it rotates only on process/room
+  // lifecycle boundaries (there is no built-in refresh API).
+  let blobServer = null
+  let blobServerToken = null
+  let blobServerReady = false
+  if (HypercoreBlobServer) {
+    try {
+      blobServer = new HypercoreBlobServer(store, {
+        host: '127.0.0.1',
+        port: 49833,
+        anyPort: true,
+        sandbox: true
+      })
+      await blobServer.listen()
+      blobServerReady = true
+      blobServerToken = blobServer.token
+    } catch (err) {
+      // Do NOT propagate: the legacy IPC clip:get path still works. Log once.
+      console.log(JSON.stringify({
+        level: 'warn',
+        source: 'curva.clips',
+        event: 'blob_server_listen_failed',
+        code: err?.code || 'UNKNOWN',
+        message: err?.message || 'blob server listen failed'
+      }))
+      blobServer = null
+    }
+  }
 
   // Track peer drives we've opened for read-only access. Key is
   // driveKeyHex; value is the Hyperdrive instance in the SAME store.
@@ -336,9 +377,53 @@ async function createClips(store, opts) {
     try { return await blobs.get(blobId) } catch { return null }
   }
 
+  /**
+   * Build an HTTP link the renderer can drop into <video src>. Range-friendly.
+   * Verified against getLink() in holepunchto/hypercore-blob-server (main).
+   * Returns an unavailable error object when the blob server failed to start
+   * or the module was not present in node_modules.
+   *
+   * @param {string} driveKeyHex - 64-char lowercase hex Hyperdrive key
+   * @param {string} blobPath    - drive path, e.g. `/clips/1720290000000.mp4`
+   * @returns {{ url: string, token: string, expiresMs: number|null, port: number, host: string }}
+   */
+  function getClipLink(driveKeyHex, blobPath) {
+    if (!isHexOfLen(driveKeyHex, 64)) throw new RangeError('driveKey must be 64-char hex')
+    if (typeof blobPath !== 'string' || !blobPath.startsWith('/clips/')) {
+      throw new RangeError('path must start with /clips/')
+    }
+    if (!blobServer || !blobServerReady) {
+      const err = new Error('blob server unavailable')
+      err.code = 'BLOB_SERVER_UNAVAILABLE'
+      throw err
+    }
+    // Docs pattern: getLink(driveKey, { filename }) resolves the underlying
+    // blob core internally and appends &token=<current>. Never expose the raw
+    // token separately; it is embedded in the URL query string.
+    const url = blobServer.getLink(Buffer.from(driveKeyHex, 'hex'), {
+      filename: blobPath,
+      mimetype: 'video/mp4'
+    })
+    return {
+      url,
+      token: blobServerToken,
+      // No built-in expiry inside a session; the token dies with the room.
+      expiresMs: null,
+      port: blobServer.port,
+      host: blobServer.host
+    }
+  }
+
   async function close() {
-    // Close all tracked drives + thumbnail cores.
     const errs = []
+    // Close blob server FIRST so it stops accepting new sockets, then drives.
+    // Rotates the in-memory token: the next room open mints a fresh one.
+    if (blobServer) {
+      try { await blobServer.close() } catch (err) { errs.push(err) }
+      blobServer = null
+      blobServerToken = null
+      blobServerReady = false
+    }
     for (const [_k, drive] of trackedDrives) {
       try { await drive.close() } catch (err) { errs.push(err) }
     }
@@ -358,12 +443,19 @@ async function createClips(store, opts) {
     listClips,
     getClip,
     getClipThumb,
+    getClipLink,
     publishMyDrive,
     trackPeerDrive,
     myDriveKey: myDriveKeyHex,
     myThumbCoreKey: myThumbCoreKeyHex,
+    get blobServerPort() { return blobServer ? blobServer.port : null },
+    get blobServerToken() { return blobServerToken },
+    get blobServerReady() { return blobServerReady },
     close,
-    _internal: { getClipCount: () => myClipCount }
+    _internal: {
+      getClipCount: () => myClipCount,
+      getBlobServer: () => blobServer
+    }
   }
 }
 
