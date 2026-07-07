@@ -16,7 +16,14 @@ const { createBackendClient } = require('./backend.js')
 const { createTipService } = require('./tip.js')
 const { createPredictionsClient } = require('./predictions.js')
 const { createAttendance, attendanceFlagEnabled } = require('./attendance.js')
-const { signInvitation, verifyInvitation } = require('./writerInvitation.js')
+const {
+  signInvitation,
+  verifyInvitation,
+  verifyInvitationWithTier
+} = require('./writerInvitation.js')
+const { attachTacticalChannel } = require('./tacticalChannel.js')
+const { topicForSlug } = require('./topics.js')
+const { createDemoTimeline, timelineFlagEnabled } = require('./demoTimeline.js')
 
 // T3 (Final Fix Wave): peer-invitation signing seed is a per-room, per-peer
 // value persisted in roomState under this key. Reading from
@@ -34,6 +41,21 @@ const LEGACY_INVITATION_ENV = 'CURVA_LEGACY_INVITATION_KEY'
 // racing addWriter cannot flood the base with writer promotions.
 const ADD_WRITER_LIMIT = 20
 const ADD_WRITER_WINDOW_MS = 60 * 60 * 1000 // 1 hour
+
+// Spectator tier feature flag. When false (rollout default) every invitation
+// is treated as `tier: 'writer'` even if the payload explicitly requests
+// reader, so a partial deploy with an old host cannot accidentally admit a
+// reader-tier peer as a full writer. When true the host honors the tier field
+// and diverts reader-tier invitations onto the tier-map path.
+// See `memory/impl_autopass_reader.md` for the full design memo.
+const SPECTATOR_TIER_ENV = 'CURVA_SPECTATOR_TIER_ENABLED'
+function spectatorTierEnabled() {
+  try {
+    const raw = (typeof process !== 'undefined' && process.env && process.env[SPECTATOR_TIER_ENV])
+    if (raw === undefined || raw === null || raw === '') return false
+    return String(raw).toLowerCase() === 'true'
+  } catch { return false }
+}
 
 /**
  * @param {Corestore} store
@@ -65,9 +87,15 @@ async function openRoom(store, opts) {
     // Wave 15: optional blind-peering client passed by the Bare worker. When
     // provided AND its status().enabled is true, the room registers the chat
     // and playhead Autobase discovery keys with the third-party blind peer so
-    // the room survives after every human peer disconnects. Nullable — the
+    // the room survives after every human peer disconnects. Nullable, the
     // room functions identically if this is unset (feature-flag off path).
-    blindPeering
+    blindPeering,
+    // Demo automation hooks: workers/main.js injects announcer + commentator +
+    // log + emit here so the timeline factory can drive already-shipped code
+    // paths (announcer.speak, commentator.onGoalCluster, `emit('badge:*')`).
+    // All fields are optional; the timeline degrades to no-op branches when
+    // any dep is missing. See bare/demoTimeline.js head memo.
+    demoHooks
   } = opts
   if (typeof slug !== 'string' || slug.length === 0) {
     throw new RangeError('slug must be a non-empty string')
@@ -218,6 +246,190 @@ async function openRoom(store, opts) {
     }
   }
 
+  // D1 + D2: demo-mode playhead hook fanout. Reads flags from env once at room
+  // open. See memory/impl_attendance_prediction.md "Feature flag summary" for
+  // the precedence rules. Notes:
+  //   1. `CURVA_DEMO_MODE` is the master. When true, the child flags default
+  //      true; when false the child flags default false unless explicitly set.
+  //   2. Existing per-feature enable flags (`CURVA_ATTENDANCE_ENABLED`,
+  //      `CURVA_PREDICTIONS_ENABLED`) still gate module instantiation above.
+  //      The demo flags only decide whether the modules fire automatically.
+  //   3. Docs verified against https://eips.ethereum.org/EIPS/eip-191 (N
+  //      signatures, no batch primitive) and
+  //      https://eips.ethereum.org/EIPS/eip-3009 (one sig per transfer).
+  function readBoolEnv(name, fallback) {
+    try {
+      const raw = (typeof process !== 'undefined' && process.env && process.env[name])
+      if (raw === undefined || raw === null || raw === '') return fallback
+      return String(raw).toLowerCase() === 'true'
+    } catch { return fallback }
+  }
+  const demoMasterOn = readBoolEnv('CURVA_DEMO_MODE', false)
+  const attendanceAutoIssue = readBoolEnv('CURVA_ATTENDANCE_AUTOISSUE', demoMasterOn)
+  const predictionsAutoOpen = readBoolEnv('CURVA_PREDICTIONS_AUTOOPEN', demoMasterOn)
+
+  const demoRosterFn = typeof opts.demoRoster === 'function' ? opts.demoRoster : null
+  const demoScoreFn = typeof opts.demoLiveScore === 'function' ? opts.demoLiveScore : null
+
+  // Guards so each auto-action fires exactly once per room lifetime.
+  let attendanceBatchFired = false
+  let predictionsAutoOpenFired = false
+  let predictionsAutoSettleFired = false
+  let predictionsAutoOpenedPoolId = null
+
+  // Turn on predictions demo mode BEFORE attaching the playhead so
+  // isDemoMode() short-circuit inside attachPlayhead() sees `true`.
+  if (predictionsAutoOpen && predictions && isHost) {
+    try {
+      predictions.enableDemoMode({ entryAmountUsdt: 1 })
+    } catch (err) {
+      console.warn('[Curva][Room] predictions.enableDemoMode failed:', err?.message)
+    }
+  }
+
+  const demoPlayheadUnsubs = []
+
+  async function collectDemoRoster() {
+    if (demoRosterFn) {
+      try {
+        const r = await demoRosterFn()
+        if (Array.isArray(r)) return r
+      } catch (err) {
+        console.warn('[Curva][Room] demoRoster callback threw:', err?.message)
+      }
+    }
+    // Fallback: scan roomState under `attendance/` to find previously-issued
+    // addresses. This lets a re-open pick up prior peers even without a
+    // dedicated roster registry (which does not yet live in pear-app).
+    const out = []
+    try {
+      const stream = roomState.createReadStream({
+        gt: 'attendance/',
+        lt: 'attendance0'
+      })
+      for await (const entry of stream) {
+        const addr = entry?.value?.peerAddress
+        if (typeof addr === 'string' && /^0x[0-9a-fA-F]{40}$/.test(addr)) {
+          out.push({ address: addr.toLowerCase(), handle: '' })
+        }
+      }
+    } catch { /* best-effort */ }
+    return out
+  }
+
+  async function collectDemoLiveScore() {
+    if (demoScoreFn) {
+      try {
+        const s = await demoScoreFn()
+        if (s && typeof s === 'object') return s
+      } catch (err) {
+        console.warn('[Curva][Room] demoLiveScore callback threw:', err?.message)
+      }
+    }
+    // Fallback: no in-process goalLog module exists in pear-app today (the
+    // canonical one lives at backend/src/lib/liveMatch/goalLog.ts). Return a
+    // safe default so the demo settlement path still runs end to end.
+    return { winner: 'HOME', homeGoals: 1, awayGoals: 0 }
+  }
+
+  async function forceSettleViaBackend(poolId) {
+    if (!backend || typeof backend.baseUrl !== 'string') return { ok: false, reason: 'backend-unavailable' }
+    if (typeof fetch !== 'function') return { ok: false, reason: 'no-fetch' }
+    const url = backend.baseUrl + '/predictions/force-settle/' + encodeURIComponent(poolId)
+    try {
+      const score = await collectDemoLiveScore()
+      const headers = { 'Content-Type': 'application/json', 'Accept': 'application/json' }
+      const debugBearer = (typeof process !== 'undefined' && process.env && process.env.CURVA_DEBUG_BEARER) || ''
+      if (debugBearer) headers.Authorization = 'Bearer ' + debugBearer
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          winner: score.winner,
+          homeGoals: Number(score.homeGoals),
+          awayGoals: Number(score.awayGoals)
+        })
+      })
+      return { ok: resp.ok, status: resp.status }
+    } catch (err) {
+      return { ok: false, reason: err?.message || 'fetch-failed' }
+    }
+  }
+
+  // Single subscription that fans out to attendance (kickoff) and predictions
+  // (auto-open + auto-settle). We attach ONLY if at least one demo flag is
+  // requesting host-side action, and only when isHost is true.
+  if (isHost && (attendanceAutoIssue || predictionsAutoOpen)) {
+    const off = playhead.onUpdate(async (state) => {
+      if (!state || typeof state.match_time_ms !== 'number') return
+
+      // D1 attendance batch mint at kickoff (match_time_ms >= 0, once).
+      if (attendanceAutoIssue && attendance && !attendanceBatchFired && state.match_time_ms >= 0) {
+        attendanceBatchFired = true
+        try {
+          const roster = await collectDemoRoster()
+          const res = await attendance.issuePassesForRoster(roster)
+          console.log('[Curva][Room] attendance batch:',
+            res.issued.length, 'issued,',
+            res.skipped.length, 'skipped,',
+            res.failed.length, 'failed')
+        } catch (err) {
+          console.warn('[Curva][Room] attendance batch failed:', err?.message)
+        }
+      }
+
+      // D2 auto-open pool at t=2s.
+      if (predictionsAutoOpen && predictions && !predictionsAutoOpenFired && state.match_time_ms >= 2_000) {
+        predictionsAutoOpenFired = true
+        try {
+          const matchId = typeof opts.matchId === 'string' ? opts.matchId : ''
+          if (matchId) {
+            const opened = await predictions.openPool({
+              matchId,
+              mode: 'winner-only',
+              deadlineMs: Date.now() + 20 * 60_000
+            })
+            predictionsAutoOpenedPoolId = opened?.poolId || null
+            console.log('[Curva][Room] predictions auto-open:', predictionsAutoOpenedPoolId)
+          } else {
+            console.warn('[Curva][Room] predictions auto-open skipped: no matchId')
+          }
+        } catch (err) {
+          console.warn('[Curva][Room] predictions auto-open failed:', err?.message)
+        }
+      }
+
+      // D2 auto-settle at 90 min. Reads live score, publishes result, then
+      // fetches POST /predictions/force-settle/:poolId so the backend
+      // settlement worker runs synchronously without waiting for the tick.
+      if (predictionsAutoOpen && predictions && !predictionsAutoSettleFired && state.match_time_ms >= 5_400_000) {
+        predictionsAutoSettleFired = true
+        try {
+          const score = await collectDemoLiveScore()
+          const pid = predictionsAutoOpenedPoolId
+          if (pid && score && ['HOME','AWAY','DRAW'].includes(score.winner)) {
+            await predictions.publishResult({
+              poolId: pid,
+              winner: score.winner,
+              homeGoals: Number(score.homeGoals),
+              awayGoals: Number(score.awayGoals),
+              matchId: typeof opts.matchId === 'string' ? opts.matchId : ''
+            })
+            const settleRes = await forceSettleViaBackend(pid)
+            console.log('[Curva][Room] predictions auto-settle:', settleRes)
+          } else {
+            console.warn('[Curva][Room] predictions auto-settle skipped', {
+              pid, winner: score?.winner
+            })
+          }
+        } catch (err) {
+          console.warn('[Curva][Room] predictions auto-settle failed:', err?.message)
+        }
+      }
+    })
+    demoPlayheadUnsubs.push(off)
+  }
+
   // Wave 8A: writer roster + Pattern B addWriter plumbing.
   //
   // The host holds an in-memory rate-limit map keyed by requesting peer pubkey
@@ -257,6 +469,25 @@ async function openRoom(store, opts) {
 
   const writerRoster = await loadWriterRoster()
 
+  // Rehydrate the reader-tier denylist from persisted state so a rebooting host
+  // resumes rejecting reader-tier appends without waiting for the peer to
+  // re-invite. Best-effort: a stream failure leaves the Set empty and the next
+  // successful handleWriterRequest re-adds the key.
+  if (typeof chat.addReaderKey === 'function') {
+    try {
+      const stream = roomState.createReadStream({
+        gt: 'room/tier-map/',
+        lt: 'room/tier-map0'
+      })
+      for await (const entry of stream) {
+        if (entry?.value?.tier === 'reader') {
+          const hex = entry.key.slice('room/tier-map/'.length)
+          if (/^[0-9a-f]{64}$/.test(hex)) chat.addReaderKey(hex)
+        }
+      }
+    } catch { /* best-effort */ }
+  }
+
   /**
    * Host-only. Validates a pair of signed invitations (one per base, since
    * chat and playhead Autobases have distinct namespaced writer keys) and
@@ -281,8 +512,31 @@ async function openRoom(store, opts) {
     }
     const chatInv = payload.chat
     const phInv = payload.playhead
-    if (!verifyInvitation(chatInv)) return { ok: false, reason: 'bad-chat-signature-or-expired' }
-    if (!verifyInvitation(phInv)) return { ok: false, reason: 'bad-playhead-signature-or-expired' }
+
+    // Verify with tier so a reader-tier invitation cannot be silently downgraded
+    // by a re-serialization step in the wire path. Callers that only need the
+    // boolean gate use the plain `verifyInvitation` above; here we branch on
+    // the returned tier and MUST know it.
+    const chatRes = verifyInvitationWithTier(chatInv)
+    const phRes = verifyInvitationWithTier(phInv)
+    if (!chatRes.ok) return { ok: false, reason: 'bad-chat-signature-or-expired' }
+    if (!phRes.ok) return { ok: false, reason: 'bad-playhead-signature-or-expired' }
+
+    // Feature-flag gate: when the spectator tier is OFF, any reader-tier
+    // invitation is treated as writer so an experimental client running against
+    // an unupgraded host does not brick itself. When ON, both invitations MUST
+    // agree on tier so a malformed payload cannot mint a hybrid promotion.
+    const flagOn = spectatorTierEnabled()
+    let tier
+    if (!flagOn) {
+      tier = 'writer'
+    } else {
+      if (chatRes.tier !== phRes.tier) {
+        return { ok: false, reason: 'tier-mismatch' }
+      }
+      tier = chatRes.tier
+    }
+
     if (typeof peerPubkey !== 'string' || peerPubkey.length === 0) {
       return { ok: false, reason: 'peer-id-required' }
     }
@@ -294,13 +548,63 @@ async function openRoom(store, opts) {
     const phWriterHex = phInv.pubkey.toLowerCase()
 
     // Idempotent: if we've already added this pair, ack success so peer
-    // doesn't panic-fall-back to Pattern A on reconnect.
+    // doesn't panic-fall-back to Pattern A on reconnect. Reader-tier peers are
+    // never in `writerRoster`, so this short-circuit is writer-tier only.
     if (writerRoster.has(chatWriterHex) && writerRoster.has(phWriterHex)) {
-      return { ok: true, reason: 'already-writer', addedAt: Date.now(), bases: ['chat', 'playhead'] }
+      return { ok: true, reason: 'already-writer', tier: 'writer', addedAt: Date.now(), bases: ['chat', 'playhead'] }
     }
 
-    // Autobase Pattern B addWriter is done by appending a control block that
-    // the reducer applies via `host.addWriter(...)` — see the autobase README
+    const addedAt = Date.now()
+
+    if (tier === 'reader') {
+      // Reader-tier (Autopass idiom). We do NOT call `base.append({addWriter})`
+      // at all. The peer's key never reaches Autobase's writer roster, so any
+      // optimistic `base.append()` from that peer is rejected at the linearizer
+      // level by autobase itself (source: pear-app/node_modules/autobase/lib/apply-state.js
+      // gates admission on system.get(writer.core.key)). Defense-in-depth
+      // is added via chat.js `addReaderKey`, which drops any message from a
+      // reader hex before it can reach `view.put`.
+      //
+      // Persist under `room/tier-map/<hex>` so a rebooting host loads the
+      // reader denylist back into chat.js.
+      try {
+        await roomState.put('room/tier-map/' + chatWriterHex, {
+          base: 'chat', addedAt, invitedBy: myPubkey, tier: 'reader'
+        })
+        await roomState.put('room/tier-map/' + phWriterHex, {
+          base: 'playhead', addedAt, invitedBy: myPubkey, tier: 'reader'
+        })
+      } catch { /* best-effort persistence */ }
+
+      if (typeof chat.addReaderKey === 'function') {
+        chat.addReaderKey(chatWriterHex)
+        chat.addReaderKey(phWriterHex)
+      }
+
+      // Broadcast roster metadata so peers see the reader join. Host-only
+      // gated in chat.js apply() (same model as system:commentary and other
+      // system:* broadcasts). Emitted best-effort: a stale send-side failure
+      // does not undo the tier-map write above.
+      try {
+        if (typeof chat.sendSystem === 'function') {
+          await chat.sendSystem({
+            type: 'system:reader-joined',
+            by_peer: myPubkey,
+            wall_clock_ms: addedAt,
+            match_time_ms: 0,
+            readerHex: chatWriterHex
+          })
+        }
+      } catch (err) {
+        console.log('[Curva][Room] system:reader-joined broadcast failed:', err?.message)
+      }
+
+      return { ok: true, tier: 'reader', addedAt, bases: ['chat', 'playhead'] }
+    }
+
+    // Writer-tier path (unchanged). Autobase Pattern B addWriter is done by
+    // appending a control block that the reducer applies via `host.addWriter(...)`
+    // — see the autobase README
     // (`if (value.addWriter) await host.addWriter(value.addWriter, { indexer: true })`).
     // A direct `base.addWriter(...)` method does NOT exist on the Autobase
     // instance (that method lives on the `host` object passed to apply()).
@@ -314,7 +618,6 @@ async function openRoom(store, opts) {
       return { ok: false, reason: 'addWriter-failed:' + (err?.message || 'unknown') }
     }
 
-    const addedAt = Date.now()
     writerRoster.add(chatWriterHex)
     writerRoster.add(phWriterHex)
     try {
@@ -333,8 +636,22 @@ async function openRoom(store, opts) {
     if (typeof chat.addAuthorizedWriter === 'function') {
       chat.addAuthorizedWriter(chatWriterHex)
     }
+    // Upgrade path: a peer previously admitted as reader is now being promoted
+    // to writer. Remove their key from the chat reader denylist so their
+    // appends stop being silently dropped at apply(). No-op for peers that
+    // were never readers.
+    if (typeof chat.removeReaderKey === 'function') {
+      chat.removeReaderKey(chatWriterHex)
+      chat.removeReaderKey(phWriterHex)
+    }
+    // Clean up any stale tier-map entry for the same hex so the persisted
+    // state reflects the current writer tier on rehydration.
+    try {
+      await roomState.del('room/tier-map/' + chatWriterHex)
+      await roomState.del('room/tier-map/' + phWriterHex)
+    } catch { /* best-effort */ }
 
-    return { ok: true, addedAt, bases: ['chat', 'playhead'] }
+    return { ok: true, tier: 'writer', addedAt, bases: ['chat', 'playhead'] }
   }
 
   // T3 (Final Fix Wave): load or generate a persisted per-peer invitation
@@ -402,7 +719,23 @@ async function openRoom(store, opts) {
    * `base.local.key` (fetched via `getMyWriterKeys()` below) as the actual
    * Autobase writer.
    */
-  async function signMyWriterInvitations() {
+  async function signMyWriterInvitations(opts) {
+    // Optional tier field: default to legacy (no tier) so the produced payload
+    // is byte-compat with pre-spectator-tier hosts. When explicitly set the
+    // resulting sig binds to the tier (v2 canonical bytes).
+    const rawTier = opts && typeof opts === 'object' ? opts.tier : undefined
+    if (rawTier !== undefined) {
+      if (rawTier !== 'reader' && rawTier !== 'writer') {
+        throw new RangeError('tier must be one of reader|writer')
+      }
+      if (rawTier === 'reader' && !spectatorTierEnabled()) {
+        const err = new Error('FEATURE_DISABLED')
+        err.code = 'FEATURE_DISABLED'
+        throw err
+      }
+    }
+    const signOpts = rawTier !== undefined ? { tier: rawTier } : undefined
+
     if (process.env[LEGACY_INVITATION_ENV] === '1') {
       const chatBase = chat.getBase?.()
       const phBase = playhead.getBase?.()
@@ -410,15 +743,17 @@ async function openRoom(store, opts) {
         throw new Error('local writer keypairs not ready')
       }
       return {
-        chat: signInvitation(chatBase.local.keyPair),
-        playhead: signInvitation(phBase.local.keyPair)
+        chat: signInvitation(chatBase.local.keyPair, undefined, signOpts),
+        playhead: signInvitation(phBase.local.keyPair, undefined, signOpts),
+        ...(rawTier !== undefined ? { tier: rawTier } : {})
       }
     }
 
     const { chat: chatKp, playhead: phKp } = await getInvitationKeyPairs()
     return {
-      chat: signInvitation(chatKp),
-      playhead: signInvitation(phKp)
+      chat: signInvitation(chatKp, undefined, signOpts),
+      playhead: signInvitation(phKp, undefined, signOpts),
+      ...(rawTier !== undefined ? { tier: rawTier } : {})
     }
   }
 
@@ -442,6 +777,157 @@ async function openRoom(store, opts) {
         publishedAt: Date.now()
       })
     }
+  }
+
+  // Tactical drawing channel (protomux, ephemeral).
+  //
+  // The host publishes its Hyperswarm identity pubkey into room-state so peers
+  // can validate `freeze`/`unfreeze` frames. Peers read the same key lazily
+  // via `hostPubkeyRef.get()` — read-through on every inbound host frame so a
+  // late-arriving host-pubkey write still unblocks verification without a
+  // channel restart.
+  if (isHost) {
+    try {
+      await roomState.put('room/host-pubkey', {
+        pubkeyHex: myPubkey,
+        publishedAt: Date.now()
+      })
+    } catch (err) {
+      console.warn('[Curva][Room] host-pubkey publish failed:', err?.message)
+    }
+  }
+
+  // Cached host pubkey hex. Host: known immediately (myPubkey). Peer: filled
+  // lazily on first read from roomState.
+  let cachedHostPubkeyHex = isHost ? String(myPubkey || '').toLowerCase() : ''
+  let hostPubkeyRefreshInFlight = null
+  async function refreshHostPubkey() {
+    if (isHost) return cachedHostPubkeyHex
+    if (hostPubkeyRefreshInFlight) return hostPubkeyRefreshInFlight
+    hostPubkeyRefreshInFlight = (async () => {
+      try {
+        const entry = await roomState.get('room/host-pubkey')
+        const hex = entry?.value?.pubkeyHex
+        if (typeof hex === 'string' && hex.length > 0) {
+          cachedHostPubkeyHex = hex.toLowerCase()
+        }
+      } catch { /* best-effort */ }
+      hostPubkeyRefreshInFlight = null
+      return cachedHostPubkeyHex
+    })()
+    return hostPubkeyRefreshInFlight
+  }
+  // Kick off an initial refresh so the peer path warms the cache without
+  // blocking openRoom on replication catchup.
+  if (!isHost) refreshHostPubkey().catch(() => {})
+
+  const hostPubkeyRef = {
+    get() {
+      // If empty on peer, schedule a lazy refresh so the next inbound frame
+      // will succeed. Do NOT await here — this method is called from the
+      // channel's sync onmessage path.
+      if (!cachedHostPubkeyHex && !isHost) refreshHostPubkey().catch(() => {})
+      return cachedHostPubkeyHex || null
+    }
+  }
+
+  // Room-scoped tactical event bus. workers/main.js (or any consumer) can
+  // subscribe with `room.onTactical(kind, cb)` and receive validated frames.
+  // Kinds: 'stroke' | 'presence' | 'typing' | 'freeze' | 'unfreeze'.
+  const tacticalSubs = {
+    stroke: new Set(),
+    presence: new Set(),
+    typing: new Set(),
+    freeze: new Set(),
+    unfreeze: new Set()
+  }
+  function fanTactical(kind, msg) {
+    const set = tacticalSubs[kind]
+    if (!set) return
+    for (const cb of set) {
+      try { cb(msg) } catch (err) {
+        console.warn('[Curva][Room] tactical fanout error', kind, err?.message)
+      }
+    }
+  }
+  function onTactical(kind, cb) {
+    if (!tacticalSubs[kind]) throw new RangeError('unknown tactical kind: ' + kind)
+    if (typeof cb !== 'function') throw new TypeError('cb must be function')
+    tacticalSubs[kind].add(cb)
+    return () => tacticalSubs[kind].delete(cb)
+  }
+
+  // Per-connection tactical channel handles. Keyed by the connection object
+  // so `detachTacticalForConn(conn)` can be called from the swarm's
+  // 'close' callback. Values are the handle returned by attachTacticalChannel.
+  const tacticalHandles = new Map()
+  const roomTopic = topicForSlug(slug)
+
+  /**
+   * Attach a tactical channel to a corestore replication stream (or an
+   * already-resolved Protomux). Idempotent per `conn` — a second call with
+   * the same connection returns the existing handle.
+   *
+   * @param {object} streamOrMux  return value of `store.replicate(conn)` OR
+   *                              a Protomux resolved via
+   *                              `Hypercore.getProtocolMuxer(stream)`.
+   * @param {object} [conn]       optional swarm connection used as the map
+   *                              key; if omitted, the stream itself is used.
+   * @returns {object|null}       tactical handle, or null on failure
+   */
+  function attachTacticalToStream(streamOrMux, conn) {
+    const key = conn || streamOrMux
+    if (tacticalHandles.has(key)) return tacticalHandles.get(key)
+    try {
+      const handle = attachTacticalChannel(streamOrMux, {
+        roomTopic,
+        isHost,
+        hostPubkeyRef,
+        myPubkeyHex: myPubkey,
+        onStroke:   (m) => fanTactical('stroke', m),
+        onPresence: (m) => fanTactical('presence', m),
+        onTyping:   (m) => fanTactical('typing', m),
+        onFreeze:   (m) => fanTactical('freeze', m),
+        onUnfreeze: (m) => fanTactical('unfreeze', m)
+      })
+      tacticalHandles.set(key, handle)
+      return handle
+    } catch (err) {
+      console.warn('[Curva][Room] tactical attach failed:', err?.message)
+      return null
+    }
+  }
+
+  function detachTacticalForConn(conn) {
+    const key = conn
+    const h = tacticalHandles.get(key)
+    if (!h) return false
+    try { h.close() } catch { /* noop */ }
+    tacticalHandles.delete(key)
+    return true
+  }
+
+  // Fan-out senders. Broadcast to every attached channel; the caller does not
+  // need to know which peers are live.
+  function forEachTactical(fn) {
+    for (const h of tacticalHandles.values()) {
+      try { fn(h) } catch (err) {
+        console.warn('[Curva][Room] tactical send error:', err?.message)
+      }
+    }
+  }
+  function sendTacticalStroke(payload)   { forEachTactical((h) => h.sendStroke(payload)) }
+  function sendTacticalPresence(payload) { forEachTactical((h) => h.sendPresence(payload)) }
+  function sendTacticalTyping(payload)   { forEachTactical((h) => h.sendTyping(payload)) }
+  function sendTacticalFreeze(payload) {
+    if (!isHost) return false
+    forEachTactical((h) => h.sendFreeze(payload))
+    return true
+  }
+  function sendTacticalUnfreeze(payload) {
+    if (!isHost) return false
+    forEachTactical((h) => h.sendUnfreeze(payload))
+    return true
   }
 
   // Wave 15: blind-peering registration hook. When the CURVA_BLIND_PEERING_ENABLED
@@ -486,6 +972,18 @@ async function openRoom(store, opts) {
     if (closed) return
     closed = true
     const errs = []
+    // Detach the demo playhead subscription first so no more auto-fire
+    // callbacks can queue behind the close.
+    for (const off of demoPlayheadUnsubs) {
+      try { off() } catch (err) { errs.push(err) }
+    }
+    // Tear down every tactical channel handle. The channels are ephemeral
+    // side-traffic; there is no drain step.
+    for (const h of tacticalHandles.values()) {
+      try { h.close() } catch (err) { errs.push(err) }
+    }
+    tacticalHandles.clear()
+    for (const set of Object.values(tacticalSubs)) set.clear()
     // Wave 15: unregister blind-peering entries FIRST so the client stops
     // making addAutobase attempts against a base that is about to close. This
     // keeps close() idempotent even if the blind peer is unreachable.
@@ -505,6 +1003,47 @@ async function openRoom(store, opts) {
       const first = errs[0]
       throw new Error('close errors: ' + first.message)
     }
+  }
+
+  // Demo automation timeline. Host-only. Feature-flagged by
+  // CURVA_DEMO_AUTOMATION_ENABLED. See bare/demoTimeline.js. The instance is
+  // lazy-created on the first trigger so opening a room does no work when the
+  // flag is off. Callers on non-host or with the flag off receive null status.
+  let demoTimeline = null
+  function ensureDemoTimeline() {
+    if (demoTimeline) return demoTimeline
+    if (!isHost) return null
+    if (!timelineFlagEnabled()) return null
+    const hooks = demoHooks || {}
+    demoTimeline = createDemoTimeline({
+      room: { slug, isHost, myPubkey },
+      chat,
+      tip,
+      predictions,
+      attendance,
+      playhead,
+      announcer: hooks.announcer || null,
+      commentator: hooks.commentator || null,
+      log: typeof hooks.log === 'function'
+        ? hooks.log
+        : (level, msg, extra) => console.log('[Curva][DemoTimeline]', level, msg, extra || ''),
+      emit: typeof hooks.emit === 'function' ? hooks.emit : () => {},
+      now: typeof hooks.now === 'function' ? hooks.now : () => Date.now()
+    })
+    return demoTimeline
+  }
+  function triggerDemoTimeline() {
+    const tl = ensureDemoTimeline()
+    if (!tl) return null
+    return tl.start()
+  }
+  function abortDemoTimeline() {
+    if (!demoTimeline) return { state: 'idle', elapsedMs: 0, currentStep: 0, totalSteps: 0 }
+    return demoTimeline.stop()
+  }
+  function demoTimelineStatus() {
+    if (!demoTimeline) return { state: 'idle', elapsedMs: 0, currentStep: 0, totalSteps: 0 }
+    return demoTimeline.status()
   }
 
   return {
@@ -531,6 +1070,26 @@ async function openRoom(store, opts) {
     handleWriterRequest,
     signMyWriterInvitations,
     getWriterRoster,
+    // Tactical drawing channel surface. Callers wire per-connection channels
+    // by invoking `attachTacticalToStream(stream, conn)` in the swarm's
+    // 'connection' handler and `detachTacticalForConn(conn)` on close.
+    // Renderer-facing sends fan out to all attached channels.
+    attachTacticalToStream,
+    detachTacticalForConn,
+    onTactical,
+    sendTacticalStroke,
+    sendTacticalPresence,
+    sendTacticalTyping,
+    sendTacticalFreeze,
+    sendTacticalUnfreeze,
+    // Exposed for tests + workers/main.js retro-attach on late room:join.
+    getHostPubkeyRef: () => hostPubkeyRef,
+    getRoomTopic: () => roomTopic,
+    // Demo automation surface. Host-only + flag-gated at construction; on non-
+    // host or flag-off calls, trigger returns null. See bare/demoTimeline.js.
+    triggerDemoTimeline,
+    abortDemoTimeline,
+    demoTimelineStatus,
     close
   }
 }
