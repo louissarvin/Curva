@@ -18,6 +18,12 @@
 // Rate limit: max 3 passes per peer per hour (reconnect churn tolerance).
 // Feature flag: CURVA_ATTENDANCE_ENABLED (default off).
 
+// Tier 4 Round 2: keet portable identity attestations. Attendance-issued
+// messages are host-authored, so when the feature flag is on the host attests
+// them; guests verify against the host's identity public key. A null handle
+// means "feature off / not yet loaded" -> skip attestation gracefully.
+const { getKeetIdentity } = require('./identity.js')
+
 const LOG = '[Curva][Attendance]'
 const HEX_ADDR = /^0x[0-9a-fA-F]{40}$/
 const HEX_SIG = /^0x[0-9a-fA-F]{130,132}$/
@@ -171,7 +177,7 @@ function createAttendance(opts = {}) {
     // Broadcast to chat. The `system:attendance-issued` type is host-only in
     // chat.js apply(); any non-host writer's append is silently dropped.
     try {
-      await chat.sendSystem({
+      const issuedMsg = {
         type: 'system:attendance-issued',
         by_peer: peer,
         match_time_ms: 0,
@@ -181,7 +187,21 @@ function createAttendance(opts = {}) {
         matchId: matchId || null,
         issuedAt,
         signature: pass.signature
-      })
+      }
+      // Tier 4 Round 2: host attests the attendance-issued payload with keet
+      // portable identity when the feature flag is on. attest() returns null
+      // when disabled or not-yet-loaded -> field is dropped.
+      try {
+        const keet = getKeetIdentity()
+        if (keet && typeof keet.attest === 'function') {
+          const proof = keet.attest(issuedMsg)
+          if (proof) issuedMsg.identity_proof = proof
+        }
+      } catch (err) {
+        // Never let attestation errors block pass broadcast.
+        log('warn', 'keet-identity attest (system:attendance-issued) failed', { message: err?.message })
+      }
+      await chat.sendSystem(issuedMsg)
     } catch (err) {
       log('warn', 'attendance chat.sendSystem failed', { message: err?.message })
       return { ok: false, reason: 'BROADCAST_FAILED', pass }
@@ -223,8 +243,63 @@ function createAttendance(opts = {}) {
     }
   }
 
+  /**
+   * D1 batch mint: iterate a roster and issue one attendance pass per entry.
+   *
+   * Per the memo (memory/impl_attendance_prediction.md) and docs verified
+   * against https://eips.ethereum.org/EIPS/eip-191 (no batch primitive) plus
+   * https://docs.wdk.tether.io/sdk/wallet-modules/wallet-evm-erc-4337/api-reference/
+   * (no batch signing API), each peer gets its own EIP-191 signature via the
+   * existing single-mint `issuePass()`. This produces N chat pills, N Hyperbee
+   * rows, N recoverable signatures. Merkle aggregation is intentionally not
+   * shipped (see memo section "Design decision").
+   *
+   * @param {Array<{address: string, handle?: string}>} roster
+   * @param {{force?: boolean}} [extra]
+   * @returns {Promise<{
+   *   issued: Array<object>,
+   *   skipped: Array<string>,
+   *   failed: Array<{address: string, reason: string}>
+   * }>}
+   */
+  async function issuePassesForRoster(roster, extra = {}) {
+    const out = { issued: [], skipped: [], failed: [] }
+    if (!attendanceFlagEnabled()) return out
+    if (!isHost) return out
+    if (!Array.isArray(roster)) return out
+
+    const force = !!extra.force
+
+    for (const entry of roster) {
+      const rawAddr = entry && typeof entry === 'object' ? entry.address : null
+      if (typeof rawAddr !== 'string' || !HEX_ADDR.test(rawAddr)) {
+        out.failed.push({
+          address: typeof rawAddr === 'string' ? rawAddr : '',
+          reason: 'ADDRESS_INVALID'
+        })
+        continue
+      }
+      const addr = rawAddr.toLowerCase()
+      const res = await issuePass(addr, { force })
+      if (res.ok && res.cached && !force) {
+        out.skipped.push(addr)
+      } else if (res.ok) {
+        out.issued.push(res.pass)
+      } else {
+        out.failed.push({ address: addr, reason: res.reason || 'UNKNOWN' })
+      }
+    }
+    log('info', 'attendance batch complete', {
+      issued: out.issued.length,
+      skipped: out.skipped.length,
+      failed: out.failed.length
+    })
+    return out
+  }
+
   return {
     issuePass,
+    issuePassesForRoster,
     listPasses,
     getPass,
     // Read-only introspection.
