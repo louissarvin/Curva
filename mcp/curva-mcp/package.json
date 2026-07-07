@@ -1,0 +1,38 @@
+{
+  "name": "@curva/curva-mcp",
+  "version": "0.1.0",
+  "description": "Standalone MCP server exposing Curva watch-party capabilities on top of @tetherto/wdk-mcp-toolkit. Wraps the Curva Companion backend and a WDK ERC-4337 Sepolia wallet so Claude Desktop and Cursor can join rooms, tip hosts, run prediction pools, pay x402 resources, and mint attendance passes.",
+  "type": "module",
+  "bin": {
+    "curva-mcp": "src/index.js"
+  },
+  "main": "src/index.js",
+  "scripts": {
+    "dev": "node src/index.js",
+    "start": "node src/index.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "mcp",
+    "wdk",
+    "tether",
+    "usdt",
+    "erc-4337",
+    "eip-3009",
+    "x402",
+    "curva",
+    "pears"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@tetherto/wdk-mcp-toolkit": "1.0.0-beta.1",
+    "@modelcontextprotocol/sdk": "^1.20.0",
+    "@tetherto/wdk-wallet-evm-erc-4337": "1.0.0-beta.10",
+    "@tetherto/wdk-secret-manager": "1.0.0-beta.3",
+    "ethers": "^6.13.0",
+    "zod": "^3.23.8",
+    "undici": "^6.19.0"
+  }
+}
