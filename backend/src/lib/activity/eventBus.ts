@@ -147,6 +147,12 @@ export interface FacilitatorSubmittedPayload {
   amountFormatted: string;
   roomSlug: string | null;
   matchId: string | null;
+  // Optional: 'eip3009_self_tip' when produced by /wdk/relay/demo-self-tip
+  // (sponsor signs a TransferWithAuthorization on itself). Absent (or omitted)
+  // when produced by the real EIP-3009 relay path from a peer signer. The
+  // legacy 'self_transfer' variant is retained for backwards compatibility
+  // with historical rows that pre-date Path B.
+  mode?: 'self_transfer' | 'eip3009' | 'eip3009_self_tip';
 }
 
 export interface FacilitatorConfirmedPayload extends FacilitatorSubmittedPayload {

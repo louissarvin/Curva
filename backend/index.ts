@@ -37,12 +37,13 @@ import { wdkAttributionRoutes } from './src/routes/wdkAttributionRoutes.ts';
 import { tokenDomainRoutes } from './src/routes/tokenDomainRoutes.ts';
 import { qvacRoutes } from './src/routes/qvacRoutes.ts';
 import { distributionRoutes } from './src/routes/distributionRoutes.ts';
+import { pearsRoutes } from './src/routes/pearsRoutes.ts';
 import { pricingRoutes } from './src/routes/pricingRoutes.ts';
 import { mcpRoutes, initMcpRegistries } from './src/routes/mcpRoutes.ts';
 import { predictionRoutes } from './src/routes/predictionRoutes.ts';
 import { x402Routes } from './src/routes/x402Routes.ts';
 import { attendanceRoutes } from './src/routes/attendanceRoutes.ts';
-import { MCP_ENABLED, CURVA_PREDICTIONS_ENABLED, CURVA_X402_ENABLED, CURVA_ATTENDANCE_ENABLED } from './src/config/main-config.ts';
+import { MCP_ENABLED, CURVA_PREDICTIONS_ENABLED, CURVA_X402_ENABLED, CURVA_ATTENDANCE_ENABLED, RELAY_DEMO_ENABLED } from './src/config/main-config.ts';
 import { getToolCount, getResourceCount } from './src/lib/mcp/server.ts';
 
 // F10: multi-chain awareness — boot log shows which chains are enabled so
@@ -225,6 +226,19 @@ await fastify.register(dashboardRoutes);
 // /wdk/relay/health. When RELAY_SPONSOR_PK is unset OR RELAY_SPONSOR_ENABLED
 // is false, every route in this plugin returns 404 (hide-existence per ADR-010).
 await fastify.register(facilitatorRoutes, { prefix: '/wdk/relay' });
+if (RELAY_DEMO_ENABLED) {
+  // Sponsor-signs-EIP-3009-on-itself endpoint used by the 3-minute stage demo.
+  // Path B: sponsor builds and signs a TransferWithAuthorization with
+  // from == to == sponsor, then relays it through submitEip3009Relay() — the
+  // same code path as POST /wdk/relay/eip3009 — so the tx emits BOTH the
+  // ERC-20 Transfer event AND the EIP-3009 AuthorizationUsed event. Gated by
+  // RELAY_DEMO_ENABLED so production builds never expose it (route returns
+  // 404 when the flag is off).
+  // See facilitatorRoutes.ts POST /wdk/relay/demo-self-tip (mode=eip3009_self_tip).
+  console.log('[Boot] Demo self-tip route enabled at POST /wdk/relay/demo-self-tip (mode=eip3009_self_tip, sponsor signs transferWithAuthorization on itself; RELAY_DEMO_ENABLED=true)');
+} else {
+  console.log('[Boot] Demo self-tip route disabled (RELAY_DEMO_ENABLED unset or false; POST /wdk/relay/demo-self-tip returns 404)');
+}
 // Wave 6 Tier 2: public tip-verification share URL. Reads only FacilitatorTx +
 // Room, so it stays available whether the facilitator itself is enabled or not
 // (as long as historical rows exist in the DB).
@@ -247,6 +261,11 @@ await fastify.register(qvacRoutes, { prefix: '/qvac' });
 // Endpoints stay reachable even when PEAR_APP_KEY is unset — they return a
 // stable "coming soon" shape so the URL is a discoverable pointer for judges.
 await fastify.register(distributionRoutes);
+// Live Pears primitives status endpoint. Public snapshot of every Pears
+// building block Curva exercises + app key + active rooms + WDK network
+// summary. Consumed by the marketing site (SSR /, /architecture) and by
+// judges curl-ing to verify real state. Rate-limited 60/min/IP.
+await fastify.register(pearsRoutes, { prefix: '/pears' });
 // Wave 7 Zone C: Fiat pricing (USDT -> IDR/EUR/GBP/BRL/MXN/JPY/USD).
 // Public. 60/min/IP rate limit. Bitfinex (peg) + Frankfurter (ECB refs).
 await fastify.register(pricingRoutes, { prefix: '/pricing' });

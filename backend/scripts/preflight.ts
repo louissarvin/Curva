@@ -252,12 +252,12 @@ async function checkPearDistribution(): Promise<void> {
       record('backend/distribution', 'fail', `HTTP ${res.status}`)
       return
     }
-    const body = await res.json() as { data?: { pearAppKey?: string; version?: string } }
-    if (!body.data?.pearAppKey) {
+    const body = await res.json() as { data?: { appKey?: string; version?: string } }
+    if (!body.data?.appKey) {
       record('backend/distribution', 'fail', 'PEAR_APP_KEY unset (run pear:stage first)')
       return
     }
-    record('backend/distribution', 'pass', `${body.data.pearAppKey.slice(0, 24)}... v${body.data.version}`)
+    record('backend/distribution', 'pass', `${body.data.appKey.slice(0, 24)}... v${body.data.version}`)
   } catch (err: any) {
     record('backend/distribution', 'error', err?.message || 'unknown')
   }

@@ -16,7 +16,8 @@
     "generate:secrets": "bun scripts/generate-secrets.ts",
     "prewarm:models": "bun scripts/prewarm-models.ts",
     "verify:qvac-models": "bun scripts/verify-qvac-models.ts",
-    "preflight": "bun scripts/preflight.ts"
+    "preflight": "bun scripts/preflight.ts",
+    "treasury:setup": "bun scripts/setup-treasury.ts"
   },
   "keywords": [],
   "author": "",

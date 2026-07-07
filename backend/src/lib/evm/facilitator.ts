@@ -265,8 +265,17 @@ export const submitEip3009Relay = async (
       return { txHash, sponsorAddress: SPONSOR_ADDRESS as string };
     } catch (err) {
       const msg = (err as Error)?.message ?? String(err);
-      // Classify EIP-3009 "authorization already used" from other on-chain
-      // rejections. Token contracts vary; look for the canonical revert string.
+      // Log the FULL error so backend log shows what actually reverted
+      // instead of the generic "RPC submit failed" that hid the root cause.
+      // eslint-disable-next-line no-console
+      console.error('[facilitator] transferWithAuthorization threw:', {
+        message: msg,
+        code: (err as { code?: unknown })?.code,
+        data: (err as { data?: unknown })?.data,
+        reason: (err as { reason?: unknown })?.reason,
+        errorArgs: (err as { errorArgs?: unknown })?.errorArgs,
+        info: (err as { info?: unknown })?.info,
+      });
       if (
         /authorization is used/i.test(msg) ||
         /authorization used/i.test(msg) ||

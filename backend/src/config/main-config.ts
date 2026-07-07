@@ -64,8 +64,13 @@ export const SEPOLIA_RPC_URLS: string[] = (process.env.SEPOLIA_RPC_URLS as strin
   .map((s) => s.trim())
   .filter(Boolean);
 export const SEPOLIA_CHAIN_ID: number = 11155111;
+// Default target token on Sepolia. Switched from Tether's non-EIP-3009 test
+// deployment (0xd077...4fdb) to Circle's Sepolia USDC FiatTokenV2 proxy,
+// which DOES implement transferWithAuthorization. Env var name is preserved
+// for backwards compatibility with existing operator .env files that may set
+// SEPOLIA_USDT_ADDRESS explicitly. Both tokens share 6 decimals.
 export const SEPOLIA_USDT_ADDRESS: string = (
-  process.env.SEPOLIA_USDT_ADDRESS || '0xd077a400968890eacc75cdc901f0356c943e4fdb'
+  process.env.SEPOLIA_USDT_ADDRESS || '0x1c7d4b196cb0c7b01d743fbc6116a902379c7238'
 ).toLowerCase();
 export const USDT_DECIMALS: number = 6;
 export const TIP_INDEXER_INTERVAL_CRON: string =
@@ -279,9 +284,10 @@ export const RELAY_MAX_AMOUNT_USDT_WEI: bigint =
   BigInt(RELAY_MAX_AMOUNT_USDT) * 1_000_000n;
 // Comma-separated list of token contracts the facilitator will relay for. Empty
 // list means "no tokens allowed" and every submit returns 400 TOKEN_NOT_ALLOWED.
-// Sepolia USDT is the default so a fresh install works out of the box.
+// Sepolia Circle USDC is the default (EIP-3009 compliant); Tether's Sepolia
+// USDT deployment does not ship transferWithAuthorization yet.
 export const RELAY_ALLOWED_TOKENS: string[] = (
-  process.env.RELAY_ALLOWED_TOKENS || '0xd077a400968890eacc75cdc901f0356c943e4fdb'
+  process.env.RELAY_ALLOWED_TOKENS || '0x1c7d4b196cb0c7b01d743fbc6116a902379c7238'
 )
   .split(',')
   .map((s) => s.trim().toLowerCase())
@@ -304,6 +310,19 @@ export const RELAY_HEALTH_RATE_LIMIT_MAX: number =
   Number(process.env.RELAY_HEALTH_RATE_LIMIT_MAX) || 30;
 export const RELAY_HEALTH_RATE_LIMIT_WINDOW: string =
   process.env.RELAY_HEALTH_RATE_LIMIT_WINDOW || '1 minute';
+// Demo-only self-tip endpoint. The sponsor signs an EIP-3009 authorization on
+// its OWN address (from == to == sponsor) and relays it through the same
+// submit path as /wdk/relay/eip3009. Gated behind a dedicated flag so
+// production deployments can never accidentally expose it, and so it can be
+// enabled independently of the peer-facing facilitator flag for a live-stage
+// demo. When unset OR set to false, POST /wdk/relay/demo-self-tip returns 404
+// (hide existence, mirroring ADR-007).
+export const RELAY_DEMO_ENABLED: boolean =
+  (process.env.RELAY_DEMO_ENABLED || 'false').toLowerCase() === 'true';
+export const RELAY_DEMO_RATE_LIMIT_MAX: number =
+  Number(process.env.RELAY_DEMO_RATE_LIMIT_MAX) || 5;
+export const RELAY_DEMO_RATE_LIMIT_WINDOW: string =
+  process.env.RELAY_DEMO_RATE_LIMIT_WINDOW || '1 minute';
 export const RELAY_CONFIRMATION_CRON: string =
   process.env.RELAY_CONFIRMATION_CRON || '*/15 * * * * *';
 // Rows staying in 'submitted' longer than this get marked 'failed' with
@@ -494,10 +513,11 @@ export const CURVA_X402_RESOURCE: string =
 // Chain the challenge is issued on. Must be enabled in chains.ts at boot.
 export const CURVA_X402_CHAIN_ID: number =
   Number(process.env.CURVA_X402_CHAIN_ID) || 11155111;
-// Token contract the challenge asks payment in. Defaults to Sepolia USDT so a
-// fresh install works out of the box; must also be in RELAY_ALLOWED_TOKENS.
+// Token contract the challenge asks payment in. Defaults to Circle USDC on
+// Sepolia (EIP-3009 compliant) so a fresh install works out of the box; must
+// also be in RELAY_ALLOWED_TOKENS.
 export const CURVA_X402_TOKEN_ADDRESS: string = (
-  process.env.CURVA_X402_TOKEN_ADDRESS || '0xd077a400968890eacc75cdc901f0356c943e4fdb'
+  process.env.CURVA_X402_TOKEN_ADDRESS || '0x1c7d4b196cb0c7b01d743fbc6116a902379c7238'
 ).toLowerCase();
 // Recipient of the payment. Defaults to the RELAY sponsor for demo simplicity;
 // operators should set an explicit address in production.

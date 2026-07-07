@@ -9,16 +9,16 @@
       "isDefault": true,
       "enabled": true,
       "rpcUrls": [
-        "https://ethereum-sepolia-rpc.publicnode.com",
-        "https://rpc.sepolia.org"
+        "https://sepolia.drpc.org",
+        "https://sepolia.gateway.tenderly.co"
       ],
-      "usdtAddress": "0xd077a400968890eacc75cdc901f0356c943e4fdb",
+      "usdtAddress": "0x1c7d4b196cb0c7b01d743fbc6116a902379c7238",
       "tokenDecimals": 6,
       "blockConfirmations": 5,
       "bootstrapBackfillBlocks": 1000,
       "maxBlockSpan": 2000,
       "explorerBase": "https://sepolia.etherscan.io",
-      "notes": "Hackathon demo chain. WDK + Candide ERC-4337 are documented and stable on Sepolia."
+      "notes": "Hackathon demo chain. Uses Circle USDC on Sepolia (FiatTokenV2 proxy 0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238) because Tether's Sepolia USDT deployment 0xd077a400968890eacc75cdc901f0356c943e4fdb does NOT implement EIP-3009. Domain (name/version) is fetched from-chain by src/lib/evm/eip3009.ts, so the code is token-agnostic; UI still labels this as 'USDT' for demo copy. Both tokens share 6 decimals."
     },
     {
       "chainId": 9746,

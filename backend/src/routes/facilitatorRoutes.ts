@@ -19,7 +19,7 @@
  * `handleError`.
  */
 
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import type {
   FastifyInstance,
   FastifyPluginCallback,
@@ -33,12 +33,13 @@ import { handleError, handleServerError } from '../utils/errorHandler.ts';
 import { isValidEvmAddress, normalizeAddress } from '../utils/curvaValidators.ts';
 import { shortenAddress } from '../utils/miscUtils.ts';
 import { getChain } from '../lib/evm/chains.ts';
-import { fetchEip3009Domain, recoverEip3009Signer } from '../lib/evm/eip3009.ts';
+import { EIP3009_TYPES, fetchEip3009Domain, recoverEip3009Signer } from '../lib/evm/eip3009.ts';
 import {
   FacilitatorDisabledError,
   FacilitatorNonceUsedError,
   FacilitatorRpcError,
   FacilitatorSponsorLowError,
+  __getSponsorWallet,
   getFacilitatorHealth,
   getMaxAmountBaseUnits,
   getSponsorAddress,
@@ -50,12 +51,16 @@ import {
 import { formatUsdt } from '../lib/evm/usdtIndexer.ts';
 import { eventBus } from '../lib/activity/eventBus.ts';
 import {
+  RELAY_DEMO_ENABLED,
+  RELAY_DEMO_RATE_LIMIT_MAX,
+  RELAY_DEMO_RATE_LIMIT_WINDOW,
   RELAY_HEALTH_RATE_LIMIT_MAX,
   RELAY_HEALTH_RATE_LIMIT_WINDOW,
   RELAY_RATE_LIMIT_MAX,
   RELAY_RATE_LIMIT_WINDOW,
   RELAY_STATUS_RATE_LIMIT_MAX,
   RELAY_STATUS_RATE_LIMIT_WINDOW,
+  SEPOLIA_CHAIN_ID,
 } from '../config/main-config.ts';
 
 // =============================================================================
@@ -594,6 +599,346 @@ export const facilitatorRoutes: FastifyPluginCallback = (
             allowedTokens: health.allowedTokens.map((t) => shortenAddress(t)),
             onlyRegisteredHosts: health.onlyRegisteredHosts,
             maxAmountUsdt: health.maxAmountUsdt,
+          },
+        });
+      } catch (err) {
+        return handleServerError(reply, err as Error);
+      }
+    }
+  );
+
+  // ---------------------------------------------------------------------------
+  // POST /wdk/relay/demo-self-tip
+  //
+  // EIP-3009 SELF-TIP MODE (eip3009_self_tip):
+  //   Path B is live. The sponsor wallet builds and signs an EIP-3009
+  //   `TransferWithAuthorization` payload where `from == to == sponsor`, then
+  //   relays it through the same `submitEip3009Relay()` code path used by
+  //   POST /wdk/relay/eip3009. On-chain this emits BOTH the ERC-20
+  //   `Transfer(sponsor, sponsor, amount)` event AND the EIP-3009
+  //   `AuthorizationUsed(sponsor, nonce)` event, exercising the full facilitator
+  //   flow end-to-end for demo purposes without needing a second wallet.
+  //
+  //   The sponsor is intentionally the recipient here, so we bypass the
+  //   RELAY_ONLY_REGISTERED_HOSTS gate — no third-party recipient exists to
+  //   register, and the sponsor's own address is trusted by construction.
+  //
+  // Guarantees preserved from the original design:
+  //   1. RELAY_DEMO_ENABLED gate (404 hide-existence when off).
+  //   2. Base facilitator gate (503 FACILITATOR_DISABLED when sponsor unset).
+  //   3. Amount validation + facilitator cap.
+  //   4. Token allowed-list gate.
+  //   5. FacilitatorTx row reserved BEFORE submit (P2002 amplification guard,
+  //      keyed on the fresh random EIP-3009 nonce).
+  //   6. facilitator.submitted event emitted after success.
+  //   7. Rate limit 5 req/min/IP (via RELAY_DEMO_RATE_LIMIT_*).
+  // ---------------------------------------------------------------------------
+  app.post(
+    '/demo-self-tip',
+    {
+      config: {
+        rateLimit: {
+          max: RELAY_DEMO_RATE_LIMIT_MAX,
+          timeWindow: RELAY_DEMO_RATE_LIMIT_WINDOW,
+        },
+      },
+    },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      try {
+        // 1. Gate on RELAY_DEMO_ENABLED.
+        if (!RELAY_DEMO_ENABLED) {
+          return reply.code(404).send({
+            success: false,
+            error: { code: 'NOT_FOUND', message: 'Route not found' },
+            data: null,
+          });
+        }
+
+        // 2. Base facilitator must be enabled (we need the sponsor wallet to
+        // sign the EIP-3009 authorization AND to relay it on-chain).
+        if (!isFacilitatorEnabled()) {
+          return sendFacilitatorDisabled(reply);
+        }
+
+        const sponsorWallet = __getSponsorWallet();
+        const sponsorAddress = getSponsorAddress();
+        if (!sponsorWallet || !sponsorAddress) {
+          return sendFacilitatorDisabled(reply);
+        }
+
+        // 3. Parse + validate amount. Default 1 USDT (1_000_000 base units).
+        const body = (request.body || {}) as Record<string, unknown>;
+        const amountRaw =
+          typeof body.amount === 'string' && body.amount.length > 0
+            ? body.amount
+            : '1000000';
+        if (!DECIMAL_UINT.test(amountRaw)) {
+          return handleError(
+            reply,
+            400,
+            'amount must be a decimal uint string',
+            'VALIDATION_ERROR'
+          );
+        }
+        let amountBig: bigint;
+        try {
+          amountBig = BigInt(amountRaw);
+        } catch {
+          return handleError(reply, 400, 'amount is not a valid integer', 'VALIDATION_ERROR');
+        }
+        if (amountBig <= 0n) {
+          return handleError(reply, 400, 'amount must be > 0', 'VALIDATION_ERROR');
+        }
+        if (amountBig > getMaxAmountBaseUnits()) {
+          return handleError(
+            reply,
+            400,
+            'Amount exceeds facilitator cap',
+            'AMOUNT_EXCEEDS_CAP'
+          );
+        }
+
+        // 4. Chain + token. Sepolia is the demo default.
+        const chainId = SEPOLIA_CHAIN_ID;
+        const chain = getChain(chainId);
+        if (!chain || !chain.enabled) {
+          return handleError(
+            reply,
+            400,
+            `Chain ${chainId} is not enabled`,
+            'CHAIN_DISABLED'
+          );
+        }
+        const tokenAddress = normalizeAddress(chain.usdtAddress);
+        if (!isTokenAllowed(tokenAddress)) {
+          return handleError(
+            reply,
+            400,
+            'Token contract is not in the allowed list',
+            'TOKEN_NOT_ALLOWED'
+          );
+        }
+
+        // NOTE: intentionally skip the RELAY_ONLY_REGISTERED_HOSTS gate here.
+        // The sponsor is BOTH signer and recipient by construction — there is
+        // no third-party host to register. Every other guard (token allowlist,
+        // amount cap, sponsor balance floor, nonce reservation) still applies.
+
+        // 5. EIP-3009 authorization setup. from == to == sponsor. Fresh random
+        // 32-byte nonce; validAfter=0 (immediately valid); validBefore = now +
+        // 3600s. The nonce doubles as the FacilitatorTx (chainId, nonce)
+        // reservation key so replay of an identical payload is guarded by the
+        // DB unique index even before the token contract's on-chain
+        // AuthorizationUsed check fires.
+        const from = sponsorAddress;
+        const to = sponsorAddress;
+        const validAfter = 0;
+        const validBefore = Math.floor(Date.now() / 1000) + 3600;
+        const nonce = ('0x' + randomBytes(32).toString('hex')).toLowerCase();
+        const value = amountBig.toString();
+
+        // 6. Fetch the token's EIP-712 domain from-chain (cached per token).
+        // Must happen BEFORE the DB reservation so a bad token never wastes a
+        // reserved nonce slot.
+        const domain = await fetchEip3009Domain(chainId, tokenAddress);
+        if (!domain) {
+          return handleError(
+            reply,
+            503,
+            'Token EIP-712 metadata unavailable',
+            'TOKEN_METADATA_UNAVAILABLE'
+          );
+        }
+
+        // 7. Sponsor signs its own TransferWithAuthorization message.
+        // signTypedData(EIP-712) returns the joined 65-byte 0x... signature;
+        // ethers.Signature.from(...) splits it back to {v, r, s} for the
+        // on-chain transferWithAuthorization(...) call.
+        let v: number;
+        let r: string;
+        let s: string;
+        try {
+          const joinedSig = await sponsorWallet.signTypedData(
+            {
+              name: domain.name,
+              version: domain.version,
+              chainId: domain.chainId,
+              verifyingContract: domain.verifyingContract,
+            },
+            EIP3009_TYPES as unknown as Record<string, Array<{ name: string; type: string }>>,
+            { from, to, value, validAfter, validBefore, nonce }
+          );
+          const split = ethers.Signature.from(joinedSig);
+          v = split.v;
+          r = split.r;
+          s = split.s;
+        } catch (err) {
+          return handleError(
+            reply,
+            500,
+            'Failed to sign EIP-3009 authorization',
+            'SIGN_FAILED',
+            err as Error,
+            { chainId, tokenAddress }
+          );
+        }
+
+        // 8. Reserve the FacilitatorTx row BEFORE any on-chain submit. Same
+        // P2002 amplification guard as the /eip3009 path — the fresh random
+        // nonce is the atomic reservation key.
+        const submittedAt = new Date();
+        const placeholderTxHash = `pending:${randomUUID()}`;
+        let reservation: { id: string };
+        try {
+          reservation = await prismaQuery.facilitatorTx.create({
+            data: {
+              chainId,
+              txHash: placeholderTxHash,
+              fromAddress: from,
+              toAddress: to,
+              amount: value,
+              tokenAddress,
+              nonce,
+              validAfter,
+              validBefore,
+              status: 'pending',
+              submittedAt,
+            },
+          });
+        } catch (err) {
+          const code = (err as { code?: string }).code;
+          if (code === 'P2002') {
+            return handleError(
+              reply,
+              409,
+              'Authorization nonce already used',
+              'NONCE_ALREADY_USED'
+            );
+          }
+          return handleServerError(reply, err as Error);
+        }
+
+        // 9. Route through the same submitEip3009Relay() code path used by the
+        // public /wdk/relay/eip3009 endpoint. This enforces the sponsor balance
+        // floor, classifies FacilitatorNonceUsedError, and calls
+        // transferWithAuthorization(...) on the token contract.
+        let submitResult: { txHash: string; sponsorAddress: string };
+        try {
+          submitResult = await submitEip3009Relay({
+            chainId,
+            tokenAddress,
+            message: { from, to, value, validAfter, validBefore, nonce },
+            signature: { v, r, s },
+          });
+        } catch (err) {
+          const errorMessage = (err as Error)?.message?.slice(0, 500) ?? 'unknown';
+          await prismaQuery.facilitatorTx
+            .update({
+              where: { id: reservation.id },
+              data: { status: 'failed', errorMessage },
+            })
+            .catch((updateErr) => {
+              console.warn(
+                '[facilitator] demo-self-tip: failed to mark reservation failed:',
+                (updateErr as Error)?.message
+              );
+            });
+          if (err instanceof FacilitatorDisabledError) {
+            return sendFacilitatorDisabled(reply);
+          }
+          if (err instanceof FacilitatorSponsorLowError) {
+            return handleError(
+              reply,
+              503,
+              'Sponsor balance below required floor',
+              'SPONSOR_INSUFFICIENT_FUNDS'
+            );
+          }
+          if (err instanceof FacilitatorNonceUsedError) {
+            return handleError(
+              reply,
+              409,
+              'Authorization nonce already used on-chain',
+              'NONCE_ALREADY_USED'
+            );
+          }
+          if (err instanceof FacilitatorRpcError) {
+            return handleError(
+              reply,
+              502,
+              'Failed to submit transaction to the network',
+              'RPC_SUBMIT_FAILED',
+              err.cause,
+              { chainId, tokenAddress }
+            );
+          }
+          return handleServerError(reply, err as Error);
+        }
+
+        const txHash = submitResult.txHash;
+
+        // 10. Patch reservation to submitted with the real tx hash.
+        try {
+          await prismaQuery.facilitatorTx.update({
+            where: { id: reservation.id },
+            data: {
+              status: 'submitted',
+              txHash,
+            },
+          });
+        } catch (err) {
+          console.warn(
+            '[facilitator] demo-self-tip: reservation update after submit failed:',
+            (err as Error)?.message
+          );
+        }
+
+        // 11. Explorer URL.
+        const explorerUrl =
+          chain.explorerBase && chain.explorerBase.length > 0
+            ? `${chain.explorerBase.replace(/\/$/, '')}/tx/${txHash}`
+            : null;
+
+        // 12. Publish facilitator.submitted so dashboard subscribers render
+        // the demo tip identically to a real peer tip.
+        try {
+          eventBus.publish('facilitator.submitted', {
+            txHash: shortenAddress(txHash, 10, 6),
+            txHashFull: txHash,
+            explorerUrl,
+            chainId,
+            chainName: chain.name,
+            fromAddress: shortenAddress(from),
+            toAddress: shortenAddress(to),
+            amount: value,
+            amountFormatted: formatUsdt(value),
+            roomSlug: null,
+            matchId: null,
+            mode: 'eip3009_self_tip',
+          });
+        } catch (err) {
+          console.warn(
+            '[facilitator] demo-self-tip: eventBus publish failed:',
+            (err as Error)?.message
+          );
+        }
+
+        return reply.code(200).send({
+          success: true,
+          error: null,
+          data: {
+            txHash,
+            explorerUrl,
+            from,
+            to,
+            amount: value,
+            amountFormatted: formatUsdt(value),
+            nonce,
+            chainId,
+            reservationId: reservation.id,
+            status: 'submitted',
+            mode: 'eip3009_self_tip',
+            submittedAt: submittedAt.toISOString(),
           },
         });
       } catch (err) {

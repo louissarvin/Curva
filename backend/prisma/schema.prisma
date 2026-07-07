@@ -152,16 +152,10 @@ model Room {
   // SECURITY_AUDIT.md W2-HIGH-03. Additive nullable-default-safe.
   isDemo           Boolean  @default(false) @map("is_demo")
 
-  // TIER 4: Add Room.visibility for Autopass spectator tier (memo-only,
-  // executed by the user via `bun run db:push`). This is the exact diff the
-  // spec at memory/impl_autopass_reader.md pins:
-  //
-  //   visibility  String  @default("private")  // 'private' | 'public'
-  //   @@index([visibility, deletedAt])
-  //
-  // Behavior when the column is not yet migrated: the route handlers coerce
-  // undefined to 'private' on read and skip the field on write, preserving
-  // full backward compatibility with the pre-migration table.
+  // TIER 4: Autopass spectator tier. Additive column, default 'private' so
+  // backward compat holds for pre-migration rows. Route handlers accept
+  // 'public' explicitly to publish a room into the STADIUM directory.
+  visibility       String   @default("private")
 
   match            Match    @relation(fields: [matchId], references: [id], onDelete: Cascade)
 
@@ -172,6 +166,7 @@ model Room {
   @@index([matchId, deletedAt])
   @@index([hostSmartAddress])
   @@index([expiresAt])
+  @@index([visibility, deletedAt])
   // Cleanup worker filters by (isAutoWarmed, expiresAt) to find expired
   // auto-rooms it owns. Composite index avoids a sequential scan once the
   // table exceeds a few hundred rooms.
