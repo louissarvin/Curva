@@ -39,6 +39,19 @@ const {
 // Redact-safe log prefix.
 const LOG = '[Curva][Wallet]'
 
+// Tier 4: ERC-4337 batch tip. ERC-20 transfer(address,uint256) selector is
+// 0xa9059cbb per the ERC-20 spec. Calldata is encoded via ethers.Interface at
+// call time so that we use the same encoder ethers itself validates against.
+const ERC20_TRANSFER_ABI = ['function transfer(address to, uint256 amount) returns (bool)']
+
+// Per-batch guardrails. The SDK has no batch-size limit (verified in the
+// wallet-account-evm-erc-4337 source: sendTransaction calls [tx].flat() on
+// input). We enforce a 2..5 recipient window and a 15 USDT total cap purely
+// as a client-side safety ceiling for the demo, matching the task spec.
+const BATCH_MIN_RECIPIENTS = 2
+const BATCH_MAX_RECIPIENTS = 5
+const BATCH_MAX_TOTAL_ATOMIC = 15_000000n // 15 USDT with 6 decimals
+
 /**
  * Create a wallet adapter around the given WDK factory.
  *
@@ -109,9 +122,13 @@ function createWalletAdapter(deps = {}) {
     // onChainIdentifier: docs at
     // https://docs.wdk.tether.io/sdk/wallet-modules/wallet-evm-erc-4337/configuration/
     // say this appends a 50-byte project marker to every UserOperation's call
-    // data so Tether can attribute WDK-relayed traffic. String form is accepted
-    // (equivalent to { project: 'curva', platform: 'Web' }). Safe to include
-    // even when the primary tip path uses EIP-3009 via the F11 facilitator.
+    // data so Tether can attribute WDK-relayed traffic. We use the object form
+    // per the docs so `platform`, `tool`, and `toolVersion` are attributed
+    // correctly. `platform` is a CLOSED enum: 'Web' | 'Mobile' | 'Safe App' |
+    // 'Widget'. 'Pear-runtime' is NOT a valid enum value; we map Pear runtime
+    // to 'Widget' (closest match for a runtime plug-in) and stash the Pear
+    // identity in `tool` so downstream analytics can still bucket us cleanly.
+    // See memory/impl_onchain_identifier.md.
     const factoryOptions = {
       chainId: chain.chainId,
       provider: chain.provider,
@@ -119,10 +136,13 @@ function createWalletAdapter(deps = {}) {
       paymasterUrl: chain.paymasterUrl,
       paymasterAddress: chain.paymasterAddress,
       safeModulesVersion: '0.3.0',
-      paymasterToken: { address: chain.usdtAddress }
-    }
-    if (typeof chain.onChainIdentifier === 'string' && chain.onChainIdentifier.length > 0) {
-      factoryOptions.onChainIdentifier = chain.onChainIdentifier
+      paymasterToken: { address: chain.usdtAddress },
+      onChainIdentifier: {
+        project: 'curva',
+        platform: 'Widget',
+        tool: 'curva-wallet',
+        toolVersion: '0.1.0'
+      }
     }
     const wallet = new WalletFactory(seed, factoryOptions)
     account = await wallet.getAccount(0)
@@ -463,6 +483,126 @@ function createWalletAdapter(deps = {}) {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Tier 4: ERC-4337 batch tip.
+  //
+  // Composes N ERC-20 `transfer(address,uint256)` calls into a single
+  // UserOperation and submits it via WDK's account.sendTransaction. The WDK
+  // wraps the array in a Safe MultiSend DELEGATECALL through the default
+  // contract 0x38869bf66a61cF6bDB996A6aE40D5853Fd43B526 (selector 0x8d80ff0a)
+  // so all N transfers happen atomically or none do. Verified end-to-end in
+  // the local node_modules copies of @tetherto/wdk-wallet-evm-erc-4337 and
+  // abstractionkit (see memory/impl_erc4337_batch.md for the exact line
+  // pointers).
+  //
+  // Docs cross-checked:
+  //   https://docs.wdk.tether.io/sdk/wallet-modules/wallet-evm-erc-4337/api-reference/
+  //   https://eips.ethereum.org/EIPS/eip-4337
+  //   https://eips.ethereum.org/EIPS/eip-20
+  //
+  // Input: recipientPairs = Array<{ address, amountAtomicUsdt }>
+  //   - address: 0x + 20-byte hex, non-duplicate enforcement kept off (SDK
+  //     will emit two Transfer events if the same address appears twice; that
+  //     is a caller-side choice, not a wallet-layer error).
+  //   - amountAtomicUsdt: positive integer STRING in USDT 6-decimal base units.
+  //     Never a float (Curva forces base units at every boundary to avoid
+  //     rounding bugs).
+  //
+  // Returns: { userOpHash, fee, recipientCount, totalAtomic }
+  // ---------------------------------------------------------------------------
+  async function signAndSendBatch(recipientPairs) {
+    if (disposed) throw new WalletError('WALLET_DISPOSED', 'wallet disposed')
+    if (!initialized) throw new WalletError('WALLET_NOT_INIT', 'wallet not initialized')
+    if (!Array.isArray(recipientPairs)) {
+      throw new WalletError('BATCH_SIZE_INVALID', 'recipientPairs must be an array')
+    }
+    if (recipientPairs.length < BATCH_MIN_RECIPIENTS || recipientPairs.length > BATCH_MAX_RECIPIENTS) {
+      throw new WalletError(
+        'BATCH_SIZE_INVALID',
+        `recipientPairs.length must be ${BATCH_MIN_RECIPIENTS}..${BATCH_MAX_RECIPIENTS}`
+      )
+    }
+    if (!deps.ethers || typeof deps.ethers.Interface !== 'function') {
+      throw new WalletError('BATCH_NO_ETHERS', 'ethers.Interface not available')
+    }
+    if (typeof account?.sendTransaction !== 'function') {
+      throw new WalletError('BATCH_UNSUPPORTED', 'account.sendTransaction not available on this WDK build')
+    }
+
+    const iface = new deps.ethers.Interface(ERC20_TRANSFER_ABI)
+    let totalAtomic = 0n
+    const txs = recipientPairs.map((pair, i) => {
+      if (!pair || typeof pair !== 'object') {
+        throw new WalletError('BATCH_INVALID_RECIPIENT', `recipientPairs[${i}] must be an object`)
+      }
+      const { address, amountAtomicUsdt } = pair
+      if (typeof address !== 'string' || !/^0x[0-9a-fA-F]{40}$/.test(address)) {
+        throw new WalletError(
+          'BATCH_INVALID_RECIPIENT',
+          `recipientPairs[${i}].address must be 0x + 20-byte hex`
+        )
+      }
+      // Positive integer decimal string. Explicitly disallow leading zeroes so
+      // '01' cannot be conflated with the wire representation of a 1-atomic amount.
+      if (typeof amountAtomicUsdt !== 'string' || !/^[1-9][0-9]*$/.test(amountAtomicUsdt)) {
+        throw new WalletError(
+          'BATCH_INVALID_AMOUNT',
+          `recipientPairs[${i}].amountAtomicUsdt must be a positive integer string`
+        )
+      }
+      const amt = BigInt(amountAtomicUsdt)
+      totalAtomic += amt
+      return {
+        to: chain.usdtAddress,
+        value: 0n,
+        data: iface.encodeFunctionData('transfer', [address.toLowerCase(), amt])
+      }
+    })
+
+    if (totalAtomic > BATCH_MAX_TOTAL_ATOMIC) {
+      throw new WalletError(
+        'BATCH_TOTAL_EXCEEDED',
+        `batch total ${totalAtomic} atomic exceeds cap of ${BATCH_MAX_TOTAL_ATOMIC} atomic (15 USDT)`
+      )
+    }
+
+    let result
+    try {
+      // WDK docs (fetched 2026-07-06) and the local source flatten [tx].flat()
+      // so passing an array is a first-class code path. Return shape is
+      // { hash: <userOp hash>, fee: bigint } identical to the single-tx path.
+      result = await account.sendTransaction(txs)
+    } catch (err) {
+      const msg = err?.message || String(err)
+      const balanceHit = /insufficient|balance/i.test(msg)
+      const feeHit = /Exceeded maximum fee|transactionMaxFee/i.test(msg)
+      const code = balanceHit
+        ? 'BATCH_INSUFFICIENT_BALANCE'
+        : feeHit
+          ? 'BATCH_FEE_EXCEEDED'
+          : 'BATCH_FAILED'
+      throw new WalletError(code, `account.sendTransaction(batch) failed: ${msg}`)
+    }
+
+    if (!result || typeof result !== 'object') {
+      throw new WalletError('BATCH_BAD_RESPONSE', 'account.sendTransaction returned no result')
+    }
+    const rawHash = result.hash
+    if (typeof rawHash !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(rawHash)) {
+      throw new WalletError('BATCH_BAD_RESPONSE', 'account.sendTransaction returned no valid hash')
+    }
+    const fee = typeof result.fee === 'bigint'
+      ? result.fee.toString()
+      : (result.fee != null ? String(result.fee) : null)
+
+    return {
+      userOpHash: rawHash.toLowerCase(),
+      fee,
+      recipientCount: txs.length,
+      totalAtomic: totalAtomic.toString()
+    }
+  }
+
   // Pre-deploy warm: prime the WDK cache by reading address + balance.
   // Does NOT deploy the smart account — that costs gas and is unnecessary
   // for warming the cache. Safe to call multiple times.
@@ -506,6 +646,7 @@ function createWalletAdapter(deps = {}) {
     getInfo,
     getBalance,
     sendUsdtViaAccountTransfer,
+    signAndSendBatch,
     warmSmartAccount,
     dispose,
     // Test-only helper — exposes NON-SECRET metadata for brittle tests.
