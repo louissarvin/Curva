@@ -1002,30 +1002,47 @@ export function mountChat({ container, curva, tier = 'writer' } = {}) {
   // Tier 4 R2: identity verification badge.
   //
   // The bare side resolves `identity_verified` to one of:
-  //   true   (identity_proof present and verified against roster identity_pub)
+  //   true   (identity_proof present and cryptographically verified)
   //   false  (identity_proof present but verification failed)
   //   null   (no identity_proof = legacy message)
+  //
+  // `identityPublicKeyHex` is the 64-char hex identity public key, set by the
+  // worker when identity_verified === true. We display a short form: first 6
+  // + last 4 chars of the hex string, and include the full key in the tooltip.
   //
   // We trust the boolean from the worker; the renderer does NOT re-verify.
   // Badge is shown for msg, system:tip, system:attendance-issued.
   //
-  // Inline SVGs are hardcoded strings (not peer data); no XSS risk.
-  // The tooltip text uses handle which IS peer data, but it lands in
-  // data-tip (a data attribute) which is safe — never innerHTML.
+  // Security: all peer data (handle, pubkey) lands in data-* attributes or
+  // textContent — NEVER innerHTML. The inline SVGs are hardcoded constants.
   function renderIdentityBadge(msg) {
     const verified = msg?.identity_verified  // true | false | null | undefined
     const handle = typeof msg?.handle === 'string' && msg.handle.length > 0
       ? msg.handle : short(msg?.by_peer)
+    // Short-form pubkey: first 6 + last 4 hex chars. Only set when verified.
+    const rawKey = typeof msg?.identityPublicKeyHex === 'string' && msg.identityPublicKeyHex.length >= 10
+      ? msg.identityPublicKeyHex : null
+    const shortKey = rawKey ? rawKey.slice(0, 6) + '…' + rawKey.slice(-4) : null
 
     const badge = document.createElement('span')
     badge.className = 'curva-chat__identity-badge'
 
     if (verified === true) {
       badge.classList.add('curva-chat__identity-badge--verified')
-      // data-tip: attribute, safe with textContent-equivalent assignment
-      badge.dataset.tip = 'verified · @' + handle
+      // data-* attributes are safe (equivalent to setAttribute with textContent semantics).
+      badge.dataset.tip = rawKey
+        ? 'verified by Keet · ' + rawKey   // full pubkey in tooltip
+        : 'verified · @' + handle
       // Inline SVG checkmark (hardcoded, not peer data).
       badge.innerHTML = '<svg viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M2 6l3 3 5-5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+      if (shortKey) {
+        // Short-form pubkey chip as a text node — textContent, never innerHTML.
+        const keyChip = document.createElement('span')
+        keyChip.className = 'curva-chat__identity-key'
+        keyChip.textContent = shortKey
+        keyChip.title = rawKey // full key on hover — title attribute is safe
+        badge.appendChild(keyChip)
+      }
     } else if (verified === false) {
       badge.classList.add('curva-chat__identity-badge--mismatch')
       badge.dataset.tip = 'signature mismatch'

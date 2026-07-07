@@ -13,7 +13,10 @@ import { mountTipButton } from './TipButton.js'
 // drive when available; falls back to the bundled `./logo-index.svg`. The
 // branding drive path is exposed by preload as `curva.getBrandingPath()`.
 // See branding-drive/PUBLISH.md for how the drive gets a `path` at runtime.
-const BUNDLED_LOGO_URL = './logo-index.svg'
+// Uses the unified /web/public/assets/logo.svg (yin-yang + wordmark baked in)
+// so the room header doesn't need to show a separate CURVA text next to the
+// mark. The topbar uses the same file.
+const BUNDLED_LOGO_URL = './logo.svg'
 // Poll the worker for a branding-drive snapshot every 5s until the path
 // lands. Pear docs describe no fetch-complete event, so a low-frequency pull
 // is the documented pattern. Stops once the path is truthy.
@@ -337,6 +340,18 @@ export function mountRoomHeader({ container, curva, roomState, appVersion, backe
     backendUrl,
     chainId: roomState.chainId || 11155111
   })
+
+  // Bug fix: subscribe to `tip:host-discovered`. The Bare worker emits this
+  // when the host's smart address is discovered from the backend room
+  // directory OR through P2P host discovery. Without this hook, the tip
+  // button stays "Waiting for host..." forever on viewer peers.
+  let offTipHostDiscovered = null
+  if (typeof curva.onTipHostDiscovered === 'function') {
+    offTipHostDiscovered = curva.onTipHostDiscovered((payload) => {
+      const addr = payload?.smartAddress || payload?.hostSmartAddress || null
+      if (addr) tipButton.setHostAddress(addr)
+    })
+  }
 
   // Wave 14: Attendance chip + modal. Renders "Attendees · N" with a hover
   // affordance. Click opens a modal listing every issued pass with a copy
@@ -667,6 +682,7 @@ export function mountRoomHeader({ container, curva, roomState, appVersion, backe
     offTipList()
     offTipConfirmed()
     offTipSubmitted()
+    if (typeof offTipHostDiscovered === 'function') { try { offTipHostDiscovered() } catch { /* noop */ } }
     offBalance()
     offWalletReady()
     offWalletErr()

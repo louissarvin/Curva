@@ -874,6 +874,15 @@ body {
   gap: 16px;
 }
 
+/* The `.curva-app__room { display: flex }` above has the same specificity as
+   the UA `[hidden] { display: none }` rule but wins on source-order, so the
+   room div stays visible even when `hidden` is set. Restore the intended
+   hide-when-hidden behavior with an explicit selector. Same fix applied to
+   ClipGallery modals earlier in this file. */
+.curva-app__room[hidden] {
+  display: none;
+}
+
 .curva-app__room-grid {
   display: grid;
   grid-template-columns: 1fr 320px;
@@ -3396,6 +3405,17 @@ body {
   z-index: 100;
 }
 
+/* Feature 2 (identity chip): short-form pubkey shown next to the verified checkmark */
+.curva-chat__identity-key {
+  font-family: monospace;
+  font-size: 10px;
+  color: var(--curva-identity-verified-color, #22c55e);
+  opacity: 0.75;
+  margin-left: 2px;
+  letter-spacing: 0.03em;
+  cursor: help;
+}
+
 /* Dim mismatched messages slightly */
 .curva-chat__msg--identity-mismatch .curva-chat__body {
   opacity: 0.5;
@@ -3475,3 +3495,2076 @@ body {
   background: rgba(239, 68, 68, 0.06);
 }
 
+
+/* ==========================================================================
+   Tether Cup 2026 Polish — Task 2-5 overrides
+   Append-only: no existing rules removed. All specificity wins via cascade.
+   ========================================================================== */
+
+/* -- Task 2: Room view layout polish ------------------------------------ */
+
+/* Wider gutters between panels */
+.curva-app__body {
+  gap: 24px;
+  padding: 20px 28px 28px;
+}
+
+.curva-app__room {
+  gap: 20px;
+}
+
+.curva-app__room-grid {
+  gap: 20px;
+}
+
+.curva-app__main {
+  gap: 20px;
+}
+
+.curva-app__aside {
+  gap: 20px;
+}
+
+/* Reduce red accent borders — panels use neutral border only */
+.curva-video,
+.curva-chat,
+.curva-clips,
+.curva-feed,
+.curva-predictions,
+.curva-leaderboard,
+.curva-commentary,
+.curva-app__log-panel {
+  border-color: rgba(255, 255, 255, 0.06);
+  border-radius: 12px;
+}
+
+/* Subtle shadow for panel elevation */
+.curva-video,
+.curva-chat,
+.curva-clips,
+.curva-feed,
+.curva-predictions,
+.curva-leaderboard,
+.curva-commentary {
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(255, 255, 255, 0.03);
+}
+
+/* RoomHeader: reduce border prominence */
+.curva-header {
+  border-color: rgba(255, 255, 255, 0.06);
+  border-radius: 12px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+}
+
+/* -- Task 3: Topbar cleanup --------------------------------------------- */
+
+/* Replace old brand layout: logo-only, no separate wordmark */
+.curva-app__brand-logo {
+  width: auto;
+  height: 32px;
+  max-width: 116px;
+  object-fit: contain;
+  display: block;
+  filter: drop-shadow(0 1px 4px rgba(200, 16, 46, 0.22));
+}
+
+/* Hide the now-removed brand-text children if any linger */
+.curva-app__brand-text {
+  display: none;
+}
+
+/* Right side topbar cluster */
+.curva-app__topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* Peers badge: always visible, green when live */
+.curva-app__topbar-peers {
+  font-family: var(--curva-mono);
+  font-size: 11px;
+  color: var(--curva-muted);
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  letter-spacing: 0.02em;
+  transition: color 200ms ease-out, background 200ms ease-out, border-color 200ms ease-out;
+}
+
+.curva-app__topbar-peers--live {
+  color: var(--curva-good);
+  background: rgba(74, 222, 128, 0.08);
+  border-color: rgba(74, 222, 128, 0.2);
+}
+
+/* Blind peer indicator: small dot, shown when active */
+.curva-app__topbar-blind {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--curva-mono);
+  font-size: 11px;
+  color: var(--curva-good);
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: rgba(74, 222, 128, 0.08);
+  border: 1px solid rgba(74, 222, 128, 0.2);
+}
+
+.curva-app__topbar-blind::before {
+  content: '';
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--curva-good);
+  box-shadow: 0 0 6px rgba(74, 222, 128, 0.6);
+}
+
+/* Wallet chip */
+.curva-app__topbar-wallet {
+  font-family: var(--curva-mono);
+  font-size: 11px;
+  color: var(--curva-muted);
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  letter-spacing: 0.01em;
+  cursor: default;
+}
+
+/* Version tag: smaller, muted */
+.curva-app__topbar-version,
+[data-version] {
+  font-family: var(--curva-mono);
+  font-size: 10px;
+  color: rgba(138, 138, 138, 0.55);
+  letter-spacing: 0.04em;
+}
+
+/* Diag items: hidden unless diag mode */
+.curva-app__topbar-item {
+  display: none;
+}
+
+.curva-app--diag .curva-app__topbar-item {
+  display: inline;
+}
+
+/* Topbar itself: tighten padding slightly */
+.curva-app__topbar {
+  padding: 10px 28px;
+}
+
+/* -- Task 4: Chat identity chip refinement ------------------------------ */
+
+/* Monospace pubkey, muted, no hover chatter */
+.curva-chat__identity-key {
+  font-family: var(--curva-mono);
+  font-size: 10px;
+  color: rgba(138, 138, 138, 0.6);
+  opacity: 1;
+  margin-left: 3px;
+  letter-spacing: 0.03em;
+  cursor: help;
+  user-select: text;
+}
+
+/* Check-circle icon: tighter, no pointer events */
+.curva-chat__identity-badge {
+  gap: 3px;
+  pointer-events: none;
+}
+
+.curva-chat__identity-badge[data-tip] {
+  pointer-events: auto;
+}
+
+/* No hover state on badge container */
+.curva-chat__identity-badge svg {
+  transition: none;
+}
+
+/* -- Task 5: HUD overlay refinement ------------------------------------- */
+
+/* Override inline styles set by app.js mountHud() via a class-level rule.
+   The HUD uses inline style for positioning; we override visual appearance
+   via the class. backdrop-filter requires the element to not be pointer-events:all. */
+.curva-hud {
+  background: rgba(10, 10, 10, 0.78) !important;
+  border: 1px solid rgba(255, 255, 255, 0.09) !important;
+  border-radius: 10px !important;
+  padding: 9px 13px !important;
+  font-size: 11px !important;
+  line-height: 1.65 !important;
+  min-width: 200px !important;
+  bottom: 12px !important;
+  right: 12px !important;
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
+}
+
+.curva-hud__label {
+  color: rgba(148, 163, 184, 0.6) !important;
+  margin-right: 6px;
+  font-size: 10px;
+  text-transform: none;
+}
+
+/* Active values: green */
+.curva-hud__val {
+  color: #cbd5e1;
+}
+
+/* Boot splash: use logo-index.svg (unchanged, no wordmark div present now) */
+.curva-boot__title {
+  display: none;
+}
+
+/* -- Boot splash: keep the mark, add tagline spacing */
+.curva-boot__mark {
+  width: 180px;
+  height: 180px;
+}
+
+/* -- Browser card radius consistency */
+.curva-browser__card {
+  border-radius: 10px;
+}
+
+.curva-browser {
+  border-radius: 12px;
+}
+
+/* -- Chat scroll: subtle scrollbar */
+.curva-chat__list {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255,255,255,0.08) transparent;
+}
+
+.curva-chat__list::-webkit-scrollbar {
+  width: 4px;
+}
+
+.curva-chat__list::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,0.08);
+  border-radius: 2px;
+}
+
+/* -- Feed scrollbar */
+.curva-feed__list {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255,255,255,0.08) transparent;
+}
+
+/* ============================================================================
+   Wave 3 minimalist polish (2026-07-07). Match /web/ design language.
+   
+   Web reference:
+   - Playfair Display serif headlines, tight tracking
+   - Generous whitespace (24-32px gutters between panels)
+   - Soft near-white borders (rgba 255/255/255/0.06) instead of red
+   - Red reserved for CTAs only
+   - 15-16px body, thin weights, muted #8a8a8a for secondary text
+   ============================================================================ */
+
+/* -- Root palette alignment with /web/ */
+:root {
+  --curva-base: #0a0a0a;
+  --curva-surface: #101010;
+  --curva-surface-elev: #141414;
+  --curva-fg: #f5f5f0;
+  --curva-fg-muted: #8a8a8a;
+  --curva-border: rgba(255,255,255,0.06);
+  --curva-border-strong: rgba(255,255,255,0.10);
+  --curva-accent: #c8102e;
+}
+
+/* -- Body baseline */
+body, .curva-app {
+  background: var(--curva-base) !important;
+  color: var(--curva-fg) !important;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif !important;
+  font-size: 15px !important;
+  line-height: 1.5 !important;
+  letter-spacing: -0.005em !important;
+}
+
+/* -- Room grid: bigger gutters */
+.curva-app__room {
+  gap: 28px !important;
+  padding: 24px !important;
+}
+
+.curva-app__room-grid {
+  gap: 28px !important;
+}
+
+.curva-app__body {
+  gap: 24px !important;
+  padding: 24px !important;
+}
+
+.curva-app__main {
+  gap: 24px !important;
+}
+
+.curva-app__aside {
+  gap: 20px !important;
+}
+
+/* -- Panel base: soft, breathe */
+.curva-video, .curva-chat, .curva-clips, .curva-tip, .curva-predictions,
+.curva-feed, .curva-commentary, .curva-leaderboard, .curva-browser,
+.curva-app__room-header, .curva-app__clips, .curva-app__chat,
+.curva-app__video, .curva-app__feed, .curva-app__log-panel {
+  background: var(--curva-surface) !important;
+  border: 1px solid var(--curva-border) !important;
+  border-radius: 14px !important;
+  padding: 24px !important;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.4);
+}
+
+.curva-app__log-panel { padding: 20px !important; }
+
+/* -- Inner cards inside panels: reduce nesting weight */
+.curva-browser__card, .curva-tip__tab, .curva-tip__preset,
+.curva-predictions__card, .curva-clip__card {
+  background: var(--curva-surface-elev) !important;
+  border: 1px solid var(--curva-border) !important;
+  border-radius: 10px !important;
+  padding: 18px !important;
+}
+
+/* -- Match card list: bigger gaps */
+.curva-browser__list, .curva-browser__matches {
+  gap: 16px !important;
+}
+
+/* -- Headings: web-aligned typography */
+.curva-app__room-title, h1, .curva-browser__title {
+  font-family: 'Playfair Display', Georgia, serif !important;
+  font-weight: 700 !important;
+  letter-spacing: -0.015em !important;
+  color: var(--curva-fg) !important;
+  font-size: 28px !important;
+  line-height: 1.15 !important;
+  margin-bottom: 8px !important;
+}
+
+h2, .curva-panel__title, .curva-chat__title, .curva-tip__title,
+.curva-predictions__title, .curva-clips__title, .curva-video__title {
+  font-family: 'Playfair Display', Georgia, serif !important;
+  font-weight: 600 !important;
+  font-size: 20px !important;
+  letter-spacing: -0.01em !important;
+  color: var(--curva-fg) !important;
+  margin-bottom: 12px !important;
+}
+
+h3 {
+  font-size: 14px !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.02em !important;
+  text-transform: uppercase !important;
+  color: var(--curva-fg-muted) !important;
+  margin-bottom: 8px !important;
+}
+
+.curva-browser__intro, .curva-panel__intro, p {
+  color: var(--curva-fg-muted) !important;
+  font-size: 15px !important;
+  line-height: 1.55 !important;
+}
+
+/* -- Buttons: reserve red for primary CTAs */
+button, .curva-btn {
+  font-family: inherit !important;
+  font-size: 14px !important;
+  letter-spacing: 0.01em !important;
+  border-radius: 8px !important;
+  padding: 10px 16px !important;
+  border: 1px solid var(--curva-border-strong) !important;
+  background: transparent !important;
+  color: var(--curva-fg) !important;
+  cursor: pointer;
+  transition: background 160ms ease-out, border-color 160ms ease-out;
+}
+
+button:hover, .curva-btn:hover {
+  background: rgba(255,255,255,0.04) !important;
+  border-color: rgba(255,255,255,0.16) !important;
+}
+
+/* Primary CTA is red — everything else is neutral */
+.curva-btn--primary, .curva-tip__submit, .curva-chat__send,
+.curva-browser__btn--primary, .curva-predictions__submit,
+button[type="submit"] {
+  background: var(--curva-accent) !important;
+  border: 1px solid var(--curva-accent) !important;
+  color: #fff !important;
+  font-weight: 600 !important;
+}
+
+.curva-btn--primary:hover, .curva-tip__submit:hover, .curva-chat__send:hover,
+.curva-browser__btn--primary:hover, .curva-predictions__submit:hover,
+button[type="submit"]:hover {
+  background: #a80d26 !important;
+  border-color: #a80d26 !important;
+}
+
+/* -- Inputs: cleaner */
+input, textarea, select {
+  background: var(--curva-base) !important;
+  border: 1px solid var(--curva-border-strong) !important;
+  border-radius: 8px !important;
+  padding: 10px 14px !important;
+  color: var(--curva-fg) !important;
+  font-size: 14px !important;
+  font-family: inherit !important;
+}
+
+input:focus, textarea:focus, select:focus {
+  outline: none !important;
+  border-color: rgba(200,16,46,0.6) !important;
+  box-shadow: 0 0 0 3px rgba(200,16,46,0.15) !important;
+}
+
+/* -- Chips / pills */
+.curva-chip, .curva-badge, .curva-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px !important;
+  border-radius: 999px !important;
+  background: rgba(255,255,255,0.04) !important;
+  border: 1px solid var(--curva-border) !important;
+  font-size: 12px !important;
+  font-weight: 500 !important;
+  color: var(--curva-fg-muted) !important;
+  letter-spacing: 0.02em !important;
+}
+
+/* -- Section labels */
+.curva-section-label {
+  font-size: 11px !important;
+  font-weight: 500 !important;
+  letter-spacing: 0.2em !important;
+  text-transform: uppercase !important;
+  color: var(--curva-accent) !important;
+  margin-bottom: 12px !important;
+}
+
+/* -- Reduce visual clutter on the match cards */
+.curva-browser__card-title {
+  font-family: 'Playfair Display', Georgia, serif !important;
+  font-weight: 600 !important;
+  font-size: 17px !important;
+  color: var(--curva-fg) !important;
+  margin-bottom: 8px !important;
+}
+
+.curva-browser__card-meta {
+  color: var(--curva-fg-muted) !important;
+  font-size: 13px !important;
+  margin-bottom: 16px !important;
+}
+
+.curva-browser__card-actions {
+  margin-top: 16px !important;
+  gap: 8px !important;
+}
+
+/* -- Topbar: tighter */
+.curva-app__topbar {
+  padding: 16px 24px !important;
+  border-bottom: 1px solid var(--curva-border) !important;
+  gap: 16px !important;
+}
+
+/* -- Video panel padding-none since video is full-bleed inside */
+.curva-video {
+  padding: 0 !important;
+  overflow: hidden !important;
+}
+
+.curva-video__title, .curva-video__meta {
+  padding: 16px 20px !important;
+}
+
+/* -- Chat message spacing */
+.curva-chat__msg, .curva-chat__list li {
+  padding: 12px 4px !important;
+  border-bottom: 1px solid var(--curva-border) !important;
+}
+
+/* -- HUD: tighter */
+.curva-hud {
+  padding: 12px 14px !important;
+  gap: 6px !important;
+  font-size: 11px !important;
+  border-radius: 10px !important;
+  border: 1px solid var(--curva-border) !important;
+  background: rgba(10,10,10,0.72) !important;
+  backdrop-filter: blur(12px) !important;
+  -webkit-backdrop-filter: blur(12px) !important;
+}
+
+/* ============================================================================
+   Wave 4 taste-driven polish (2026-07-07). Real product feel, not hackathon.
+
+   Design language references:
+   - Linear (border rgba(255,255,255,0.06/0.08), inset white highlights, luminance
+     stepping instead of drop shadows, weight 510 signature)
+   - Vercel (near-black on white with red CTAs, compressed typography)
+   - Raycast (tight card padding, subtle hover lifts, mono chips)
+
+   This block is *deliberately* at the bottom of the file so its !important rules
+   beat the Wave 3 block above. Nothing here overrides functional structure —
+   only presentation.
+   ========================================================================== */
+
+/* -- Curva tokens: extend Wave 3 palette with elevation + focus primitives -- */
+:root {
+  --curva-elev-1: 0 1px 3px rgba(0, 0, 0, 0.50), inset 0 1px 0 rgba(255, 255, 255, 0.025);
+  --curva-elev-2: 0 4px 12px rgba(0, 0, 0, 0.42), inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  --curva-elev-hover: 0 8px 24px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  --curva-focus-ring: 0 0 0 3px rgba(200, 16, 46, 0.28);
+  --curva-inset-hi: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  --curva-motion-quick: 140ms cubic-bezier(0.2, 0, 0.13, 1.5);
+  --curva-motion-panel: 220ms cubic-bezier(0.19, 1, 0.22, 1);
+}
+
+/* -- Page mount fade-in + panel stagger ------------------------------------ */
+@keyframes curva-fade-up {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes curva-fade-in {
+  from { opacity: 0; } to { opacity: 1; }
+}
+
+body.curva-ready .curva-app {
+  animation: curva-fade-in 260ms ease-out both;
+}
+.curva-app__main > *,
+.curva-app__aside > * {
+  animation: curva-fade-up 260ms cubic-bezier(0.19, 1, 0.22, 1) both;
+}
+.curva-app__main > *:nth-child(2) { animation-delay: 30ms; }
+.curva-app__main > *:nth-child(3) { animation-delay: 60ms; }
+.curva-app__aside > *:nth-child(1) { animation-delay: 45ms; }
+.curva-app__aside > *:nth-child(2) { animation-delay: 75ms; }
+
+@media (prefers-reduced-motion: reduce) {
+  .curva-app__main > *, .curva-app__aside > *, body.curva-ready .curva-app {
+    animation: none !important;
+  }
+}
+
+/* -- Panel elevation: Linear's inset-white trick for premium feel ---------- */
+.curva-video, .curva-chat, .curva-clips, .curva-tip, .curva-predictions,
+.curva-feed, .curva-commentary, .curva-leaderboard, .curva-browser,
+.curva-app__room-header, .curva-app__clips, .curva-app__chat,
+.curva-app__video, .curva-app__feed, .curva-app__log-panel,
+.curva-header {
+  box-shadow: var(--curva-elev-1) !important;
+  transition:
+    transform var(--curva-motion-panel),
+    border-color var(--curva-motion-panel),
+    box-shadow var(--curva-motion-panel) !important;
+  position: relative;
+}
+.curva-video:hover, .curva-chat:hover, .curva-clips:hover, .curva-tip:hover,
+.curva-predictions:hover, .curva-feed:hover, .curva-commentary:hover,
+.curva-leaderboard:hover, .curva-browser:hover, .curva-app__feed:hover,
+.curva-app__log-panel:hover, .curva-header:hover {
+  transform: translateY(-1px);
+  border-color: rgba(255, 255, 255, 0.11) !important;
+  box-shadow: var(--curva-elev-2) !important;
+}
+
+/* Inner cards (match browser, predictions, tip presets, clip cards) */
+.curva-browser__card, .curva-tip__tab, .curva-tip__preset,
+.curva-predictions__card, .curva-clip__card {
+  box-shadow: var(--curva-elev-1) !important;
+  transition:
+    transform var(--curva-motion-quick),
+    border-color var(--curva-motion-quick),
+    box-shadow var(--curva-motion-quick) !important;
+}
+.curva-browser__card:hover, .curva-predictions__card:hover, .curva-clip__card:hover {
+  transform: translateY(-1px);
+  border-color: rgba(255, 255, 255, 0.14) !important;
+  box-shadow: var(--curva-elev-2) !important;
+}
+
+/* -- Section titles: subtle red-accent underline for the first 24px -------- */
+h2, .curva-panel__title, .curva-chat__title, .curva-tip__title,
+.curva-predictions__title, .curva-clips__title, .curva-video__title,
+.curva-browser__title, .curva-feed__title, .curva-leaderboard__title {
+  position: relative;
+  padding-bottom: 10px !important;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05) !important;
+  margin-bottom: 16px !important;
+}
+h2::after, .curva-panel__title::after, .curva-chat__title::after,
+.curva-tip__title::after, .curva-predictions__title::after,
+.curva-clips__title::after, .curva-video__title::after,
+.curva-browser__title::after, .curva-feed__title::after,
+.curva-leaderboard__title::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  bottom: -1px;
+  width: 24px;
+  height: 1px;
+  background: var(--curva-accent);
+  box-shadow: 0 0 8px rgba(200, 16, 46, 0.5);
+}
+
+/* -- Buttons: 3 clean tiers (primary / secondary / ghost) ----------------- */
+/* Base: reset the Wave 3 block so we can layer taste on top. Uses selector
+   specificity that matches Wave 3 (single class + !important) but wins on
+   source-order. */
+button, .curva-btn {
+  font-family: inherit !important;
+  font-size: 13px !important;
+  font-weight: 510 !important;
+  letter-spacing: 0.005em !important;
+  padding: 9px 14px !important;
+  border-radius: 8px !important;
+  background: rgba(255, 255, 255, 0.03) !important;
+  border: 1px solid rgba(255, 255, 255, 0.08) !important;
+  color: var(--curva-fg) !important;
+  cursor: pointer;
+  transition:
+    background 140ms ease-out,
+    border-color 140ms ease-out,
+    transform 100ms ease-out,
+    box-shadow 140ms ease-out !important;
+  box-shadow: var(--curva-inset-hi);
+}
+button:hover, .curva-btn:hover {
+  background: rgba(255, 255, 255, 0.06) !important;
+  border-color: rgba(255, 255, 255, 0.16) !important;
+}
+button:active, .curva-btn:active {
+  transform: translateY(1px);
+  background: rgba(255, 255, 255, 0.02) !important;
+}
+button:focus-visible, .curva-btn:focus-visible {
+  outline: none !important;
+  box-shadow: var(--curva-inset-hi), var(--curva-focus-ring) !important;
+  border-color: rgba(200, 16, 46, 0.55) !important;
+}
+
+/* Primary CTA — solid Torino red with subtle inner highlight + red glow */
+.curva-btn--primary, .curva-tip__submit, .curva-chat__send,
+.curva-browser__btn--primary, .curva-predictions__submit,
+button[type="submit"], .curva-header__cta {
+  background: var(--curva-accent) !important;
+  border: 1px solid var(--curva-accent) !important;
+  color: #ffffff !important;
+  font-weight: 600 !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.14),
+    0 1px 2px rgba(0, 0, 0, 0.5),
+    0 6px 16px rgba(200, 16, 46, 0.22) !important;
+}
+.curva-btn--primary:hover, .curva-tip__submit:hover, .curva-chat__send:hover,
+.curva-browser__btn--primary:hover, .curva-predictions__submit:hover,
+button[type="submit"]:hover, .curva-header__cta:hover {
+  background: #b30d28 !important;
+  border-color: #b30d28 !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.16),
+    0 2px 4px rgba(0, 0, 0, 0.5),
+    0 10px 24px rgba(200, 16, 46, 0.32) !important;
+}
+.curva-btn--primary:active, .curva-tip__submit:active, .curva-chat__send:active,
+.curva-browser__btn--primary:active, .curva-predictions__submit:active,
+button[type="submit"]:active, .curva-header__cta:active {
+  background: var(--curva-accent) !important;
+  transform: translateY(1px);
+  box-shadow:
+    inset 0 1px 2px rgba(0, 0, 0, 0.3),
+    0 0 0 0 rgba(200, 16, 46, 0) !important;
+}
+.curva-btn--primary:focus-visible, .curva-tip__submit:focus-visible,
+.curva-chat__send:focus-visible, .curva-browser__btn--primary:focus-visible,
+.curva-predictions__submit:focus-visible, button[type="submit"]:focus-visible {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.14),
+    0 0 0 3px rgba(200, 16, 46, 0.45),
+    0 6px 16px rgba(200, 16, 46, 0.28) !important;
+}
+
+/* Ghost tier — no border, no background, just text + underline on hover */
+.curva-btn--ghost, .curva-header__btn, .curva-chat__cancel,
+button[data-variant="ghost"] {
+  background: transparent !important;
+  border: 1px solid transparent !important;
+  color: var(--curva-fg-muted) !important;
+  padding: 8px 12px !important;
+  box-shadow: none !important;
+}
+.curva-btn--ghost:hover, .curva-header__btn:hover, .curva-chat__cancel:hover,
+button[data-variant="ghost"]:hover {
+  background: rgba(255, 255, 255, 0.04) !important;
+  color: var(--curva-fg) !important;
+  border-color: transparent !important;
+}
+
+/* -- Chip refinement: pill status tags with red tint for accent chips ----- */
+.curva-chip, .curva-badge, .curva-tag,
+.curva-browser__badge, .curva-browser__chip,
+.curva-header__badge {
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 4px !important;
+  padding: 3px 8px !important;
+  border-radius: 999px !important;
+  background: rgba(255, 255, 255, 0.04) !important;
+  border: 1px solid rgba(255, 255, 255, 0.07) !important;
+  color: var(--curva-fg-muted) !important;
+  font-size: 11px !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.04em !important;
+  text-transform: uppercase !important;
+  font-family: var(--curva-sans) !important;
+}
+/* Red-accent chip variant used by UPCOMING, STADIUM, PEER-style tags */
+.curva-browser__badge--live, .curva-browser__badge--upcoming,
+.curva-browser__chip--red, .curva-header__badge--host,
+[data-chip-accent="red"] {
+  background: rgba(200, 16, 46, 0.12) !important;
+  border-color: rgba(200, 16, 46, 0.30) !important;
+  color: var(--curva-accent) !important;
+}
+.curva-header__badge--peer, [data-chip-accent="mint"] {
+  background: rgba(124, 227, 193, 0.10) !important;
+  border-color: rgba(124, 227, 193, 0.25) !important;
+  color: var(--curva-mint) !important;
+}
+
+/* -- RoomHeader ("CURVA demo-room" block) cleanup ------------------------- */
+/* The big colored wordmark + slug + crest was the biggest source of visual
+   confusion. Reduce to a compact monospace room-slug chip so the address /
+   balance / joined status can breathe. Keeps ALL child elements — just quiets
+   them. */
+.curva-header {
+  padding: 14px 20px !important;
+  border-radius: 12px !important;
+}
+.curva-header__brand {
+  gap: 8px !important;
+  align-items: center !important;
+}
+.curva-header__crest {
+  width: 20px !important;
+  height: 20px !important;
+  opacity: 0.85;
+  margin-right: 4px !important;
+  filter: drop-shadow(0 1px 3px rgba(200, 16, 46, 0.20));
+}
+.curva-header__mark {
+  font-family: var(--curva-display) !important;
+  color: var(--curva-fg) !important;
+  font-weight: 700 !important;
+  letter-spacing: 0.02em !important;
+  font-size: 15px !important;
+  line-height: 1 !important;
+  opacity: 0.85;
+}
+.curva-header__slug {
+  font-family: var(--curva-mono) !important;
+  color: var(--curva-fg-muted) !important;
+  font-size: 11px !important;
+  padding: 2px 8px !important;
+  background: rgba(255, 255, 255, 0.04) !important;
+  border: 1px solid rgba(255, 255, 255, 0.07) !important;
+  border-radius: 999px !important;
+  letter-spacing: 0.02em !important;
+}
+
+/* -- Empty states: muted italic, centered, breathing room ----------------- */
+.curva-empty, [data-empty], .curva-feed__empty, .curva-chat__empty,
+.curva-clips__empty, .curva-browser__empty, .curva-tip__empty,
+.curva-predictions__empty {
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 8px !important;
+  padding: 28px 16px !important;
+  color: rgba(138, 138, 138, 0.75) !important;
+  font-style: italic !important;
+  font-size: 13px !important;
+  text-align: center !important;
+  letter-spacing: 0.01em !important;
+}
+.curva-empty::before, [data-empty]::before, .curva-feed__empty::before,
+.curva-chat__empty::before, .curva-clips__empty::before,
+.curva-browser__empty::before, .curva-tip__empty::before,
+.curva-predictions__empty::before {
+  content: '';
+  display: block;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 1px dashed rgba(255, 255, 255, 0.12);
+  opacity: 0.7;
+  margin-bottom: 4px;
+}
+
+/* -- Focus rings on inputs: sharp, not embarrassing ------------------------ */
+input:focus, textarea:focus, select:focus {
+  outline: none !important;
+  border-color: rgba(200, 16, 46, 0.55) !important;
+  box-shadow: 0 0 0 3px rgba(200, 16, 46, 0.18) !important;
+}
+
+/* -- Topbar: use the artistic Curva mark from /web/src/logo.svg -----------
+   The web logo is a 1500x1500 square SVG with the "CURVA" wordmark baked
+   into the graphic (embedded PNG). We render it at 40px tall to keep the
+   wordmark legible inside the topbar. */
+.curva-app__brand-logo {
+  height: 40px !important;
+  width: 40px !important;
+  max-width: 40px !important;
+  object-fit: contain !important;
+  display: block !important;
+  filter: drop-shadow(0 1px 6px rgba(200, 16, 46, 0.28)) !important;
+}
+.curva-app__topbar {
+  padding: 12px 24px !important;
+  background: rgba(10, 10, 10, 0.86) !important;
+  backdrop-filter: blur(10px) !important;
+  -webkit-backdrop-filter: blur(10px) !important;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06) !important;
+  position: sticky;
+  top: 0;
+  z-index: 40;
+}
+
+/* ============================================================================
+   Wave 5: Correct logo sizing + panel layout fixes (2026-07-07).
+   
+   1. Logo swap: /web/public/assets/logo.svg (rectangular 1440x810 viewBox with
+      wordmark baked in). Render at natural aspect so wordmark shows.
+   2. Wallet card: shrink brand chip, cleaner grid
+   3. Commentator panel: auto-height (was wasting vertical space)
+   4. Chat panel: proper flex column with msg list flex-grow
+   5. Predictions / Clips: fit content, no giant empty state boxes
+   ============================================================================ */
+
+/* -- Topbar logo: render at natural aspect. The web logo is 1440x810 SVG
+   with the wordmark baked in visually. Fixed width forces the wordmark to
+   display. Same treatment as /web/Header.tsx. */
+.curva-app__brand-logo {
+  height: 44px !important;
+  width: auto !important;
+  max-width: 220px !important;
+  min-width: 44px !important;
+  object-fit: contain !important;
+  display: block !important;
+  filter: drop-shadow(0 1px 6px rgba(200, 16, 46, 0.28)) !important;
+}
+
+.curva-app__brand {
+  gap: 0 !important;
+  min-width: 0;
+}
+
+.curva-app__topbar {
+  padding: 12px 24px !important;
+}
+
+/* -- Wallet card: shrink brand block. The giant "CURVA demo-room" cluster
+   was confusing. Reduce to a small compact brand chip on the left. */
+.curva-tip__brand, .curva-wallet__brand {
+  display: flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+  min-width: 0 !important;
+  flex-shrink: 0 !important;
+}
+
+.curva-tip__brand img, .curva-wallet__brand img {
+  height: 24px !important;
+  width: auto !important;
+  max-width: 24px !important;
+  opacity: 0.9 !important;
+}
+
+.curva-tip__brand-wordmark, .curva-wallet__brand-wordmark {
+  font-size: 13px !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.04em !important;
+  color: var(--curva-fg-muted) !important;
+  font-family: 'Playfair Display', Georgia, serif !important;
+}
+
+.curva-tip__room-slug, .curva-wallet__room-slug {
+  font-family: 'JetBrains Mono', ui-monospace, monospace !important;
+  font-size: 11px !important;
+  padding: 3px 8px !important;
+  background: rgba(255,255,255,0.04) !important;
+  border-radius: 999px !important;
+  color: var(--curva-fg-muted) !important;
+  border: 1px solid var(--curva-border) !important;
+}
+
+/* -- Wallet panel: better internal grid */
+.curva-tip__peer-panel, .curva-tip__body {
+  display: grid !important;
+  grid-template-columns: minmax(200px, 1fr) minmax(220px, 1fr) !important;
+  gap: 20px !important;
+  align-items: start !important;
+}
+
+/* -- Commentator panel: kill wasted vertical space */
+.curva-commentary, .curva-commentator {
+  min-height: auto !important;
+  height: auto !important;
+}
+
+.curva-commentary__body, .curva-commentator__body {
+  min-height: 120px !important;
+  max-height: 240px !important;
+  overflow-y: auto !important;
+}
+
+.curva-commentary__personas, .curva-commentator__personas {
+  display: flex !important;
+  flex-wrap: wrap !important;
+  gap: 8px !important;
+  margin-top: 12px !important;
+}
+
+/* -- Chat panel: proper flex column so the msg list fills space and input
+   stays pinned to the bottom */
+.curva-chat {
+  display: flex !important;
+  flex-direction: column !important;
+  min-height: 480px !important;
+}
+
+.curva-chat__title {
+  flex-shrink: 0 !important;
+}
+
+.curva-chat__toolbar, .curva-chat__lang {
+  flex-shrink: 0 !important;
+  margin-bottom: 12px !important;
+}
+
+.curva-chat__list {
+  flex: 1 1 auto !important;
+  min-height: 200px !important;
+  overflow-y: auto !important;
+}
+
+.curva-chat__form, .curva-chat__composer {
+  flex-shrink: 0 !important;
+  margin-top: 12px !important;
+  padding-top: 12px !important;
+  border-top: 1px solid var(--curva-border) !important;
+}
+
+/* -- Prediction Pool: fit content, don't leave empty box */
+.curva-predictions {
+  min-height: auto !important;
+}
+
+.curva-predictions__empty {
+  padding: 20px !important;
+  text-align: center !important;
+  color: var(--curva-fg-muted) !important;
+  font-style: italic !important;
+  font-size: 14px !important;
+  border: 1px dashed var(--curva-border-strong) !important;
+  border-radius: 10px !important;
+  margin-top: 8px !important;
+}
+
+/* -- Clips: cleaner grid + empty state */
+.curva-clips__gallery, .curva-clips__list {
+  display: grid !important;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)) !important;
+  gap: 16px !important;
+  margin-top: 12px !important;
+}
+
+.curva-clips__empty {
+  grid-column: 1 / -1 !important;
+  padding: 24px !important;
+  text-align: center !important;
+  color: var(--curva-fg-muted) !important;
+  font-style: italic !important;
+  font-size: 14px !important;
+}
+
+/* -- Top tippers: cleaner box */
+.curva-tip__top-tippers {
+  padding: 14px 16px !important;
+  border: 1px solid var(--curva-border) !important;
+  border-radius: 10px !important;
+  background: rgba(255,255,255,0.02) !important;
+}
+
+/* -- General: reduce excessive min-heights across panels */
+.curva-app__chat, .curva-app__clips, .curva-app__feed,
+.curva-app__video, .curva-app__log-panel {
+  min-height: auto !important;
+}
+
+/* -- Room-grid: two column that grows content-based */
+.curva-app__room-grid {
+  grid-template-columns: minmax(0, 2fr) minmax(300px, 380px) !important;
+  gap: 24px !important;
+  align-items: start !important;
+}
+
+/* -- Section title with red underline: shorter and stays tight */
+.curva-panel__title::after,
+h2::after {
+  content: '';
+  display: block;
+  width: 24px;
+  height: 2px;
+  background: var(--curva-accent);
+  border-radius: 2px;
+  margin-top: 6px;
+}
+
+/* ============================================================================
+   Wave 6 targeted fixes (2026-07-07). Specific screenshotted issues.
+   ============================================================================ */
+
+/* -- Logo: BIGGER. User wants prominent branding. */
+.curva-app__brand-logo {
+  height: 56px !important;
+  width: auto !important;
+  max-width: 260px !important;
+  min-width: 56px !important;
+  filter: drop-shadow(0 2px 8px rgba(200, 16, 46, 0.35)) !important;
+}
+
+.curva-app__topbar {
+  padding: 16px 28px !important;
+  min-height: 88px !important;
+  align-items: center !important;
+}
+
+/* -- Run demo button: cleaner box, no dangling status */
+[data-demo-automation] {
+  top: 20px !important;
+  right: 20px !important;
+  gap: 6px !important;
+}
+
+[data-demo-automation] button {
+  height: 34px !important;
+  padding: 0 14px !important;
+  font-size: 13px !important;
+  font-weight: 600 !important;
+  border-radius: 8px !important;
+  background: #c8102e !important;
+  color: #fff !important;
+  border: 1px solid #c8102e !important;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.14), 0 4px 12px rgba(200,16,46,0.28) !important;
+}
+
+[data-demo-automation] > div:last-child {
+  font-size: 11px !important;
+  padding: 2px 8px !important;
+  border-radius: 6px !important;
+  background: rgba(10,10,10,0.72) !important;
+  backdrop-filter: blur(6px) !important;
+  border: 1px solid var(--curva-border) !important;
+}
+
+/* -- AI Commentator personas: proper gaps */
+.curva-commentary__personas, .curva-commentator__personas,
+.curva-commentary__persona-list, .curva-commentator__persona-list {
+  display: flex !important;
+  flex-wrap: wrap !important;
+  gap: 10px !important;
+  margin-top: 14px !important;
+}
+
+.curva-commentary__persona, .curva-commentator__persona,
+.curva-commentary__persona-btn, .curva-commentator__persona-btn {
+  padding: 8px 14px !important;
+  font-size: 13px !important;
+  border-radius: 8px !important;
+  background: rgba(255,255,255,0.03) !important;
+  border: 1px solid var(--curva-border-strong) !important;
+  color: var(--curva-fg) !important;
+  cursor: pointer !important;
+  transition: all 160ms ease-out !important;
+}
+
+.curva-commentary__persona:hover, .curva-commentator__persona:hover {
+  background: rgba(255,255,255,0.06) !important;
+  border-color: rgba(255,255,255,0.16) !important;
+}
+
+.curva-commentary__persona--active, .curva-commentator__persona--active {
+  background: rgba(200,16,46,0.14) !important;
+  border-color: rgba(200,16,46,0.6) !important;
+  color: #fff !important;
+}
+
+.curva-commentary__header, .curva-commentator__header {
+  display: flex !important;
+  align-items: center !important;
+  gap: 10px !important;
+  margin-bottom: 12px !important;
+}
+
+.curva-commentary__body-msg, .curva-commentator__body-msg,
+.curva-commentary__empty {
+  padding: 14px 16px !important;
+  background: rgba(255,255,255,0.02) !important;
+  border: 1px solid var(--curva-border) !important;
+  border-radius: 10px !important;
+  color: var(--curva-fg-muted) !important;
+  font-size: 14px !important;
+  line-height: 1.5 !important;
+}
+
+/* -- Wallet card wide layout: cleaner two-column */
+.curva-tip, .curva-wallet-card {
+  padding: 28px !important;
+}
+
+.curva-tip__header-row, .curva-wallet__header-row {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  gap: 20px !important;
+  padding-bottom: 20px !important;
+  margin-bottom: 20px !important;
+  border-bottom: 1px solid var(--curva-border) !important;
+}
+
+/* Peer info list on the left */
+.curva-tip__peer-info, .curva-wallet__peer-info {
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 10px !important;
+}
+
+.curva-tip__peer-info > div, .curva-wallet__peer-info > div {
+  display: flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+  font-size: 13px !important;
+  color: var(--curva-fg-muted) !important;
+}
+
+/* Room controls: proper button row with spacing */
+.curva-tip__room-actions, .curva-tip__actions {
+  display: flex !important;
+  flex-wrap: wrap !important;
+  gap: 10px !important;
+  margin-top: 16px !important;
+}
+
+.curva-tip__room-actions button, .curva-tip__actions button {
+  height: 36px !important;
+  padding: 0 14px !important;
+  font-size: 13px !important;
+  white-space: nowrap !important;
+}
+
+/* Tip form on the right */
+.curva-tip__form {
+  padding: 20px !important;
+  background: rgba(255,255,255,0.02) !important;
+  border: 1px solid var(--curva-border) !important;
+  border-radius: 12px !important;
+}
+
+.curva-tip__scope-tabs {
+  display: flex !important;
+  gap: 8px !important;
+  margin-bottom: 16px !important;
+}
+
+.curva-tip__scope-tabs button {
+  flex: 1 !important;
+  padding: 10px 14px !important;
+  font-size: 12px !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.06em !important;
+}
+
+.curva-tip__preset-row {
+  display: grid !important;
+  grid-template-columns: repeat(4, 1fr) !important;
+  gap: 8px !important;
+  margin-bottom: 16px !important;
+}
+
+.curva-tip__preset-row button {
+  height: 40px !important;
+  font-size: 13px !important;
+  font-weight: 600 !important;
+}
+
+.curva-tip__meta {
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 12px !important;
+  padding-top: 16px !important;
+  border-top: 1px solid var(--curva-border) !important;
+  margin-top: 16px !important;
+}
+
+/* -- Wallet card footer (Attendees, tips summary) */
+.curva-tip__footer, .curva-wallet__footer {
+  display: flex !important;
+  align-items: center !important;
+  gap: 16px !important;
+  padding-top: 20px !important;
+  margin-top: 20px !important;
+  border-top: 1px solid var(--curva-border) !important;
+  font-size: 13px !important;
+}
+
+/* -- Top tippers panel: proper card */
+.curva-tip__top-tippers, .curva-tippers {
+  padding: 20px !important;
+  background: rgba(255,255,255,0.02) !important;
+  border: 1px solid var(--curva-border) !important;
+  border-radius: 12px !important;
+  margin-top: 20px !important;
+}
+
+.curva-tip__top-tippers h3, .curva-tippers h3 {
+  font-size: 12px !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.14em !important;
+  text-transform: uppercase !important;
+  color: var(--curva-fg-muted) !important;
+  margin-bottom: 12px !important;
+}
+
+/* -- Prediction Pool: cleaner empty state */
+.curva-predictions {
+  padding: 24px !important;
+}
+
+.curva-predictions__title {
+  margin-bottom: 16px !important;
+}
+
+.curva-predictions__empty, .curva-predictions__no-pool {
+  padding: 20px !important;
+  text-align: center !important;
+  color: var(--curva-fg-muted) !important;
+  font-style: italic !important;
+  font-size: 14px !important;
+  line-height: 1.5 !important;
+  background: rgba(255,255,255,0.02) !important;
+  border: 1px dashed var(--curva-border-strong) !important;
+  border-radius: 10px !important;
+}
+
+/* -- Clips: bigger clip cards, cleaner grid */
+.curva-clips {
+  padding: 24px !important;
+}
+
+.curva-clips__gallery, .curva-clips__list {
+  gap: 20px !important;
+  margin-top: 16px !important;
+}
+
+.curva-clips__card, .curva-clip {
+  border-radius: 12px !important;
+  overflow: hidden !important;
+  border: 1px solid var(--curva-border) !important;
+  background: rgba(255,255,255,0.02) !important;
+  transition: transform 200ms ease-out, border-color 200ms ease-out !important;
+}
+
+.curva-clips__card:hover, .curva-clip:hover {
+  transform: translateY(-2px) !important;
+  border-color: rgba(255,255,255,0.14) !important;
+}
+
+.curva-clips__card-meta {
+  padding: 12px !important;
+}
+
+/* -- Match cards: bigger gap in the grid */
+.curva-browser__list, .curva-browser__matches,
+.curva-browser__grid {
+  gap: 20px !important;
+  margin-top: 16px !important;
+}
+
+/* -- Activity feed: hide the "backend not configured" text */
+.curva-feed__status--disconnected {
+  display: none !important;
+}
+
+/* -- Chat body message: bigger empty area more subtle */
+.curva-chat__loading {
+  padding: 20px !important;
+  text-align: center !important;
+  color: var(--curva-fg-muted) !important;
+  font-style: italic !important;
+  font-size: 13px !important;
+}
+
+/* -- Chat language toolbar: gap between buttons */
+.curva-chat__lang, .curva-chat__toolbar {
+  display: flex !important;
+  align-items: center !important;
+  gap: 10px !important;
+  flex-wrap: wrap !important;
+  padding: 14px 0 !important;
+  border-bottom: 1px solid var(--curva-border) !important;
+  margin-bottom: 14px !important;
+}
+
+.curva-chat__lang button, .curva-chat__toolbar button,
+.curva-chat__lang-btn {
+  padding: 8px 14px !important;
+  font-size: 13px !important;
+  border-radius: 8px !important;
+}
+
+/* -- Chat message row: proper padding */
+.curva-chat__msg {
+  padding: 14px 0 !important;
+  border-bottom: 1px solid var(--curva-border) !important;
+}
+
+.curva-chat__msg-author {
+  display: flex !important;
+  align-items: center !important;
+  gap: 6px !important;
+  font-family: 'JetBrains Mono', ui-monospace, monospace !important;
+  font-size: 12px !important;
+  color: var(--curva-accent) !important;
+  margin-bottom: 4px !important;
+}
+
+.curva-chat__msg-body {
+  font-size: 15px !important;
+  color: var(--curva-fg) !important;
+  line-height: 1.5 !important;
+}
+
+/* -- Chat compose row: input + send with proper gap */
+.curva-chat__form, .curva-chat__composer {
+  display: flex !important;
+  align-items: center !important;
+  gap: 12px !important;
+  padding-top: 14px !important;
+  margin-top: 14px !important;
+  border-top: 1px solid var(--curva-border) !important;
+}
+
+.curva-chat__form input, .curva-chat__composer input,
+.curva-chat__input {
+  flex: 1 1 auto !important;
+  min-width: 0 !important;
+}
+
+.curva-chat__counter, .curva-chat__form span {
+  font-size: 12px !important;
+  color: var(--curva-fg-muted) !important;
+  font-family: 'JetBrains Mono', ui-monospace, monospace !important;
+  white-space: nowrap !important;
+}
+
+/* ============================================================================
+   Wave 7 (2026-07-07). Kill remaining clutter for the demo.
+   
+   Demo priorities (what judges must see clearly):
+   1. Video (FIFA WC26 promo)
+   2. Chat
+   3. Tip form (real Sepolia)
+   4. Prediction pool
+   5. HUD (13 primitives live)
+   
+   Everything else is de-emphasized or hidden.
+   ============================================================================ */
+
+/* -- Kill duplicate panels: if a defensive-mount produces two, hide the 2nd */
+.curva-app__predictions ~ .curva-app__predictions,
+.curva-app__commentary ~ .curva-app__commentary,
+.curva-app__predictions:not(:first-of-type),
+.curva-app__commentary:not(:first-of-type) {
+  display: none !important;
+}
+
+/* -- Hide the lobby "Live and upcoming matches" browser when in a room.
+   The room view's data-mount="room" gets hidden=false when mountRoom fires,
+   and the browser's data-mount="browser" gets hidden=true. But the CSS
+   specificity from prior waves may not always beat the room's flex layout.
+   Belt + suspenders. */
+.curva-app__room:not([hidden]) ~ * .curva-app__browser,
+.curva-app__browser[hidden] {
+  display: none !important;
+}
+
+/* -- Hide clip gallery for the demo. Not part of the pitch narrative. */
+.curva-app__clips, .curva-clips {
+  display: none !important;
+}
+
+/* -- Hide top tippers block. Not part of the pitch narrative. */
+.curva-tip__top-tippers, .curva-tippers,
+[data-mount="top-tippers"] {
+  display: none !important;
+}
+
+/* -- Hide leaderboard for the demo */
+.curva-app__leaderboard, .curva-leaderboard {
+  display: none !important;
+}
+
+/* -- Simplify the room grid: 2fr video + 1fr chat/tips column */
+.curva-app__room-grid {
+  grid-template-columns: minmax(0, 2fr) minmax(340px, 1fr) !important;
+  gap: 24px !important;
+  align-items: start !important;
+}
+
+/* -- Chat panel: force a sensible height so it's usable */
+.curva-app__chat, .curva-chat {
+  min-height: 420px !important;
+  max-height: 640px !important;
+}
+
+/* -- Commentary and prediction: side-by-side under the chat if both mounted,
+   or stack if narrow. Force a proper 12px gap. */
+.curva-app__commentary + .curva-app__predictions,
+.curva-app__predictions + .curva-app__commentary {
+  margin-top: 20px !important;
+}
+
+/* -- Event log: fade out old lines so the panel doesn't feel busy */
+.curva-app__log-panel {
+  max-height: 260px !important;
+  overflow: hidden !important;
+}
+
+.curva-app__log li:nth-child(n+8) {
+  opacity: 0.5 !important;
+}
+
+/* -- Kill the giant CURVA logo appearing INSIDE the wallet card (screenshot
+   showed a small yin-yang + wordmark next to the demo-room chip; not needed) */
+.curva-tip__brand, .curva-wallet__brand {
+  display: none !important;
+}
+
+/* -- Room header cleanup: tighten */
+.curva-app__room-header, .curva-room-header {
+  padding: 20px 24px !important;
+}
+
+/* -- Video source URL debug row: hide (users don't need to see it) */
+.curva-video__source-row, .curva-video__debug,
+[data-video-debug] {
+  display: none !important;
+}
+
+/* -- "Backend unreachable" banner: hide (backend IS running) */
+.curva-browser__banner, .curva-browser__error-banner,
+.curva-app__banner--backend-down {
+  display: none !important;
+}
+
+/* ============================================================================
+   Wave 8 — Recording mode. HIDE everything except the watch-party essentials.
+   
+   For the demo video we show: video (center), chat (right sidebar), HUD (corner).
+   Everything else is noise. Tips are demonstrated via terminal curl.
+   ============================================================================ */
+
+/* Wave 10 (2026-07-07): un-hide tip form. Balance bug fix landed. The tip
+   card is the demo money shot. Kept top-tippers, leaderboard, etc. hidden. */
+/* Previously: .curva-tip { display: none } — removed intentionally */
+
+/* Hide the "LIVE TIPS" section label above the wallet card */
+.curva-section-label--live-tips, .curva-live-tips-label {
+  display: none !important;
+}
+
+/* Hide top tippers / attendees / leaderboard / everything wallet-adjacent */
+.curva-tip__top-tippers, .curva-tippers, .curva-leaderboard,
+.curva-app__leaderboard, .curva-attendance, .curva-app__attendance {
+  display: none !important;
+}
+
+/* Hide AI Commentator (won't finish loading in 90s window) */
+.curva-app__commentary, .curva-commentary, .curva-commentator {
+  display: none !important;
+}
+
+/* Hide Prediction Pool for the video (empty state is confusing) */
+.curva-app__predictions, .curva-predictions {
+  display: none !important;
+}
+
+/* Hide clips */
+.curva-app__clips, .curva-clips {
+  display: none !important;
+}
+
+/* Hide the Activity feed panel (says "disconnected" and confuses) */
+.curva-app__feed, .curva-feed {
+  display: none !important;
+}
+
+/* Hide event log panel (too verbose) */
+.curva-app__log-panel, [data-log] {
+  display: none !important;
+}
+
+/* Hide right sidebar entirely since feed + log are both hidden */
+.curva-app__aside {
+  display: none !important;
+}
+
+/* Restructure room grid: single column, video on top, chat below (or side by
+   side if room is wide enough). Full width. */
+.curva-app__room-grid {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) !important;
+  gap: 24px !important;
+}
+
+/* Split video + chat when there's enough room */
+@media (min-width: 900px) {
+  .curva-app__room-grid {
+    grid-template-columns: minmax(0, 2fr) minmax(320px, 1fr) !important;
+  }
+}
+
+.curva-app__body {
+  display: block !important;
+  padding: 24px !important;
+}
+
+.curva-app__main {
+  display: block !important;
+  max-width: 1200px !important;
+  margin: 0 auto !important;
+}
+
+/* Video panel: big, centered, full width */
+.curva-app__video, .curva-video {
+  padding: 0 !important;
+  border: 1px solid var(--curva-border) !important;
+  border-radius: 16px !important;
+  overflow: hidden !important;
+  background: #000 !important;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.5) !important;
+}
+
+.curva-app__video video, .curva-video video {
+  width: 100% !important;
+  height: auto !important;
+  display: block !important;
+}
+
+/* Chat: clean sidebar */
+.curva-app__chat, .curva-chat {
+  padding: 20px !important;
+  border-radius: 16px !important;
+  min-height: 500px !important;
+  max-height: 640px !important;
+  background: var(--curva-surface) !important;
+  border: 1px solid var(--curva-border) !important;
+}
+
+/* Chat title: cleaner Playfair */
+.curva-chat__title, .curva-app__chat h2 {
+  font-family: 'Playfair Display', Georgia, serif !important;
+  font-size: 22px !important;
+  font-weight: 700 !important;
+  color: var(--curva-fg) !important;
+  margin-bottom: 20px !important;
+  letter-spacing: -0.01em !important;
+}
+
+/* Room header: minimal — just the peer count + slug + connection state */
+.curva-app__room-header {
+  padding: 12px 20px !important;
+  border-radius: 12px !important;
+  background: var(--curva-surface) !important;
+  border: 1px solid var(--curva-border) !important;
+  margin-bottom: 24px !important;
+  min-height: 48px !important;
+}
+
+/* Hide the video source URL / debug row */
+.curva-video__source-row, .curva-video__debug,
+[data-video-debug], .curva-video__source {
+  display: none !important;
+}
+
+/* HUD stays visible (this is the primitives proof for the video) */
+.curva-hud {
+  position: fixed !important;
+  bottom: 20px !important;
+  right: 20px !important;
+  z-index: 9999 !important;
+  padding: 14px 16px !important;
+  border-radius: 12px !important;
+  background: rgba(10,10,10,0.88) !important;
+  backdrop-filter: blur(14px) !important;
+  -webkit-backdrop-filter: blur(14px) !important;
+  border: 1px solid rgba(255,255,255,0.1) !important;
+  font-family: 'JetBrains Mono', ui-monospace, monospace !important;
+  font-size: 11px !important;
+  line-height: 1.6 !important;
+  color: var(--curva-fg) !important;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.5) !important;
+  min-width: 220px !important;
+}
+
+/* Topbar stays visible with logo + peer count + blind peer + version */
+.curva-app__topbar {
+  padding: 20px 32px !important;
+  border-bottom: 1px solid var(--curva-border) !important;
+  background: rgba(10,10,10,0.72) !important;
+  backdrop-filter: blur(14px) !important;
+  -webkit-backdrop-filter: blur(14px) !important;
+  min-height: 92px !important;
+  position: sticky !important;
+  top: 0 !important;
+  z-index: 100 !important;
+}
+
+/* Run demo button: hide entirely, we're not using it */
+[data-demo-automation] {
+  display: none !important;
+}
+
+/* ============================================================================
+   Wave 9: Room header logo cleanup + chat visibility
+   ============================================================================ */
+
+/* Hide the redundant "CURVA" text in the room header — logo.svg has it baked in */
+.curva-header__mark {
+  display: none !important;
+}
+
+/* Room header crest should be the full logo, not a small crest icon */
+.curva-header__crest {
+  width: auto !important;
+  height: 36px !important;
+  max-width: 140px !important;
+  margin-right: 12px !important;
+  vertical-align: middle !important;
+}
+
+/* Header brand row: cleaner spacing */
+.curva-header__brand {
+  display: flex !important;
+  align-items: center !important;
+  gap: 12px !important;
+}
+
+.curva-header__slug {
+  font-family: 'JetBrains Mono', ui-monospace, monospace !important;
+  font-size: 12px !important;
+  padding: 4px 10px !important;
+  background: rgba(255,255,255,0.05) !important;
+  border: 1px solid var(--curva-border) !important;
+  border-radius: 999px !important;
+  color: var(--curva-fg-muted) !important;
+}
+
+/* Make chat messages POP so incoming messages are impossible to miss */
+.curva-chat__msg {
+  padding: 14px 8px !important;
+  border-bottom: 1px solid var(--curva-border) !important;
+  transition: background 200ms ease-out !important;
+}
+
+.curva-chat__msg:hover {
+  background: rgba(255,255,255,0.02) !important;
+}
+
+.curva-chat__msg-author, .curva-chat__author {
+  display: flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+  font-family: 'JetBrains Mono', ui-monospace, monospace !important;
+  font-size: 12px !important;
+  color: var(--curva-accent) !important;
+  margin-bottom: 6px !important;
+}
+
+.curva-chat__msg-body, .curva-chat__body {
+  font-size: 15px !important;
+  color: var(--curva-fg) !important;
+  line-height: 1.5 !important;
+  word-wrap: break-word !important;
+}
+
+/* ============================================================================
+   Wave 10: Tip form final polish. Real cross-peer WDK tip UI — must feel premium.
+   ============================================================================ */
+
+/* Tip container: proper card with breathing room */
+.curva-tip {
+  display: block !important;
+  padding: 24px !important;
+  border-radius: 16px !important;
+  background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.005)) !important;
+  border: 1px solid var(--curva-border) !important;
+  margin-top: 20px !important;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.03) !important;
+}
+
+/* Tip header/scope row */
+.curva-tip__scope, .curva-tip__scope-row, .curva-tip__scope-tabs {
+  display: flex !important;
+  gap: 8px !important;
+  margin-bottom: 20px !important;
+  padding-bottom: 20px !important;
+  border-bottom: 1px solid var(--curva-border) !important;
+}
+
+.curva-tip__scope button, .curva-tip__scope-tab, .curva-tip__scope-btn {
+  flex: 1 !important;
+  padding: 12px 16px !important;
+  font-size: 12px !important;
+  font-weight: 700 !important;
+  letter-spacing: 0.08em !important;
+  text-transform: uppercase !important;
+  border-radius: 10px !important;
+  background: rgba(255,255,255,0.02) !important;
+  border: 1px solid var(--curva-border) !important;
+  color: var(--curva-fg-muted) !important;
+  cursor: pointer !important;
+  transition: all 200ms ease-out !important;
+}
+
+.curva-tip__scope button:hover, .curva-tip__scope-tab:hover {
+  background: rgba(255,255,255,0.05) !important;
+  color: var(--curva-fg) !important;
+  border-color: var(--curva-border-strong) !important;
+}
+
+.curva-tip__scope button--active, .curva-tip__scope-tab--active,
+.curva-tip__scope-tab.active, .curva-tip__scope-btn--active {
+  background: rgba(200,16,46,0.14) !important;
+  border-color: rgba(200,16,46,0.6) !important;
+  color: #fff !important;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.08) !important;
+}
+
+/* Amount presets grid: 1 / 5 / 10 / cust */
+.curva-tip__presets {
+  display: grid !important;
+  grid-template-columns: repeat(4, 1fr) !important;
+  gap: 8px !important;
+  margin-bottom: 20px !important;
+}
+
+.curva-tip__preset {
+  height: 52px !important;
+  padding: 0 12px !important;
+  font-size: 15px !important;
+  font-weight: 600 !important;
+  border-radius: 10px !important;
+  background: rgba(255,255,255,0.02) !important;
+  border: 1px solid var(--curva-border-strong) !important;
+  color: var(--curva-fg) !important;
+  cursor: pointer !important;
+  transition: all 180ms ease-out !important;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.04) !important;
+}
+
+.curva-tip__preset:hover:not(:disabled) {
+  background: rgba(255,255,255,0.06) !important;
+  border-color: rgba(200,16,46,0.3) !important;
+  transform: translateY(-1px) !important;
+}
+
+.curva-tip__preset--selected, .curva-tip__preset.selected,
+.curva-tip__preset--active {
+  background: rgba(200,16,46,0.16) !important;
+  border-color: rgba(200,16,46,0.7) !important;
+  color: #fff !important;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.12), 0 4px 12px rgba(200,16,46,0.25) !important;
+}
+
+/* Custom amount input */
+.curva-tip__custom, .curva-tip__custom-row {
+  display: flex !important;
+  align-items: center !important;
+  gap: 12px !important;
+  margin-bottom: 20px !important;
+  padding: 14px !important;
+  background: rgba(255,255,255,0.02) !important;
+  border: 1px solid var(--curva-border) !important;
+  border-radius: 10px !important;
+}
+
+.curva-tip__custom label, .curva-tip__custom-label {
+  font-size: 12px !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.06em !important;
+  text-transform: uppercase !important;
+  color: var(--curva-fg-muted) !important;
+  white-space: nowrap !important;
+}
+
+.curva-tip__custom-input {
+  flex: 1 !important;
+  min-width: 0 !important;
+  height: 40px !important;
+  padding: 0 14px !important;
+  font-size: 15px !important;
+  font-weight: 600 !important;
+  background: var(--curva-base) !important;
+  border: 1px solid var(--curva-border-strong) !important;
+  border-radius: 8px !important;
+  color: var(--curva-fg) !important;
+  font-family: 'JetBrains Mono', ui-monospace, monospace !important;
+}
+
+.curva-tip__custom-input:focus {
+  outline: none !important;
+  border-color: rgba(200,16,46,0.7) !important;
+  box-shadow: 0 0 0 3px rgba(200,16,46,0.18) !important;
+}
+
+/* Status area (Waiting for host, insufficient, etc) */
+.curva-tip__status, .curva-tip__meta, .curva-tip__hint {
+  padding: 12px 14px !important;
+  background: rgba(255,255,255,0.02) !important;
+  border: 1px solid var(--curva-border) !important;
+  border-radius: 10px !important;
+  font-size: 13px !important;
+  color: var(--curva-fg-muted) !important;
+  margin-bottom: 16px !important;
+  line-height: 1.55 !important;
+}
+
+.curva-tip__error, .curva-tip__status--error {
+  color: #ff6b6b !important;
+  border-color: rgba(255,107,107,0.3) !important;
+  background: rgba(255,107,107,0.06) !important;
+}
+
+/* Per-peer / amount summary row */
+.curva-tip__meta-row, .curva-tip__summary {
+  display: flex !important;
+  justify-content: space-between !important;
+  align-items: center !important;
+  padding: 12px 0 !important;
+  font-size: 13px !important;
+  color: var(--curva-fg-muted) !important;
+  border-bottom: 1px solid var(--curva-border) !important;
+  margin-bottom: 16px !important;
+}
+
+.curva-tip__meta-row strong, .curva-tip__summary strong {
+  color: var(--curva-fg) !important;
+  font-family: 'JetBrains Mono', ui-monospace, monospace !important;
+  font-weight: 600 !important;
+}
+
+/* Confirm signature button — the star */
+.curva-tip__btn, .curva-tip__submit, .curva-tip__confirm {
+  width: 100% !important;
+  height: 52px !important;
+  padding: 0 24px !important;
+  font-size: 15px !important;
+  font-weight: 700 !important;
+  letter-spacing: 0.02em !important;
+  border-radius: 12px !important;
+  background: linear-gradient(180deg, #d61837 0%, #c8102e 100%) !important;
+  border: 1px solid #c8102e !important;
+  color: #fff !important;
+  cursor: pointer !important;
+  transition: all 180ms ease-out !important;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.16), 0 8px 20px rgba(200,16,46,0.35) !important;
+}
+
+.curva-tip__btn:hover:not(:disabled) {
+  background: linear-gradient(180deg, #e01c3d 0%, #d61837 100%) !important;
+  transform: translateY(-1px) !important;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.2), 0 12px 24px rgba(200,16,46,0.5) !important;
+}
+
+.curva-tip__btn:active:not(:disabled) {
+  transform: translateY(0) !important;
+  box-shadow: inset 0 2px 4px rgba(0,0,0,0.2) !important;
+}
+
+.curva-tip__btn:disabled {
+  background: rgba(255,255,255,0.04) !important;
+  border-color: var(--curva-border) !important;
+  color: var(--curva-fg-muted) !important;
+  cursor: not-allowed !important;
+  box-shadow: none !important;
+  transform: none !important;
+}
+
+.curva-tip__btn--pending {
+  background: rgba(255,193,7,0.16) !important;
+  border-color: rgba(255,193,7,0.5) !important;
+  color: #ffc107 !important;
+}
+
+.curva-tip__btn--ok {
+  background: rgba(76,175,80,0.16) !important;
+  border-color: rgba(76,175,80,0.5) !important;
+  color: #4caf50 !important;
+}
+
+.curva-tip__btn--fail {
+  background: rgba(255,107,107,0.12) !important;
+  border-color: rgba(255,107,107,0.4) !important;
+  color: #ff6b6b !important;
+}
+
+/* Etherscan link after tip lands */
+.curva-tip__link {
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 6px !important;
+  padding: 10px 14px !important;
+  margin-top: 12px !important;
+  font-size: 13px !important;
+  font-weight: 600 !important;
+  color: #4a9eff !important;
+  background: rgba(74,158,255,0.08) !important;
+  border: 1px solid rgba(74,158,255,0.3) !important;
+  border-radius: 8px !important;
+  text-decoration: none !important;
+  transition: all 180ms ease-out !important;
+  word-break: break-all !important;
+}
+
+.curva-tip__link:hover {
+  background: rgba(74,158,255,0.12) !important;
+  border-color: rgba(74,158,255,0.5) !important;
+  color: #7ab8ff !important;
+}
+
+/* ============================================================================
+   Wave 11: Move tip form to its own panel BELOW the video.
+   ============================================================================ */
+
+/* Tip panel: full-width card that sits between video and any lower panels */
+.curva-app__tip-panel {
+  grid-column: 1 / -1 !important;   /* span the whole row */
+  margin-top: 24px !important;
+  padding: 0 !important;
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+}
+
+/* When the tip panel is inside the room grid, force it to break out */
+.curva-app__room-grid > .curva-app__tip-panel {
+  grid-column: 1 / -1 !important;
+}
+
+/* Clean out the header tip container styling — it's now free-floating */
+.curva-header__tip {
+  padding: 0 !important;
+  margin: 0 !important;
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+}
+
+/* Add "SEND A TIP" section label above the form */
+.curva-app__tip-panel::before {
+  content: 'SEND A TIP';
+  display: block !important;
+  font-size: 11px !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.2em !important;
+  text-transform: uppercase !important;
+  color: var(--curva-accent) !important;
+  margin-bottom: 12px !important;
+  padding-left: 4px !important;
+}
+
+/* Room header now cleaner — no tip inside */
+.curva-app__room-header {
+  padding: 20px 24px !important;
+  border-radius: 14px !important;
+  background: var(--curva-surface) !important;
+  border: 1px solid var(--curva-border) !important;
+  margin-bottom: 20px !important;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.025) !important;
+}
+
+/* Room header actions row: better spacing */
+.curva-header__actions, .curva-header__btn-row {
+  display: flex !important;
+  flex-wrap: wrap !important;
+  gap: 8px !important;
+  margin-top: 12px !important;
+}
+
+.curva-header__btn {
+  padding: 8px 14px !important;
+  font-size: 13px !important;
+  font-weight: 500 !important;
+  border-radius: 8px !important;
+  background: rgba(255,255,255,0.03) !important;
+  border: 1px solid var(--curva-border-strong) !important;
+  color: var(--curva-fg) !important;
+  cursor: pointer !important;
+  transition: all 160ms ease-out !important;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.04) !important;
+}
+
+.curva-header__btn:hover:not(:disabled) {
+  background: rgba(255,255,255,0.06) !important;
+  border-color: rgba(255,255,255,0.16) !important;
+}
+
+.curva-header__btn--primary {
+  background: rgba(200,16,46,0.14) !important;
+  border-color: rgba(200,16,46,0.5) !important;
+  color: #fff !important;
+  font-weight: 600 !important;
+}
+
+.curva-header__btn--primary:hover:not(:disabled) {
+  background: rgba(200,16,46,0.22) !important;
+  border-color: rgba(200,16,46,0.7) !important;
+}
+
+/* Room header attendees / tip total pills */
+.curva-header__tip-total, .curva-header__attendees {
+  display: inline-flex !important;
+  align-items: center !important;
+  padding: 6px 12px !important;
+  border-radius: 999px !important;
+  background: rgba(255,255,255,0.03) !important;
+  border: 1px solid var(--curva-border) !important;
+  font-size: 12px !important;
+  font-family: 'JetBrains Mono', ui-monospace, monospace !important;
+  color: var(--curva-fg-muted) !important;
+  margin-right: 8px !important;
+}

@@ -41,6 +41,21 @@ export function mountIdentityWizard({ container, curva, onComplete } = {}) {
     return { destroy: () => {} }
   }
 
+  // Demo-mode auto-skip. The 4-peer pitch runner sets CURVA_DEMO_MODE=true so
+  // the wizard modal does not block the flow on every window boot. Judges see
+  // the room lobby immediately; identity provenance is demonstrated separately
+  // via the Keet identity chip in RoomHeader. `window.bridge` is exposed by
+  // electron/preload.js and its `bootConfig()` reads process.env from the
+  // Electron main process.
+  try {
+    const bridge = (typeof window !== 'undefined' && window.bridge) || null
+    const bootCfg = bridge?.bootConfig?.() || {}
+    if (bootCfg.CURVA_DEMO_MODE === true) {
+      onComplete({ skipped: true })
+      return { destroy: () => {} }
+    }
+  } catch { /* boot config unreachable — fall through to normal wizard */ }
+
   container.textContent = ''
 
   // Check if identity already exists; if so, skip.

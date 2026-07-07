@@ -323,7 +323,14 @@ export function mountRoomBrowser({ container, curva, onJoin } = {}) {
     }
   }
 
-  curva.loadMatchesToday().catch((err) => maybeMarkFailed(err?.message))
+  // Load the closest upcoming scheduled matches. During the tournament this
+  // includes today + the next few days automatically; on rest days between
+  // rounds (or during demo runs) this still surfaces the next fixtures so the
+  // lobby is never blank. Backend supports the `from` filter as an ISO 8601
+  // string and sorts by kickoff ascending.
+  const nowIso = new Date().toISOString()
+  curva.loadMatches({ status: 'scheduled', from: nowIso, limit: 20 })
+    .catch((err) => maybeMarkFailed(err?.message))
   curva.loadRooms({ activeOnly: true, limit: 50 }).catch((err) => maybeMarkFailed(err?.message))
 
   // Hard cutoff: if nothing arrives in 12s, show empty state.

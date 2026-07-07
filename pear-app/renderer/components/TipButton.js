@@ -651,12 +651,30 @@ export function mountTipButton({
     if (currentState === 'idle') setState('idle')
   }) || (() => {})
 
+  // 2026-07-07: local balance auto-refresh. RoomHeader already polls every
+  // 15s but TipButton mounts independently and can outlive the header (e.g.
+  // embedded in other views). We poll on mount and every 15s so the
+  // "insufficient USDT" pre-check reflects on-chain reality without waiting
+  // for the header's poll. wallet:balance is a fresh RPC read per handler in
+  // workers/main.js — no cache staleness risk.
+  const BALANCE_REFRESH_MS = 15_000
+  const refreshBalance = () => {
+    const fn = typeof curva.getWalletBalance === 'function'
+      ? curva.getWalletBalance
+      : (typeof curva.getBalance === 'function' ? curva.getBalance : null)
+    if (!fn) return
+    fn().catch(() => { /* leave last-known */ })
+  }
+  refreshBalance()
+  const balanceRefreshTimer = setInterval(refreshBalance, BALANCE_REFRESH_MS)
+
   selectPreset(PRESETS[0])
   setState('idle')
 
   function destroy() {
     if (resetTimer) clearTimeout(resetTimer)
     if (batchResetTimer) clearTimeout(batchResetTimer)
+    if (balanceRefreshTimer) clearInterval(balanceRefreshTimer)
     if (attribAbortController) { attribAbortController.abort(); attribAbortController = null }
     offUpdate()
     offHostDiscovered()

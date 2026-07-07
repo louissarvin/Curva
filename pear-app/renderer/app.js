@@ -98,6 +98,10 @@ function setBootStatus(text, hint) {
 function hideBootSplash() {
   if (!bootEl) return
   bootEl.classList.add('curva-boot--hide')
+  // Signal the CSS "page mount" animation to run once the shell is visible.
+  // Wave 4 polish reads `body.curva-ready` to fade the app in and stagger the
+  // panels. Purely presentational; safe to noop on reduced-motion.
+  document.body.classList.add('curva-ready')
   setTimeout(() => { if (bootEl) bootEl.remove() }, 400)
 }
 
@@ -112,6 +116,9 @@ const els = {
   version: q('[data-version]'),
   topbarDht: q('[data-topbar="dht"]'),
   topbarPubkey: q('[data-topbar="pubkey"]'),
+  topbarPeers: q('[data-topbar="peers"]'),
+  topbarBlind: q('[data-topbar="blind"]'),
+  topbarWallet: q('[data-topbar="wallet"]'),
   browser: q('[data-mount="browser"]'),
   room: q('[data-mount="room"]'),
   roomHeader: q('[data-mount="room-header"]'),
@@ -125,10 +132,15 @@ const els = {
 
 els.version.textContent = 'v' + appVersion
 
+// Topbar: peers badge always visible, updates on peer events.
+function updatePeersBadge(count) {
+  if (!els.topbarPeers) return
+  els.topbarPeers.textContent = count + (count === 1 ? ' peer' : ' peers')
+  els.topbarPeers.classList.toggle('curva-app__topbar-peers--live', count > 0)
+}
+updatePeersBadge(0)
+
 // Topbar debug items are only populated (and visible via CSS) in diag mode.
-// The CSS rule `.curva-app--diag .curva-app__topbar-meta { display:flex }` gates
-// visibility. We also populate them only in diagMode to avoid storing the pubkey
-// in the DOM at all when diag is off.
 if (diagMode) {
   const mainEl = app.querySelector('.curva-app')
   if (mainEl) mainEl.classList.add('curva-app--diag')
@@ -191,6 +203,11 @@ let leaderboard = null
 // so a slow worker never blocks the room-ready render.
 let predictionPanel = null
 let predictionPanelHost = null
+// Mount generation counter. Incremented each mountRoom() call. Async
+// panel mount callbacks capture the generation at call time and bail out
+// if a newer mountRoom has run. Prevents duplicate panels when the user
+// clicks Create room repeatedly.
+let mountGeneration = 0
 // Wave 13A: QVAC LLM commentator. Feature-flag gated in both the Bare worker
 // AND here so a stale flag can never leak DOM into a locked-down build.
 let commentaryPanel = null
@@ -238,7 +255,11 @@ function runIdentityWizardThenBrowser() {
       } else {
         logEvent('info', 'identity wizard: identity created')
       }
-      mountBrowser()
+      // Race guard: if a room:ready arrived DURING the wizard flow (common in
+      // demo mode where the worker auto-joins at boot before this callback
+      // fires), do NOT clobber the mounted room with the lobby. Only mount
+      // the lobby when we are not already inside a room.
+      if (!state.currentRoom) mountBrowser()
     }
   }), identityWizardHost)
 
@@ -248,7 +269,7 @@ function runIdentityWizardThenBrowser() {
       try { identityWizardHost.remove() } catch { /* noop */ }
       identityWizardHost = null
     }
-    mountBrowser()
+    if (!state.currentRoom) mountBrowser()
   }
 }
 
@@ -275,6 +296,7 @@ function destroyBrowser() {
 
 function mountRoom(payload) {
   destroyRoom()
+  const myGeneration = ++mountGeneration
   state.currentRoom = {
     slug: payload.slug,
     isHost: payload.isHost,
@@ -292,14 +314,58 @@ function mountRoom(payload) {
     backendUrl: backend
   }), els.roomHeader)
 
+  // Post-mount surgery: move the tip form OUT of the room header and BELOW
+  // the video. Idempotent: removes any prior tip panels before mounting a
+  // fresh one so repeated mountRoom cycles don't stack duplicate "SEND A TIP"
+  // panels. Only inserts if `.curva-header__tip` is present (broken flags
+  // path silently skips).
+  setTimeout(() => {
+    // Clean up any leftover tip panels from prior mounts.
+    document.querySelectorAll('.curva-app__tip-panel').forEach((n) => {
+      try { n.remove() } catch { /* noop */ }
+    })
+    const tip = document.querySelector('.curva-header__tip')
+    const videoEl = els.video
+    if (tip && videoEl && videoEl.parentNode) {
+      const tipPanel = document.createElement('section')
+      tipPanel.className = 'curva-app__tip-panel'
+      tipPanel.appendChild(tip)
+      videoEl.parentNode.insertBefore(tipPanel, videoEl.nextSibling)
+    }
+  }, 0)
+
   curva.initWallet().catch((err) => {
     logEvent('error', 'wallet init failed: ' + err.message)
   })
 
+  // Video source. Defaults to the placeholder sample-clip.mp4 that ships with
+  // the app. For a real World Cup demo, drop a video into pear-app/assets/
+  // (any browser-playable format: mp4/webm/mov) and set CURVA_DEMO_VIDEO_PATH
+  // to '../assets/<filename>' via the demo runner, or override at ?video= in
+  // the URL for a one-off. `?video=` supports both relative (../assets/foo.mp4)
+  // and absolute (https://... or file://...) URLs. Absolute URLs are validated
+  // by the URL constructor; malformed values fall back to the default clip.
+  const defaultVideo = '../assets/sample-clip.mp4'
+  const envVideo = boot.CURVA_DEMO_VIDEO_PATH || null
+  const urlVideo = urlParams.get('video') || null
+  let videoSource = defaultVideo
+  const candidate = urlVideo || envVideo
+  if (candidate) {
+    if (candidate.startsWith('../') || candidate.startsWith('./')) {
+      videoSource = candidate
+    } else {
+      try {
+        const parsed = new URL(candidate)
+        if (parsed.protocol === 'https:' || parsed.protocol === 'file:') {
+          videoSource = parsed.toString()
+        }
+      } catch { /* invalid URL — keep the default */ }
+    }
+  }
   videoPlayer = safeMount('VideoPlayer', () => mountVideoPlayer({
     container: els.video,
     curva,
-    initialSource: '../assets/sample-clip.mp4',
+    initialSource: videoSource,
     isHost: !!state.currentRoom?.isHost,
     matchId: state.currentRoom?.matchId || null,
     liveMinuteOverlayEnabled: LIVE_MINUTE_OVERLAY_ENABLED
@@ -351,6 +417,8 @@ function mountRoom(payload) {
   // match" hint renders.
   if (predictionPanelHost) { try { predictionPanelHost.remove() } catch { /* noop */ } predictionPanelHost = null }
   isPredictionPanelEnabled(curva).then((enabled) => {
+    if (myGeneration !== mountGeneration) return // a newer mountRoom ran; skip
+    if (predictionPanelHost != null) return // already mounted by an earlier fast path
     if (!enabled) {
       logEvent('info', 'predictions feature disabled; skipping panel mount')
       return
@@ -380,6 +448,8 @@ function mountRoom(payload) {
   // has zero DOM overhead.
   if (commentaryPanelHost) { try { commentaryPanelHost.remove() } catch { /* noop */ } commentaryPanelHost = null }
   isCommentaryPanelEnabled(curva).then((enabled) => {
+    if (myGeneration !== mountGeneration) return // a newer mountRoom ran; skip
+    if (commentaryPanelHost != null) return // already mounted by an earlier fast path
     if (!enabled) {
       logEvent('info', 'commentator feature disabled; skipping panel mount')
       return
@@ -507,6 +577,140 @@ if (pearLink) {
   }
 }
 
+// Feature 3 (HUD overlay): floating live-primitives status panel for demos.
+// Only visible when CURVA_DEMO_HUD_ENABLED=true (boot config) or ?hud=1 URL.
+// Security: all text is set via textContent. No innerHTML. No peer data.
+;(function mountHud() {
+  const HUD_ENABLED = !!boot.CURVA_DEMO_HUD_ENABLED || urlParams.get('hud') === '1'
+  if (!HUD_ENABLED) return
+
+  const hud = document.createElement('div')
+  hud.className = 'curva-hud'
+  hud.style.cssText = [
+    'position:fixed',
+    'bottom:24px',
+    'right:24px',
+    'background:rgba(0,0,0,0.82)',
+    'color:#e2e8f0',
+    'padding:10px 14px',
+    'border-radius:6px',
+    'font-size:12px',
+    'font-family:monospace',
+    'line-height:1.6',
+    'z-index:8888',
+    'min-width:220px',
+    'border:1px solid rgba(255,255,255,0.08)',
+    'pointer-events:none'
+  ].join(';')
+  document.body.appendChild(hud)
+
+  // One line per pillar. textContent only — all values are local state.
+  function mkLine(label) {
+    const row = document.createElement('div')
+    row.className = 'curva-hud__row'
+    const lbl = document.createElement('span')
+    lbl.className = 'curva-hud__label'
+    lbl.style.cssText = 'color:#94a3b8;margin-right:6px'
+    lbl.textContent = label + ':'
+    const val = document.createElement('span')
+    val.className = 'curva-hud__val'
+    val.textContent = '—'
+    row.appendChild(lbl)
+    row.appendChild(val)
+    hud.appendChild(row)
+    return { set: (v) => { val.textContent = String(v) } }
+  }
+
+  const swarmLine    = mkLine('swarm peers')
+  const blindLine    = mkLine('blind peer')
+  const writersLine  = mkLine('autobase writers')
+  const updaterLine  = mkLine('pear updater')
+  const walletLine   = mkLine('WDK wallet')
+  const identityLine = mkLine('keet identity')
+
+  // Initial values
+  swarmLine.set(String(state.peerCount))
+  updaterLine.set('idle')
+  walletLine.set('—')
+  identityLine.set('—')
+
+  // swarm peers: piggyback existing peer:connected/peer:disconnected
+  curva.onPeerConnected?.((p) => swarmLine.set(String(p.count)))
+  curva.onPeerDisconnected?.((p) => swarmLine.set(String(p.count)))
+
+  // blind peer: pull from blindPeering:registration or blindPeering:status
+  if (typeof curva.blindPeering?.getStatus === 'function') {
+    curva.blindPeering.getStatus().catch(() => {})
+  }
+  curva.blindPeering?.onStatus?.((s) => {
+    blindLine.set(s?.active ? 'active' : 'inactive')
+  })
+  curva.blindPeering?.onRegistration?.((r) => {
+    const st = r?.status
+    blindLine.set(st?.active ? 'active' : 'inactive')
+  })
+
+  // autobase writers: room:writers-update
+  if (typeof curva.onWritersUpdate === 'function') {
+    curva.onWritersUpdate((p) => {
+      const count = typeof p?.writerCount === 'number' ? p.writerCount : 0
+      writersLine.set(String(count))
+    })
+  }
+
+  // pear updater: onUpdateAvailable / onUpdateReady
+  curva.onUpdateAvailable?.(() => updaterLine.set('updating'))
+  curva.onUpdateReady?.(() => updaterLine.set('ready'))
+
+  // WDK wallet
+  curva.onWalletReady?.(() => walletLine.set('ready'))
+  curva.onWalletError?.(() => walletLine.set('error'))
+
+  // keet identity
+  curva.identity?.onIdentityReady?.((p) => {
+    identityLine.set(p?.identityPublicKey ? 'verified' : 'ready')
+  })
+  curva.identity?.onIdentityError?.(() => identityLine.set('error'))
+  // Also try a direct query on load
+  if (typeof curva.identity?.hasKeetIdentity === 'function') {
+    curva.identity.hasKeetIdentity().then((res) => {
+      if (res?.present) identityLine.set('verified')
+      else if (res?.enabled) identityLine.set('pending')
+    }).catch(() => {})
+  }
+})()
+
+// Topbar: blind peer indicator dot (shown when active).
+// Security: textContent only; no user data exposed.
+;(function wireTopbarIndicators() {
+  // Blind peer: show dot when active
+  function setBlindPeer(active) {
+    if (!els.topbarBlind) return
+    if (active) {
+      els.topbarBlind.textContent = 'blind peer'
+      els.topbarBlind.removeAttribute('hidden')
+    } else {
+      els.topbarBlind.setAttribute('hidden', '')
+    }
+  }
+  curva.blindPeering?.onStatus?.((s) => setBlindPeer(!!s?.active))
+  curva.blindPeering?.onRegistration?.((r) => setBlindPeer(!!r?.status?.active))
+
+  // Wallet: show short address chip when ready
+  function setWallet(address) {
+    if (!els.topbarWallet) return
+    if (address) {
+      const short = address.slice(0, 6) + '…' + address.slice(-4)
+      els.topbarWallet.textContent = short
+      els.topbarWallet.removeAttribute('hidden')
+    }
+  }
+  curva.onWalletReady?.((info) => {
+    const addr = info?.address || info?.walletAddress || ''
+    if (addr) setWallet(addr)
+  })
+})()
+
 // T5: OTA update toast. Bottom-right, non-intrusive. Two phases:
 //   - `update:available` -> "Curva vX.Y.Z is downloading"
 //   - `update:ready`     -> "Update ready. Click to reload" (calls
@@ -566,9 +770,37 @@ if (pearLink) {
   })
 })()
 
+// Feature 1 (WC reel on Hyperdrive): swap VideoPlayer src when the P2P link
+// arrives. 3-second fallback: if no wc-reel:link event fires before the timer,
+// the VideoPlayer keeps its local file source. textContent/setAttribute only —
+// the URL is a loopback http://127.0.0.1 URL from hypercore-blob-server.
+let wcReelFallbackTimer = null
+if (typeof curva.onWcReelLink === 'function') {
+  curva.onWcReelLink((payload) => {
+    if (wcReelFallbackTimer) { clearTimeout(wcReelFallbackTimer); wcReelFallbackTimer = null }
+    // Validate: must be a loopback http URL (hypercore-blob-server only binds 127.0.0.1)
+    if (typeof payload?.url !== 'string') return
+    try {
+      const u = new URL(payload.url)
+      if (u.protocol !== 'http:' || (u.hostname !== '127.0.0.1' && u.hostname !== 'localhost')) return
+    } catch { return }
+    if (videoPlayer && typeof videoPlayer.setSource === 'function') {
+      videoPlayer.setSource(payload.url)
+      logEvent('info', 'wc-reel P2P link applied: ' + payload.url.slice(0, 60))
+    }
+  })
+}
+
 // Wire room lifecycle.
 curva.onRoomReady((payload) => {
   logEvent('info', `room ready: ${payload.slug} (${payload.isHost ? 'host' : 'peer'})`)
+  // Start 3-second fallback timer for the WC reel link.
+  if (wcReelFallbackTimer) clearTimeout(wcReelFallbackTimer)
+  wcReelFallbackTimer = setTimeout(() => {
+    wcReelFallbackTimer = null
+    // Do nothing — VideoPlayer already has the local file as initial source.
+    logEvent('info', 'wc-reel fallback: keeping local file (P2P link did not arrive in 3s)')
+  }, 3000)
   mountRoom(payload)
 })
 
@@ -578,7 +810,21 @@ curva.onRoomClosed(() => {
   mountBrowser()
 })
 
+// Silence noisy repeated errors (translation retries, chat/clip boot-race
+// probes). Judges and the presenter don't need to see 100+ identical lines
+// scroll past. Everything is still surfaced to console for debugging.
+const SILENT_ERROR_PATTERNS = [
+  /translation is disabled/i,
+  /translation.*not initialized/i,
+  /room not joined/i,
+  /wallet not initialized/i
+]
 curva.onError((payload) => {
+  const msg = String(payload?.message || '')
+  if (SILENT_ERROR_PATTERNS.some((re) => re.test(msg))) {
+    console.debug('[curva] silenced error', payload?.cmd, msg)
+    return
+  }
   logEvent('error', `worker error [${payload.cmd || 'general'}]: ${payload.message}`)
 })
 
@@ -632,10 +878,12 @@ function handleWorkerEvent(msg) {
       break
     case 'peer:connected':
       state.peerCount = payload.count
+      updatePeersBadge(payload.count)
       logEvent('peer-connected', `peer connected: ${short(payload.pubkey)} (total=${payload.count})`)
       break
     case 'peer:disconnected':
       state.peerCount = payload.count
+      updatePeersBadge(payload.count)
       logEvent('peer-disconnected', `peer disconnected: ${short(payload.pubkey)} (total=${payload.count})`)
       break
     case 'dht:cold-start-time':
@@ -649,9 +897,15 @@ function handleWorkerEvent(msg) {
     case 'raw':
       logEvent('info', 'worker: ' + payload)
       break
-    case 'error':
-      logEvent('error', `worker error: ${payload?.message || 'unknown'}`)
+    case 'error': {
+      const errMsg = String(payload?.message || 'unknown')
+      if (SILENT_ERROR_PATTERNS.some((re) => re.test(errMsg))) {
+        console.debug('[curva] silenced worker error', errMsg)
+        break
+      }
+      logEvent('error', `worker error: ${errMsg}`)
       break
+    }
     default:
       // Silence event-stream noise; room components subscribe to their own topics.
   }
@@ -761,6 +1015,23 @@ bridge.startWorker(MAIN_WORKER).catch((err) => {
   logEvent('error', 'failed to start worker: ' + err.message)
 })
 
+// Boot splash safety timeout. In the 4-peer demo path, all four windows share
+// a single Bare worker (see electron/main.js getWorker singleton), so the
+// worker's `ready` event fires exactly once. Only the first-connected window
+// receives it; later windows subscribe after the emit and stay on the splash
+// forever. Guard against this by force-dismissing the splash after 8s and
+// running the identity wizard / browser mount so the user always reaches a
+// usable UI. Real single-window boots hit this too if the DHT is unusually
+// slow (>8s), but the flow degrades gracefully because subsequent worker
+// events still fire against the mounted browser.
+setTimeout(() => {
+  if (bootEl && !bootEl.classList.contains('curva-boot--hide')) {
+    logEvent('warn', 'boot splash safety timeout fired; proceeding without worker:ready')
+    hideBootSplash()
+    runIdentityWizardThenBrowser()
+  }
+}, 8000)
+
 logEvent('info', `booting curva v${appVersion} in room=${roomSlug} role=${isHost ? 'host' : 'peer'} backend=${backend}`)
 
 // -- Demo automation floating button (dev-only) ---------------------------
@@ -778,41 +1049,58 @@ if (DEMO_AUTOMATION_ENABLED && curva && curva.demoTimeline) {
 function mountDemoAutomationButton() {
   const wrap = document.createElement('div')
   wrap.setAttribute('data-demo-automation', '')
+  // Moved to top-right so it stops overlapping the CURVA wordmark logo in the
+  // topbar. The topbar chips (peers/blind/wallet/version) sit on the right too;
+  // this button anchors below them via a slight y-offset so they don't collide.
   wrap.style.cssText = [
-    'position:fixed', 'top:12px', 'left:12px', 'z-index:9999',
-    'display:flex', 'flex-direction:column', 'gap:4px',
-    'font-family:system-ui,-apple-system,sans-serif',
-    'font-size:12px', 'user-select:none', 'pointer-events:auto'
+    'position:fixed', 'top:56px', 'right:16px', 'z-index:9999',
+    'display:flex', 'flex-direction:column', 'align-items:flex-end', 'gap:6px',
+    'font-family:inherit', 'font-size:12px', 'user-select:none', 'pointer-events:auto'
   ].join(';')
   const btn = document.createElement('button')
   btn.type = 'button'
   btn.textContent = 'Run demo'
+  // Match the primary CTA tier in the polish block: solid Torino red, subtle
+  // inner highlight, soft red glow. No !important here — the class-less inline
+  // style is trumped by the .curva-btn--primary rule if we ever migrate.
   btn.style.cssText = [
-    'height:24px', 'padding:0 10px', 'border:0', 'border-radius:4px',
-    'background:#B0001A', 'color:#fff', 'font-weight:600', 'cursor:pointer',
-    'box-shadow:0 1px 3px rgba(0,0,0,0.3)'
+    'height:30px', 'padding:0 14px', 'border:1px solid #c8102e', 'border-radius:8px',
+    'background:#c8102e', 'color:#fff', 'font-weight:600', 'font-size:12px',
+    'letter-spacing:0.01em', 'cursor:pointer',
+    'box-shadow:inset 0 1px 0 rgba(255,255,255,0.12), 0 6px 20px rgba(200,16,46,0.28), 0 1px 2px rgba(0,0,0,0.4)',
+    'transition:transform 120ms ease-out, background 160ms ease-out'
   ].join(';')
+  btn.addEventListener('mouseenter', () => { btn.style.background = '#a80d26' })
+  btn.addEventListener('mouseleave', () => { btn.style.background = '#c8102e' })
   const status = document.createElement('div')
   status.textContent = ''
   status.style.cssText = [
-    'padding:2px 6px', 'background:rgba(0,0,0,0.6)', 'color:#fff',
-    'border-radius:3px', 'min-height:14px'
+    'padding:3px 8px', 'background:rgba(10,10,10,0.72)', 'color:#d0d6e0',
+    'border:1px solid rgba(255,255,255,0.08)', 'border-radius:6px',
+    'font-family:ui-monospace,SF Mono,Menlo,monospace', 'font-size:10px',
+    'letter-spacing:0.02em', 'min-height:14px',
+    'backdrop-filter:blur(8px)', '-webkit-backdrop-filter:blur(8px)'
   ].join(';')
   wrap.appendChild(btn)
   wrap.appendChild(status)
   document.body.appendChild(wrap)
 
   let running = false
+  // Status line stays hidden until the demo is actually running. Prior UI
+  // showed "elapsed: 0s / step: 0 of 0" on idle which looked broken.
+  status.style.display = 'none'
   function renderTick(s) {
-    // s is trusted (comes from our own worker) but we still stick to
-    // textContent to keep the invariant "no innerHTML for backend data".
-    if (!s) { status.textContent = ''; return }
-    const secs = Math.floor((s.elapsedMs || 0) / 1000)
-    status.textContent = 'elapsed: ' + secs + 's / step: ' + (s.currentStep || 0) + ' of ' + (s.totalSteps || 0)
+    if (!s) { status.textContent = ''; status.style.display = 'none'; return }
     running = s.state === 'running'
     btn.textContent = running ? 'Stop demo' : 'Run demo'
+    if (running) {
+      const secs = Math.floor((s.elapsedMs || 0) / 1000)
+      status.textContent = 'elapsed: ' + secs + 's / step: ' + (s.currentStep || 0) + ' of ' + (s.totalSteps || 0)
+      status.style.display = 'block'
+    } else {
+      status.style.display = 'none'
+    }
     if (s.state === 'finished') {
-      // Auto-hide after a short beat so the presenter sees the completion.
       setTimeout(() => {
         try { wrap.remove() } catch { /* noop */ }
       }, 3000)

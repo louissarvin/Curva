@@ -39,7 +39,6 @@
              the splash renders even before the Bare worker starts. -->
         <img class="curva-boot__logo" src="./logo-index.svg" alt="Curva" />
       </div>
-      <div class="curva-boot__title">CURVA</div>
       <div class="curva-boot__tag">watch the world cup with friends</div>
       <div class="curva-boot__status" data-boot-status>Booting Curva runtime…</div>
       <div class="curva-boot__hint" data-boot-hint>this may take 5-45s on first launch (DHT bootstrap)</div>
@@ -53,16 +52,16 @@
       <main class="curva-app">
         <header class="curva-app__topbar">
           <div class="curva-app__brand">
-            <img class="curva-app__brand-logo" src="./logo-index.svg" alt="Curva" />
-            <div class="curva-app__brand-text">
-              <span class="curva-app__brand-mark">CURVA</span>
-              <span class="curva-app__brand-tag">watch the world cup with friends</span>
-            </div>
+            <img class="curva-app__brand-logo" src="./logo.svg" alt="Curva" />
           </div>
-          <div class="curva-app__topbar-meta">
+          <div class="curva-app__topbar-right">
+            <span class="curva-app__topbar-peers" data-topbar="peers">0 peers</span>
+            <span class="curva-app__topbar-blind" data-topbar="blind" hidden></span>
+            <span class="curva-app__topbar-wallet" data-topbar="wallet" hidden></span>
+            <span class="curva-app__topbar-version" data-version></span>
+            <!-- Diag items: hidden unless ?diag=1 -->
             <span class="curva-app__topbar-item" data-topbar="dht"></span>
             <span class="curva-app__topbar-item" data-topbar="pubkey"></span>
-            <span class="curva-app__topbar-item" data-version></span>
           </div>
         </header>
 
