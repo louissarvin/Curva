@@ -378,6 +378,31 @@ async function createClips(store, opts) {
   }
 
   /**
+   * Feature 1 (WC reel): publish a local file buffer to the shared drive at
+   * /wc-reel/<filename>. Only called by the host peer at room open so all
+   * joining peers can replicate and stream via their own blobServer.
+   *
+   * @param {Buffer} buf       raw bytes of the reel file
+   * @param {string} filename  safe filename, e.g. 'reel.mp4' (no path traversal)
+   * @returns {Promise<string>} the drive path, e.g. '/wc-reel/reel.mp4'
+   */
+  async function publishReel(buf, filename) {
+    if (!Buffer.isBuffer(buf) && !(buf instanceof Uint8Array)) {
+      throw new TypeError('publishReel: buf must be a Buffer')
+    }
+    if (typeof filename !== 'string' || filename.length === 0 || filename.length > 64) {
+      throw new RangeError('publishReel: filename must be 1-64 chars')
+    }
+    // Prevent path traversal: only allow [A-Za-z0-9._-]
+    if (!/^[A-Za-z0-9._-]+$/.test(filename)) {
+      throw new RangeError('publishReel: filename contains disallowed characters')
+    }
+    const drivePath = '/wc-reel/' + filename
+    await myDrive.put(drivePath, buf)
+    return drivePath
+  }
+
+  /**
    * Build an HTTP link the renderer can drop into <video src>. Range-friendly.
    * Verified against getLink() in holepunchto/hypercore-blob-server (main).
    * Returns an unavailable error object when the blob server failed to start
@@ -414,6 +439,37 @@ async function createClips(store, opts) {
     }
   }
 
+  /**
+   * Feature 1 (WC reel): build an HTTP link for a /wc-reel/ path on any drive.
+   * Same as getClipLink but accepts /wc-reel/ prefix so the path guard doesn't
+   * reject it. Only called after publishReel or trackPeerDrive for a reel host.
+   *
+   * @param {string} driveKeyHex - 64-char lowercase hex key of the publishing drive
+   * @param {string} reelPath    - drive path, must start with /wc-reel/
+   */
+  function getReelLink(driveKeyHex, reelPath) {
+    if (!isHexOfLen(driveKeyHex, 64)) throw new RangeError('driveKey must be 64-char hex')
+    if (typeof reelPath !== 'string' || !reelPath.startsWith('/wc-reel/')) {
+      throw new RangeError('reelPath must start with /wc-reel/')
+    }
+    if (!blobServer || !blobServerReady) {
+      const err = new Error('blob server unavailable')
+      err.code = 'BLOB_SERVER_UNAVAILABLE'
+      throw err
+    }
+    const url = blobServer.getLink(Buffer.from(driveKeyHex, 'hex'), {
+      filename: reelPath,
+      mimetype: 'video/mp4'
+    })
+    return {
+      url,
+      token: blobServerToken,
+      expiresMs: null,
+      port: blobServer.port,
+      host: blobServer.host
+    }
+  }
+
   async function close() {
     const errs = []
     // Close blob server FIRST so it stops accepting new sockets, then drives.
@@ -444,6 +500,8 @@ async function createClips(store, opts) {
     getClip,
     getClipThumb,
     getClipLink,
+    getReelLink,
+    publishReel,
     publishMyDrive,
     trackPeerDrive,
     myDriveKey: myDriveKeyHex,

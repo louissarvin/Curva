@@ -95,7 +95,15 @@ async function openRoom(store, opts) {
     // paths (announcer.speak, commentator.onGoalCluster, `emit('badge:*')`).
     // All fields are optional; the timeline degrades to no-op branches when
     // any dep is missing. See bare/demoTimeline.js head memo.
-    demoHooks
+    demoHooks,
+    // Autobase bootstrap keys. Peers pass these (hex-encoded host
+    // `base.key`s) so their chat + playhead Autobases converge onto the
+    // host's shared roots instead of creating orphan autobases. Hosts leave
+    // these null so a fresh autobase is created and its `.key` is later
+    // broadcast to peers via the writer-invitation handshake. Verified against
+    // the Autobase README (§ API "loading an existing Autobase").
+    chatBootstrap = null,
+    playheadBootstrap = null
   } = opts
   if (typeof slug !== 'string' || slug.length === 0) {
     throw new RangeError('slug must be a non-empty string')
@@ -107,8 +115,8 @@ async function openRoom(store, opts) {
 
   const roomStore = store.namespace('curva/room/' + slug)
 
-  const playhead = await createPlayhead(roomStore, { isHost, myPubkey })
-  const chat = await createChat(roomStore, { myPubkey })
+  const playhead = await createPlayhead(roomStore, { isHost, myPubkey, bootstrap: playheadBootstrap })
+  const chat = await createChat(roomStore, { myPubkey, bootstrap: chatBootstrap })
 
   // T2 (Final Fix Wave): if this peer is host, publish its own writer key as
   // the trusted addWriter authority to BOTH bases so the reducers can gate
@@ -547,11 +555,20 @@ async function openRoom(store, opts) {
     const chatWriterHex = chatInv.pubkey.toLowerCase()
     const phWriterHex = phInv.pubkey.toLowerCase()
 
-    // Idempotent: if we've already added this pair, ack success so peer
-    // doesn't panic-fall-back to Pattern A on reconnect. Reader-tier peers are
-    // never in `writerRoster`, so this short-circuit is writer-tier only.
+    // Idempotent: if we've already added this pair AND the payload does not
+    // present new actual writer core keys to promote, ack success. When the
+    // peer sends fresh writer keys (e.g. after a bootstrap reopen), we skip
+    // the shortcut so the new keys get promoted via addWriter. Reader-tier
+    // peers are never in `writerRoster`, so this short-circuit is writer-tier
+    // only.
     if (writerRoster.has(chatWriterHex) && writerRoster.has(phWriterHex)) {
-      return { ok: true, reason: 'already-writer', tier: 'writer', addedAt: Date.now(), bases: ['chat', 'playhead'] }
+      const hasFreshWriterKey =
+        typeof payload.chatWriterKey === 'string' &&
+        /^[0-9a-fA-F]{64}$/.test(payload.chatWriterKey) &&
+        !writerRoster.has(payload.chatWriterKey.toLowerCase())
+      if (!hasFreshWriterKey) {
+        return { ok: true, reason: 'already-writer', tier: 'writer', addedAt: Date.now(), bases: ['chat', 'playhead'] }
+      }
     }
 
     const addedAt = Date.now()
@@ -602,24 +619,41 @@ async function openRoom(store, opts) {
       return { ok: true, tier: 'reader', addedAt, bases: ['chat', 'playhead'] }
     }
 
-    // Writer-tier path (unchanged). Autobase Pattern B addWriter is done by
-    // appending a control block that the reducer applies via `host.addWriter(...)`
-    // — see the autobase README
-    // (`if (value.addWriter) await host.addWriter(value.addWriter, { indexer: true })`).
-    // A direct `base.addWriter(...)` method does NOT exist on the Autobase
-    // instance (that method lives on the `host` object passed to apply()).
+    // Writer-tier path. Autobase Pattern B addWriter is done by appending a
+    // control block that the reducer applies via `host.addWriter(...)`. See
+    // the autobase README example ("remote.append({ addWriter: local.local.key })")
+    // — the key that MUST be added is the peer's actual Autobase local writer
+    // core key, NOT the invitation seed pubkey. Payload therefore carries
+    // `chatWriterKey`/`playheadWriterKey` alongside the signed invitation.
+    // The invitation sig proves ownership of the persisted seed (anti-forgery
+    // gate); the writer key is what Autobase needs for real replication.
     try {
       const chatBase = chat.getBase?.()
       const phBase = playhead.getBase?.()
       if (!chatBase || !phBase) return { ok: false, reason: 'base-not-ready' }
-      await chatBase.append({ addWriter: chatWriterHex, indexer: true })
-      await phBase.append({ addWriter: phWriterHex, indexer: true })
+      const chatWriterKeyHex = typeof payload.chatWriterKey === 'string' && /^[0-9a-fA-F]{64}$/.test(payload.chatWriterKey)
+        ? payload.chatWriterKey.toLowerCase()
+        : chatWriterHex // fall back to invitation pubkey for legacy peers
+      const phWriterKeyHex = typeof payload.playheadWriterKey === 'string' && /^[0-9a-fA-F]{64}$/.test(payload.playheadWriterKey)
+        ? payload.playheadWriterKey.toLowerCase()
+        : phWriterHex
+      await chatBase.append({ addWriter: chatWriterKeyHex, indexer: true })
+      await phBase.append({ addWriter: phWriterKeyHex, indexer: true })
     } catch (err) {
       return { ok: false, reason: 'addWriter-failed:' + (err?.message || 'unknown') }
     }
 
     writerRoster.add(chatWriterHex)
     writerRoster.add(phWriterHex)
+    // Also track the ACTUAL writer core keys we promoted so a follow-up
+    // request-writer with the same payload short-circuits at the "already
+    // added" check above.
+    if (typeof payload.chatWriterKey === 'string') {
+      writerRoster.add(payload.chatWriterKey.toLowerCase())
+    }
+    if (typeof payload.playheadWriterKey === 'string') {
+      writerRoster.add(payload.playheadWriterKey.toLowerCase())
+    }
     try {
       await roomState.put('room/writers/' + chatWriterHex, {
         base: 'chat', addedAt, invitedBy: myPubkey
@@ -750,9 +784,26 @@ async function openRoom(store, opts) {
     }
 
     const { chat: chatKp, playhead: phKp } = await getInvitationKeyPairs()
+    // Attach the peer's ACTUAL Autobase writer core keys (hex) alongside the
+    // invitation signatures. The invitation pubkey proves ownership of the
+    // persisted seed (T3 anti-forgery). The writer keys are what the host
+    // must promote via `chatBase.append({addWriter: writerKeyHex, indexer: true})`
+    // so Autobase's linearizer accepts our optimistic appends. Without this,
+    // the host promotes the invitation seed pubkey (which is not a real
+    // writer core) and our optimistic blocks never reach other peers.
+    const chatBase = chat.getBase?.()
+    const phBase = playhead.getBase?.()
+    const chatWriterKey = chatBase?.local?.key
+      ? b4a.toString(chatBase.local.key, 'hex')
+      : null
+    const phWriterKey = phBase?.local?.key
+      ? b4a.toString(phBase.local.key, 'hex')
+      : null
     return {
       chat: signInvitation(chatKp, undefined, signOpts),
       playhead: signInvitation(phKp, undefined, signOpts),
+      chatWriterKey,
+      playheadWriterKey: phWriterKey,
       ...(rawTier !== undefined ? { tier: rawTier } : {})
     }
   }
@@ -768,6 +819,11 @@ async function openRoom(store, opts) {
   // If host, publish tip address into room state.
   if (isHost && wallet) {
     const info = wallet.getInfo?.()
+    console.log('[Curva][Room] host tip publish check', {
+      hasInfo: !!info,
+      smart: info?.smartAddress,
+      owner: info?.ownerAddress
+    })
     if (info?.smartAddress && info?.ownerAddress) {
       await roomState.put('room/host-tip-address', {
         chainId: info.chainId,
@@ -776,7 +832,10 @@ async function openRoom(store, opts) {
         smartAddressDeployed: false,
         publishedAt: Date.now()
       })
+      console.log('[Curva][Room] host-tip-address published', { smart: info.smartAddress })
     }
+  } else if (isHost) {
+    console.log('[Curva][Room] host tip publish SKIPPED: wallet null')
   }
 
   // Tactical drawing channel (protomux, ephemeral).
@@ -1028,7 +1087,11 @@ async function openRoom(store, opts) {
         ? hooks.log
         : (level, msg, extra) => console.log('[Curva][DemoTimeline]', level, msg, extra || ''),
       emit: typeof hooks.emit === 'function' ? hooks.emit : () => {},
-      now: typeof hooks.now === 'function' ? hooks.now : () => Date.now()
+      now: typeof hooks.now === 'function' ? hooks.now : () => Date.now(),
+      // Pass through the backend URL so the CURVA_DEMO_MODE self-tip step in
+      // demoTimeline.js can POST to /wdk/relay/demo-self-tip. When backendUrl
+      // is null the timeline falls back to CURVA_BACKEND_URL then localhost.
+      backendUrl: backendUrl || null
     })
     return demoTimeline
   }

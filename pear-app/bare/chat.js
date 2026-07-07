@@ -43,8 +43,18 @@ const TEAM_NAME_MAX_LEN = 64
  * @param {Corestore} store
  * @param {{ myPubkey?: string }} [opts]
  */
-async function createChat(store, { myPubkey = 'local', hostPubkeyHex = null } = {}) {
+async function createChat(store, { myPubkey = 'local', hostPubkeyHex = null, bootstrap = null } = {}) {
   const namespaced = store.namespace('curva/chat')
+  // Bootstrap: when non-null (peer path), passes the host's autobase primary
+  // key so this peer's Autobase converges onto the host's shared root. When
+  // null (host path or standalone), creates a fresh autobase whose key must
+  // later be broadcast to peers. Verified against the Autobase README:
+  //   "If loading an existing Autobase then set `bootstrap` to `base.key`,
+  //    otherwise pass `bootstrap` as null or omit."
+  // (https://github.com/holepunchto/autobase README, § API).
+  const bootstrapBuf = typeof bootstrap === 'string' && /^[0-9a-fA-F]{64}$/.test(bootstrap)
+    ? Buffer.from(bootstrap, 'hex')
+    : (bootstrap && bootstrap.length === 32 ? bootstrap : null)
 
   // Fix Wave A T2: rate-limit state is INGRESS-ONLY. It MUST NOT be mutated
   // from inside apply() because Autobase requires apply to be deterministic
@@ -138,7 +148,7 @@ async function createChat(store, { myPubkey = 'local', hostPubkeyHex = null } = 
     return true
   }
 
-  const base = new Autobase(namespaced, null, {
+  const base = new Autobase(namespaced, bootstrapBuf, {
     optimistic: true,
     valueEncoding: 'json',
     ackInterval: 1000,

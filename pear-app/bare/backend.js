@@ -113,8 +113,11 @@ function createBackendClient(baseUrl, { lang = 'en', timeoutMs = DEFAULT_TIMEOUT
 
     ping() { return request('/health') },
 
-    listMatches({ status, stage, limit = 20, offset = 0 } = {}) {
-      return request('/matches' + encodeQuery({ status, stage, limit, offset }))
+    listMatches({ status, stage, from, to, limit = 20, offset = 0 } = {}) {
+      // `from` / `to` are ISO 8601 strings. Backend validates and filters by
+      // kickoffUtc range. Used by the RoomBrowser to surface only upcoming
+      // matches so the lobby stays useful on rest-days between rounds.
+      return request('/matches' + encodeQuery({ status, stage, from, to, limit, offset }))
     },
     getMatchesToday() { return request('/matches/today') },
     getMatchLive(matchId) {
@@ -130,12 +133,19 @@ function createBackendClient(baseUrl, { lang = 'en', timeoutMs = DEFAULT_TIMEOUT
       return request('/rooms/' + encodeURIComponent(slug))
     },
     publishRoom({ slug, matchId, hostHandle, hostSmartAddress, hostOwnerAddress, expiresAt } = {}) {
-      if (!slug || !matchId || !hostHandle) {
-        return Promise.resolve({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'slug, matchId, hostHandle required' } })
+      // 2026-07-07: matchId is now optional. Slug-only joins (e.g. `--room
+      // wc26-final`) do not know the underlying match cuid; the backend
+      // auto-resolves final > first scheduled when matchId is absent. Do NOT
+      // wire an empty string through — the backend treats '' as missing but
+      // the client-side isValidCuid would still reject non-null falsy values.
+      if (!slug || !hostHandle) {
+        return Promise.resolve({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'slug, hostHandle required' } })
       }
+      const body = { slug, hostHandle, hostSmartAddress, hostOwnerAddress, expiresAt }
+      if (matchId) body.matchId = matchId
       return request('/rooms', {
         method: 'POST',
-        body: JSON.stringify({ slug, matchId, hostHandle, hostSmartAddress, hostOwnerAddress, expiresAt })
+        body: JSON.stringify(body)
       })
     },
     deleteRoom({ slug, signature } = {}) {

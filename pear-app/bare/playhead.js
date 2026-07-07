@@ -37,8 +37,15 @@ const ANCHOR_DRIFT_THRESHOLD_MS = 500
  *   close: () => Promise<void>
  * }>}
  */
-async function createPlayhead(store, { isHost, myPubkey = 'local', hostPubkeyHex = null } = {}) {
+async function createPlayhead(store, { isHost, myPubkey = 'local', hostPubkeyHex = null, bootstrap = null } = {}) {
   const namespaced = store.namespace('curva/playhead')
+  // Bootstrap: same semantics as chat.js — peer passes the host's autobase
+  // primary key so both peers see the same root. Docs verified against
+  // https://github.com/holepunchto/autobase (API §, "loading an existing
+  // Autobase"). When null we create a fresh root (host path).
+  const bootstrapBuf = typeof bootstrap === 'string' && /^[0-9a-fA-F]{64}$/.test(bootstrap)
+    ? Buffer.from(bootstrap, 'hex')
+    : (bootstrap && bootstrap.length === 32 ? bootstrap : null)
 
   // T2 (Final Fix Wave): host-gate addWriter control blocks. Mirrors the
   // chat.js:136-152 pattern so a promoted peer cannot forge Pattern B
@@ -74,10 +81,12 @@ async function createPlayhead(store, { isHost, myPubkey = 'local', hostPubkeyHex
     return true
   }
 
-  // Autobase v7.28 optimistic mode. Bootstrap is null; every peer's own
-  // corestore is bootstrap-less locally, and the host's ackWriter promotes
-  // remote optimistic appends.
-  const base = new Autobase(namespaced, null, {
+  // Autobase v7.28 optimistic mode. Bootstrap is `bootstrapBuf` when the
+  // caller supplied the host's autobase primary key (peer path); otherwise
+  // null so a host constructs a fresh autobase whose key it then broadcasts
+  // to peers via the writer-invitation handshake (see workers/main.js
+  // `room:hello` frame).
+  const base = new Autobase(namespaced, bootstrapBuf, {
     optimistic: true,
     valueEncoding: 'json',
     ackInterval: 1000,

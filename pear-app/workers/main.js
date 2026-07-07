@@ -15,12 +15,23 @@
 // The 'ready'/'peer:*'/'dht:cold-start-time' events are emitted as framed JSON
 // on the IPC pipe. The renderer's app.js consumes them.
 
-// Bare-runtime compatibility: Bare has no `process` global. Downstream modules
-// (bare/clips.js:68, tip.js, translate.js, wallet/worklet.js, and ~24 sites
-// total) all read `process.env.<X>` for feature flags. Polyfill a minimal
-// `process` object at the top so every downstream require can transparently
-// use `process.env`. bare-env is a Proxy over bare-os.getEnv, which reads the
-// OS-level environment inherited from the Electron parent process.
+// Bare-runtime compatibility: install ALL Node-compatible globals in one call.
+// `bare-node-runtime/global` sets up fetch, Request, Response, Headers,
+// AbortController, TextEncoder, TextDecoder, ReadableStream, WritableStream,
+// EventTarget, WebSocket, crypto, performance, and (importantly) it also
+// installs a `process` global whose `versions.node` is spoofed to '20.0.0'
+// so downstream libraries that gate on Node version checks (ethers, WDK,
+// @noble/*) treat this runtime as Node 20-compatible.
+//
+// This must be the first executable statement in the worker. Downstream
+// modules require these globals to already be present.
+require('bare-node-runtime/global')
+
+// Curva historically polyfilled `process.env` via `bare-env`. bare-process
+// (loaded transitively by bare-node-runtime/global) already exposes
+// `process.env` backed by the same underlying bare-os getEnv, so this is now
+// a no-op, but keep the guard so existing downstream modules that were
+// written against the older polyfill continue to work.
 if (typeof globalThis.process === 'undefined') {
   globalThis.process = { env: require('bare-env') }
 }
@@ -63,6 +74,14 @@ const { suspendSwarm, resumeSwarm } = require('../bare/swarmLifecycle.js')
 // pear.assets branding pack: expose Pear.app.assets.branding.path to renderer.
 // See bare/assets.js and branding-drive/PUBLISH.md.
 const { getBrandingPath, getBrandingBytes } = require('../bare/assets.js')
+// Feature 1 (WC reel): read the local clip into Hyperdrive at room open.
+// Feature 2 (identity chip): decode identity_proof -> identityPublicKey.
+let IdentityKey = null
+try { IdentityKey = require('keet-identity-key') } catch { /* optional */ }
+let bareFs = null
+try { bareFs = require('bare-fs') } catch { try { bareFs = require('fs') } catch { /* noop */ } }
+let barePath = null
+try { barePath = require('bare-path') } catch { try { barePath = require('path') } catch { /* noop */ } }
 
 const pipe = new FramedStream(Bare.IPC)
 
@@ -392,6 +411,10 @@ async function getPeerIdentity() {
 let roomDiscovery = null
 let room = null                 // { slug, isHost, myPubkey, playhead, chat, close }
 let roomUnsubs = []             // cleanup fns for playhead/chat listeners
+// Guard against re-entrant room reopens triggered by `room:hello` frames
+// arriving on multiple concurrent connections. Non-null while a reopen is in
+// flight; the awaiter clears it in a finally.
+let roomBootstrapReopenInFlight = null
 let identityCache = null        // { pubkey, handle }
 let wallet = null               // wallet adapter (once initialized)
 let walletReady = false
@@ -404,6 +427,7 @@ let walletReady = false
 let keetIdentity = null
 let keetIdentityPasscode = null // held in-memory so restore/generate IPC can reuse
 let cachedHostAddresses = null  // { smartAddress, ownerAddress } discovered from room state
+let demoAutoTipFired = false     // guard: fire the E2E auto-tip at most once per boot
 
 // Phase 3.5: QVAC translation. Opt-in per-user. Lazy-inited on first
 // translate:init IPC.
@@ -826,7 +850,7 @@ function multiwriterEnabled() {
 
 // -- room lifecycle (Phase 1) ---------------------------------------------
 
-async function openRoomFor(slug, isHost) {
+async function openRoomFor(slug, isHost, { chatBootstrap = null, playheadBootstrap = null } = {}) {
   if (room) {
     log('warn', 'openRoomFor called while room exists; closing prior room first')
     await closeCurrentRoom()
@@ -844,6 +868,12 @@ async function openRoomFor(slug, isHost) {
     wallet: walletReady ? wallet : null,
     hostSmartAddr: cachedHostAddresses?.smartAddress,
     hostOwnerAddr: cachedHostAddresses?.ownerAddress,
+    // Bootstrap the peer's Autobases onto the host's shared roots when known.
+    // Null on host (fresh autobase) and on the initial peer open before the
+    // host's `room:hello` frame arrives; the peer reopens with the correct
+    // keys as soon as the frame lands.
+    chatBootstrap,
+    playheadBootstrap,
     // Wave 15: pass the shared blind-peering client. Handles feature-flag off
     // internally by returning a no-op client (see bare/blindPeering.js).
     blindPeering,
@@ -910,6 +940,50 @@ async function openRoomFor(slug, isHost) {
   })
   const offMsg = room.chat.onMessage((msg) => {
     const enriched = { ...msg, handle: handleFromPubkey(msg.by_peer.length >= 6 ? msg.by_peer : identity.pubkey) }
+    // Feature 2 (identity chip): decode identity_proof -> identityPublicKeyHex.
+    // IdentityKey.verify without expectedIdentity still validates the chain and
+    // returns the identity public key embedded in the proof. We do NOT require
+    // expectedIdentity here because we want to DISPLAY who signed, not assert it
+    // matches a pre-known key. Security note: the proof still cryptographically
+    // binds the identity public key to the message payload, so a peer cannot
+    // forge a different identity on a message they wrote.
+    if (typeof msg.identity_proof === 'string' && msg.identity_proof.length >= 130 && IdentityKey) {
+      try {
+        const proofBuf = Buffer.from(msg.identity_proof, 'hex')
+        // Reconstruct the canonical payload: same sorted-key JSON that
+        // keetIdentity.js attest() uses (see bare/keetIdentity.js canonicalize).
+        // identity_proof is excluded because attest() runs before the field is set.
+        const { identity_proof: _proof, ...payloadForVerify } = msg
+        // Recursive sorted-key serializer matching keetIdentity.js canonicalize()
+        const canonVal = (v) => {
+          if (v === null || typeof v === 'string' || typeof v === 'boolean') return v
+          if (typeof v === 'number') return v
+          if (Array.isArray(v)) return v.map(canonVal)
+          if (typeof v === 'object') {
+            const obj = {}
+            for (const k of Object.keys(v).sort()) {
+              if (v[k] !== undefined) obj[k] = canonVal(v[k])
+            }
+            return obj
+          }
+          return v
+        }
+        const canonicalBytes = Buffer.from(JSON.stringify(canonVal(payloadForVerify)), 'utf8')
+        const res = IdentityKey.verify(proofBuf, canonicalBytes, {})
+        if (res && res.identityPublicKey) {
+          enriched.identityPublicKeyHex = Buffer.from(res.identityPublicKey).toString('hex')
+          enriched.identity_verified = true
+        } else {
+          enriched.identity_verified = false
+        }
+      } catch {
+        enriched.identity_verified = false
+      }
+    } else if (msg.identity_proof !== undefined && msg.identity_proof !== null) {
+      // Proof field present but malformed
+      enriched.identity_verified = false
+    }
+    // identity_verified null/undefined = no proof (legacy message)
     emit('chat:msg', enriched)
     // Phase 3.5: fire-and-forget translation. Never blocks chat delivery.
     maybeTranslateMessage(enriched).catch((err) => {
@@ -975,10 +1049,48 @@ async function openRoomFor(slug, isHost) {
   const writerFlagEnabled = multiwriterEnabled()
   const onConnectionForWriterHandshake = (conn) => {
     if (!room) return
+    // Host side: broadcast our Autobase primary keys so peers can converge
+    // onto the same shared root. Without this, `new Autobase(store, null, ...)`
+    // on each peer creates orphan autobases whose apply()/view.put() writes
+    // never reach anyone else, even though addWriter succeeds (Pattern B
+    // operates on the peer's own orphan autobase). See Autobase README §API,
+    // "loading an existing Autobase" (https://github.com/holepunchto/autobase).
+    if (writerFlagEnabled && room.isHost) {
+      try {
+        const chatBase = room.chat.getBase?.()
+        const phBase = room.playhead.getBase?.()
+        const chatKeyHex = chatBase?.key ? b4a.toString(chatBase.key, 'hex') : null
+        const phKeyHex = phBase?.key ? b4a.toString(phBase.key, 'hex') : null
+        if (chatKeyHex && phKeyHex) {
+          // Piggyback host wallet metadata onto room:hello so the peer can
+          // populate its tip form without waiting for roomState replication.
+          // roomState is a per-peer local Hyperbee and does not currently
+          // cross-replicate (Phase 4+ work); the swarm-level hello frame is
+          // the reliable channel we already own.
+          const w = walletReady ? wallet?.getInfo?.() : null
+          writeSocketJson(conn, {
+            kind: 'room:hello',
+            chatBaseKey: chatKeyHex,
+            playheadBaseKey: phKeyHex,
+            hostSmartAddress: w?.smartAddress || null,
+            hostOwnerAddress: w?.ownerAddress || null,
+            hostChainId: w?.chainId || null
+          })
+        }
+      } catch (err) {
+        log('warn', 'room:hello send failed', { message: err.message })
+      }
+    }
     // Peer side: send our invitation as soon as the socket is open. Host
     // ignores its own invitation attempt (handleWriterRequest short-circuits
     // via `not-host`).
     if (writerFlagEnabled && !room.isHost && typeof room.signMyWriterInvitations === 'function') {
+      // Also request the host's Autobase base keys. If the peer's local
+      // Autobase was opened with null bootstrap (initial boot before host was
+      // known), it will reopen with the correct bootstrap once the host
+      // replies with `room:hello`. `request-hello` is idempotent — hosts
+      // always respond with their current base keys.
+      writeSocketJson(conn, { kind: 'request-hello' })
       // T3 (Final Fix Wave): signMyWriterInvitations is now async because
       // seeds are persisted in the roomState Hyperbee. Fire-and-forget the
       // send so we don't block the connection handler.
@@ -997,6 +1109,33 @@ async function openRoomFor(slug, isHost) {
       } catch { return /* not a writer-handshake frame */ }
       if (!frame || typeof frame !== 'object') return
 
+      // Host side: peer explicitly asked for our base keys (handles the case
+      // where our unsolicited `room:hello` beat the peer's data listener into
+      // existence and was consumed by another data listener before the writer
+      // handshake attached). Reply with the same shape as the unsolicited path.
+      if (frame.kind === 'request-hello' && room?.isHost && writerFlagEnabled) {
+        try {
+          const chatBase = room.chat.getBase?.()
+          const phBase = room.playhead.getBase?.()
+          const chatKeyHex = chatBase?.key ? b4a.toString(chatBase.key, 'hex') : null
+          const phKeyHex = phBase?.key ? b4a.toString(phBase.key, 'hex') : null
+          if (chatKeyHex && phKeyHex) {
+            const w = walletReady ? wallet?.getInfo?.() : null
+            writeSocketJson(conn, {
+              kind: 'room:hello',
+              chatBaseKey: chatKeyHex,
+              playheadBaseKey: phKeyHex,
+              hostSmartAddress: w?.smartAddress || null,
+              hostOwnerAddress: w?.ownerAddress || null,
+              hostChainId: w?.chainId || null
+            })
+          }
+        } catch (err) {
+          log('warn', 'room:hello reply failed', { message: err.message })
+        }
+        return
+      }
+
       if (frame.kind === 'request-writer' && room?.isHost && writerFlagEnabled) {
         const peerHex = conn?.remotePublicKey ? b4a.toString(conn.remotePublicKey, 'hex') : 'unknown'
         try {
@@ -1012,6 +1151,11 @@ async function openRoomFor(slug, isHost) {
               bases: res.bases
             })
             emit('room:writer-promoted', { peer: peerHex, bases: res.bases })
+            // Feature 3 (HUD): update writer count after promotion.
+            try {
+              const roster = room.getWriterRoster()
+              emit('room:writers-update', { writerCount: roster ? roster.size : 0 })
+            } catch { /* non-fatal */ }
           } else {
             writeSocketJson(conn, { kind: 'writer-add-failed', reason: res.reason })
             log('warn', 'writer add rejected', { peer: peerHex.slice(0, 8), reason: res.reason })
@@ -1028,6 +1172,116 @@ async function openRoomFor(slug, isHost) {
         // 'writable' event once the addWriter block replicates through.
         emit('room:writer-added', { bases: frame.bases, addedAt: frame.addedAt })
         log('info', 'promoted to indexer by host', { bases: frame.bases })
+        return
+      }
+      // Peer side: receive host's Autobase base keys. If our current room's
+      // chat/playhead bases have different keys, reopen the room with the
+      // correct bootstrap so both peers share the same Autobase root. Guarded
+      // by `roomBootstrapReopenInFlight` so a burst of connections (host may
+      // reconnect during churn) does not stack reopens.
+      if (frame.kind === 'room:hello' && room && !room.isHost) {
+        try {
+          // Cross-peer tip fix: consume the host's wallet metadata piggybacked
+          // on the hello frame. This bypasses the un-replicated roomState
+          // Hyperbee and unblocks the tip form immediately once we have a
+          // direct swarm connection to the host.
+          if (typeof frame.hostSmartAddress === 'string' && frame.hostSmartAddress.startsWith('0x')) {
+            const smart = frame.hostSmartAddress.toLowerCase()
+            const owner = typeof frame.hostOwnerAddress === 'string' ? frame.hostOwnerAddress.toLowerCase() : null
+            const isFirst = !cachedHostAddresses
+            const changed = !cachedHostAddresses || cachedHostAddresses.smartAddress !== smart
+            if (changed) {
+              cachedHostAddresses = { smartAddress: smart, ownerAddress: owner }
+              emit('tip:host-discovered', {
+                chainId: frame.hostChainId || null,
+                smartAddress: smart,
+                ownerAddress: owner
+              })
+              log('info', 'tip:host-discovered via hello frame', { smart })
+              // If the room was originally opened without a host address, the
+              // tip service is null (see bare/room.js:180 — needs both wallet
+              // and hostSmartAddr at open time). Reopen the room now that we
+              // know the host address so room.tip gets constructed.
+              if (isFirst && walletReady && room && !room.isHost && !room.tip) {
+                const slug = room.slug
+                setTimeout(() => {
+                  openRoomFor(slug, false).catch((err) =>
+                    log('warn', 'reopen after host discovery failed', { message: err.message })
+                  )
+                }, 500)
+              }
+              // Demo auto-tip: if CURVA_DEMO_AUTO_TIP=true, fire a real
+              // proposeTip 3s after host discovery so the E2E path lands
+              // an Etherscan-visible tx without requiring a UI click. Guarded
+              // so it only fires once per boot on the peer (not host).
+              if (process.env.CURVA_DEMO_AUTO_TIP === 'true' && !demoAutoTipFired) {
+                // Poll every 3s (up to 20 times = 60s) until room.tip is
+                // ready AND wallet is ready, then submit exactly one tip.
+                let attempts = 0
+                const poll = setInterval(async () => {
+                  attempts++
+                  if (demoAutoTipFired || attempts > 20) { clearInterval(poll); return }
+                  if (!walletReady || !room?.tip || typeof room.tip.proposeTip !== 'function') {
+                    log('info', 'auto-tip waiting', { attempts, walletReady, hasTip: !!room?.tip })
+                    return
+                  }
+                  demoAutoTipFired = true
+                  clearInterval(poll)
+                  try {
+                    log('info', 'auto-tip firing', { to: smart, attempts })
+                    const row = await room.tip.proposeTip({ amount: '1000000', note: 'e2e-cross-peer' })
+                    log('info', 'auto-tip result', { status: row?.status, tx_hash: row?.tx_hash, error: row?.error })
+                  } catch (err) {
+                    log('error', 'auto-tip failed', { message: err?.message, code: err?.code })
+                    demoAutoTipFired = false // allow one retry on transient error
+                  }
+                }, 3000)
+              }
+            }
+          }
+          const chatBase = room.chat.getBase?.()
+          const phBase = room.playhead.getBase?.()
+          const curChat = chatBase?.key ? b4a.toString(chatBase.key, 'hex') : null
+          const curPh = phBase?.key ? b4a.toString(phBase.key, 'hex') : null
+          const targetChat = typeof frame.chatBaseKey === 'string' ? frame.chatBaseKey.toLowerCase() : null
+          const targetPh = typeof frame.playheadBaseKey === 'string' ? frame.playheadBaseKey.toLowerCase() : null
+          if (targetChat && targetPh && (curChat !== targetChat || curPh !== targetPh)) {
+            if (!roomBootstrapReopenInFlight) {
+              roomBootstrapReopenInFlight = (async () => {
+                const slug = room.slug
+                log('info', 'reopening room with host bootstrap', {
+                  chat: targetChat.slice(0, 8),
+                  playhead: targetPh.slice(0, 8)
+                })
+                await openRoomFor(slug, false, {
+                  chatBootstrap: targetChat,
+                  playheadBootstrap: targetPh
+                })
+                // After reopen, the peer's Autobase writer core keys have
+                // rotated (new namespaced corestore inside the reopened room).
+                // Re-send the writer invitation over every existing connection
+                // so the host promotes our NEW writer keys, not the stale
+                // pre-reopen ones. Idempotent on host — handleWriterRequest
+                // short-circuits if the pair is already in the roster.
+                if (room && !room.isHost && typeof room.signMyWriterInvitations === 'function') {
+                  try {
+                    const payload = await room.signMyWriterInvitations()
+                    for (const c of swarm.connections) {
+                      writeSocketJson(c, { kind: 'request-writer', payload })
+                    }
+                    log('info', 'resent request-writer after reopen')
+                  } catch (err) {
+                    log('warn', 'resent request-writer failed', { message: err.message })
+                  }
+                }
+              })()
+                .catch((err) => log('warn', 'room bootstrap reopen failed', { message: err.message }))
+                .finally(() => { roomBootstrapReopenInFlight = null })
+            }
+          }
+        } catch (err) {
+          log('warn', 'room:hello handling failed', { message: err.message })
+        }
         return
       }
       if (frame.kind === 'writer-add-failed' && !room?.isHost) {
@@ -1080,14 +1334,83 @@ async function openRoomFor(slug, isHost) {
   }
 
   // Peer path: try to read host tip address from the replicated room state
-  // Hyperbee. Best-effort — replication may not have completed yet, in which
-  // case the renderer's tip button stays disabled until wallet:host-discovered
-  // fires.
+  // Hyperbee. Best-effort — replication may not have completed yet, so we
+  // poll on an interval until we successfully get the host address. Bounded
+  // at 60s (20 attempts x 3s) so a truly disconnected host doesn't spam the
+  // log forever. Emits `tip:host-discovered` on success (see
+  // tryDiscoverHostAddress) which the renderer consumes to unblock the tip
+  // button.
   if (!isHost && room.roomState) {
+    let attempts = 0
+    const maxAttempts = 20
+    const discoverPoll = setInterval(async () => {
+      attempts++
+      if (attempts > maxAttempts || cachedHostAddresses?.smartAddress) {
+        clearInterval(discoverPoll)
+        return
+      }
+      // Guard against race where room was closed between ticks — `room` and
+      // `room.roomState` may have been nulled by closeCurrentRoom(). Without
+      // this the setInterval callback dereferences a closed Hyperbee and
+      // crashes the Bare worker (exit code 1).
+      if (!room || !room.roomState) {
+        clearInterval(discoverPoll)
+        return
+      }
+      try {
+        await tryDiscoverHostAddress()
+      } catch (err) {
+        log('warn', 'host tip-address discovery failed', { message: err.message, attempt: attempts })
+      }
+    }, 3000)
+    // Ensure the poller is cleared on room close so it doesn't reference a
+    // torn-down roomState after teardown (would surface as Bare worker crash).
+    roomUnsubs.push(() => clearInterval(discoverPoll))
+    // Fire once immediately (don't wait 3s for first attempt)
     tryDiscoverHostAddress().catch((err) =>
       log('warn', 'host tip-address discovery failed', { message: err.message })
     )
   }
+
+  // Feature 1 (WC reel on Hyperdrive): publish the local sample-clip.mp4 into
+  // this peer's own drive at /wc-reel/reel.mp4, then get a loopback blob-server
+  // URL and emit `wc-reel:link`. Non-host peers also publish so they each have
+  // their own stream URL (the drive is per-peer-owned, replicated read-only by
+  // the rest). Falls back to the local file if anything fails.
+  // Capture `room.clips` reference at schedule time so the 500ms-deferred
+  // callback isn't affected by a concurrent room close/reopen.
+  const _wcReelClips = room.clips
+  setTimeout(() => {
+    ;(async () => {
+      try {
+        if (!bareFs || !barePath || !_wcReelClips || typeof _wcReelClips.publishReel !== 'function') return
+        // Resolve the assets dir. Try multiple candidate paths in priority order:
+        // 1. Relative to Bare.argv[3] (app path, non-null in packaged builds).
+        // 2. Relative to the worker file itself via require.main?.filename.
+        // 3. 'assets/<file>' relative to cwd (dev mode: project root).
+        const sampleClip = 'sample-clip.mp4'
+        const candidates = []
+        const appFilename = config.app || (typeof Bare !== 'undefined' && Bare.argv && Bare.argv[3]) || null
+        if (appFilename) candidates.push(barePath.join(appFilename, '..', 'assets', sampleClip))
+        const workerFile = (typeof require !== 'undefined' && require.main && require.main.filename) || null
+        if (workerFile) candidates.push(barePath.join(barePath.dirname(workerFile), '..', 'assets', sampleClip))
+        candidates.push(barePath.join('assets', sampleClip))
+        candidates.push(barePath.join('.', 'assets', sampleClip))
+
+        let buf = null
+        for (const candidate of candidates) {
+          try { buf = await bareFs.promises.readFile(candidate); if (buf && buf.length > 0) break } catch { buf = null }
+        }
+        if (!buf || buf.length === 0) return
+        const drivePath = await _wcReelClips.publishReel(buf, 'reel.mp4')
+        const linkObj = _wcReelClips.getReelLink(_wcReelClips.myDriveKey, drivePath)
+        emit('wc-reel:link', { url: linkObj.url, driveKey: _wcReelClips.myDriveKey, drivePath })
+        log('info', 'wc-reel:link emitted', { url: linkObj.url.slice(0, 60), drivePath })
+      } catch (err) {
+        log('warn', 'wc-reel publish failed (fallback to local file)', { message: err?.message })
+      }
+    })()
+  }, 500)
 
   emit('room:ready', {
     slug,
@@ -1099,6 +1422,40 @@ async function openRoomFor(slug, isHost) {
     hostSmartAddress: room.tip?.hostSmartAddr || null
   })
   log('info', 'room ready', { slug, isHost, myDriveKey: room.clips.myDriveKey })
+
+  // Diagnostic autochat for cross-peer sync verification. When
+  // CURVA_AUTOCHAT_TEST=<text> is set, appends that text via room.chat.send
+  // 20 seconds after room ready. Both peers log every incoming chat message
+  // (whether local or remote) via the existing `chat:msg` emit path AND via
+  // this diag hook so a grep on the peer's log confirms replication.
+  const autochatText = (typeof process !== 'undefined' && process.env && process.env.CURVA_AUTOCHAT_TEST) || ''
+  if (autochatText && typeof room.chat.send === 'function') {
+    setTimeout(() => {
+      room.chat.send({ text: String(autochatText).slice(0, 200), match_time_ms: 0 })
+        .then((msg) => log('info', 'AUTOCHAT sent', { text: msg.text }))
+        .catch((err) => log('warn', 'AUTOCHAT send failed', { message: err?.message }))
+    }, 20_000)
+  }
+  if (typeof room.chat.onMessage === 'function') {
+    room.chat.onMessage((msg) => {
+      if (msg?.type === 'msg') {
+        log('info', 'AUTOCHAT observed', {
+          text: msg.text,
+          by: (msg.by_peer || '').slice(0, 8),
+          local: msg.by_peer === identity.pubkey
+        })
+      }
+    })
+  }
+
+  // Feature 3 (HUD): emit initial autobase writer count so the HUD has a
+  // value before any addWriter events. `getWriterRoster()` returns a Set of
+  // unique hex writer keys; each peer contributes 2 (chat + playhead), so
+  // writerCount = roster.size reflects total registered writer slots.
+  try {
+    const roster = room.getWriterRoster()
+    emit('room:writers-update', { writerCount: roster ? roster.size : 0 })
+  } catch { /* non-fatal */ }
 
   // Wave 13B: kick roomBot when the flag is on. Fire-and-forget so a slow
   // model load never blocks room:ready. If the commentator flag is also on
@@ -1115,7 +1472,11 @@ async function openRoomFor(slug, isHost) {
 
 async function tryDiscoverHostAddress() {
   if (!room || !room.roomState) return
-  const node = await room.roomState.get('room/host-tip-address').catch(() => null)
+  const node = await room.roomState.get('room/host-tip-address').catch((err) => {
+    log('warn', 'roomState.get host-tip-address threw', { message: err?.message })
+    return null
+  })
+  log('info', 'tryDiscoverHostAddress read', { found: !!node?.value?.smartAddress, node: node?.value ? { smart: node.value.smartAddress } : null })
   if (node?.value?.smartAddress) {
     cachedHostAddresses = {
       smartAddress: node.value.smartAddress,
@@ -1126,6 +1487,7 @@ async function tryDiscoverHostAddress() {
       smartAddress: node.value.smartAddress,
       ownerAddress: node.value.ownerAddress
     })
+    log('info', 'tip:host-discovered emitted', { smart: node.value.smartAddress })
   }
 }
 
@@ -1231,14 +1593,25 @@ async function initWallet(payload) {
   require('../bare/wallet/semverPatch.js').applyPatch()
   let WDK, WalletFactory, SecretManager, ethers
   try {
-    WDK = require('@tetherto/wdk')
-    WalletFactory = require('@tetherto/wdk-wallet-evm-erc-4337')
-    SecretManager = require('@tetherto/wdk-secret-manager')
-    ethers = require('ethers')
-    // Some packages export default vs. named — normalize.
+    // Bare-runtime compatibility: WDK + ethers require Node built-ins like
+    // 'http', 'https', 'zlib', 'stream', etc. Bare has no such built-ins,
+    // but `bare-node-runtime/imports` ships a JSON alias map that Bare's
+    // module resolver honours via the `with: { imports }` option. Passing
+    // it here tells Bare "when this module tree tries to require('http'),
+    // resolve it to 'bare-http1' instead". Applies transitively to all
+    // sub-requires under this load.
+    const withBareImports = { with: { imports: 'bare-node-runtime/imports' } }
+    WDK = require('@tetherto/wdk', withBareImports)
+    WalletFactory = require('@tetherto/wdk-wallet-evm-erc-4337', withBareImports)
+    SecretManager = require('@tetherto/wdk-secret-manager', withBareImports)
+    ethers = require('ethers', withBareImports)
+    // Some packages export default vs. named — normalize. wdk-secret-manager
+    // exports `{ wdkSaltGenerator, WdkSecretManager }`, so we unwrap the class
+    // rather than passing the plain object (which would fail as a constructor
+    // in bare/wallet/worklet.js `new SecretManager(...)`).
     WDK = WDK.default || WDK
     WalletFactory = WalletFactory.default || WalletFactory
-    SecretManager = SecretManager.default || SecretManager
+    SecretManager = SecretManager.default || SecretManager.WdkSecretManager || SecretManager
   } catch (err) {
     const msg = 'WDK dependencies unavailable: ' + err.message
     log('error', msg)
@@ -1263,7 +1636,7 @@ async function initWallet(payload) {
     chain: SEPOLIA
   })
 
-  const info = await wallet.init({ passcode, storageDir })
+  const info = await wallet.init({ passcode, storageDir, backendBaseUrl: config.backendUrl })
   walletReady = true
   emit('wallet:ready', {
     smartAddress: info.smartAddress,
@@ -1295,6 +1668,35 @@ async function initWallet(payload) {
     const wasHost = room.isHost
     await closeCurrentRoom()
     await openRoomFor(slug, wasHost)
+    // Cross-peer tip fix: if we became the host, re-broadcast our hello frame
+    // to every existing swarm connection so already-connected peers learn our
+    // wallet metadata without waiting for a fresh connection.
+    if (wasHost && room && walletReady) {
+      try {
+        const chatBase = room.chat.getBase?.()
+        const phBase = room.playhead.getBase?.()
+        const chatKeyHex = chatBase?.key ? b4a.toString(chatBase.key, 'hex') : null
+        const phKeyHex = phBase?.key ? b4a.toString(phBase.key, 'hex') : null
+        const w = wallet?.getInfo?.()
+        if (chatKeyHex && phKeyHex && w?.smartAddress && swarm) {
+          for (const c of swarm.connections) {
+            writeSocketJson(c, {
+              kind: 'room:hello',
+              chatBaseKey: chatKeyHex,
+              playheadBaseKey: phKeyHex,
+              hostSmartAddress: w.smartAddress,
+              hostOwnerAddress: w.ownerAddress,
+              hostChainId: w.chainId
+            })
+          }
+          log('info', 'rebroadcast room:hello with wallet after wallet:ready', {
+            connCount: swarm.connections.size ?? '?'
+          })
+        }
+      } catch (err) {
+        log('warn', 'rebroadcast hello failed', { message: err.message })
+      }
+    }
   }
 }
 
@@ -1318,8 +1720,8 @@ async function ensureKeetIdentityLoaded() {
   let SecretManager
   try {
     require('../bare/wallet/semverPatch.js').applyPatch()
-    SecretManager = require('@tetherto/wdk-secret-manager')
-    SecretManager = SecretManager.default || SecretManager
+    SecretManager = require('@tetherto/wdk-secret-manager', { with: { imports: 'bare-node-runtime/imports' } })
+    SecretManager = SecretManager.default || SecretManager.WdkSecretManager || SecretManager
   } catch (err) {
     log('warn', 'keet identity: SecretManager unavailable', { message: err?.message })
     return null
@@ -1694,12 +2096,20 @@ const matchLiveStreamConsumer = (() => {
     if (!backend || typeof backend !== 'string') {
       throw new Error('backend URL unset')
     }
-    const url = backend.replace(/\/$/, '') + '/match/live/stream'
-    abortCtrl = new AbortController()
-    const resp = await fetch(url, {
-      headers: { Accept: 'text/event-stream' },
-      signal: abortCtrl.signal
-    })
+    // Backend registers matchLiveStreamRoutes under the '/matches' prefix
+    // (see backend/index.ts line 203). The SSE endpoint inside that plugin is
+    // '/live/stream', so the full URL is '/matches/live/stream'. The singular
+    // '/match/live/stream' variant returns 404.
+    const url = backend.replace(/\/$/, '') + '/matches/live/stream'
+    // Bare runtime (used by Pear workers) does not always expose AbortController
+    // as a global. Guard the reference so we degrade gracefully: without a
+    // signal we lose the ability to abort in-flight fetches on shutdown, but
+    // the reconnect loop and reader.cancel() path still handle disconnection.
+    const AC = (typeof AbortController !== 'undefined') ? AbortController : null
+    abortCtrl = AC ? new AC() : null
+    const fetchInit = { headers: { Accept: 'text/event-stream' } }
+    if (abortCtrl) fetchInit.signal = abortCtrl.signal
+    const resp = await fetch(url, fetchInit)
     if (!resp.ok || !resp.body) {
       throw new Error('http ' + resp.status)
     }
@@ -2233,12 +2643,16 @@ async function dispatchCommand(msg) {
           return
         }
         const identity = identityCache || (await getPeerIdentity())
+        // 2026-07-07: fall back to the local wallet's smart+owner addresses
+        // when the renderer did not include them in the payload (RoomHeader
+        // only passes handle+matchId today). The backend requires both.
+        const walletSnap = walletInfoSnapshot()
         const res = await room.backend.publishRoom({
           slug: room.slug,
           matchId: payload?.matchId,
           hostHandle: payload?.hostHandle || identity.handle,
-          hostSmartAddress: payload?.hostSmartAddress,
-          hostOwnerAddress: payload?.hostOwnerAddress,
+          hostSmartAddress: payload?.hostSmartAddress || walletSnap.smartAddress,
+          hostOwnerAddress: payload?.hostOwnerAddress || walletSnap.ownerAddress,
           expiresAt: payload?.expiresAt
         })
         emit('backend:publish-room', {
@@ -2418,8 +2832,8 @@ async function dispatchCommand(msg) {
         let SecretManager
         try {
           require('../bare/wallet/semverPatch.js').applyPatch()
-          SecretManager = require('@tetherto/wdk-secret-manager')
-          SecretManager = SecretManager.default || SecretManager
+          SecretManager = require('@tetherto/wdk-secret-manager', { with: { imports: 'bare-node-runtime/imports' } })
+          SecretManager = SecretManager.default || SecretManager.WdkSecretManager || SecretManager
         } catch (err) {
           emit('identity:error', { code: 'DEPS_MISSING', message: err?.message, requestId: id })
           throw err
@@ -2468,8 +2882,8 @@ async function dispatchCommand(msg) {
         let SecretManager
         try {
           require('../bare/wallet/semverPatch.js').applyPatch()
-          SecretManager = require('@tetherto/wdk-secret-manager')
-          SecretManager = SecretManager.default || SecretManager
+          SecretManager = require('@tetherto/wdk-secret-manager', { with: { imports: 'bare-node-runtime/imports' } })
+          SecretManager = SecretManager.default || SecretManager.WdkSecretManager || SecretManager
         } catch (err) {
           emit('identity:error', { code: 'DEPS_MISSING', message: err?.message, requestId: id })
           throw err

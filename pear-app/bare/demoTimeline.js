@@ -30,6 +30,19 @@ function timelineFlagEnabled() {
   } catch { return false }
 }
 
+// When CURVA_DEMO_MODE=true the tip.propose step routes to the backend's
+// sponsor-signs-on-itself endpoint (POST /wdk/relay/demo-self-tip) instead of
+// invoking the peer wallet's signEip3009 path. The peer wallet is unfunded on
+// stage so a live self-tip is the only way to produce a real Sepolia tx that
+// judges can click through to Etherscan. See backend/src/routes/facilitatorRoutes.ts.
+function demoModeEnabled() {
+  try {
+    const v = (typeof process !== 'undefined' && process.env
+      && process.env.CURVA_DEMO_MODE) || ''
+    return String(v).toLowerCase() === 'true'
+  } catch { return false }
+}
+
 /**
  * Build the ordered event list. Times are in ms from t=0. Kept in a builder
  * so callers can inspect the plan (tests + status()) without running it.
@@ -90,6 +103,10 @@ function buildTimeline() {
  * @param {()=>number} [deps.now]   injectable clock for tests + drift math
  * @param {Array} [deps.timeline]  test-only override; when omitted the
  *                                 canonical 15-event 3-minute plan is used.
+ * @param {string} [deps.backendUrl]  base URL of the Curva backend. Only used
+ *                                    by the CURVA_DEMO_MODE self-tip step.
+ *                                    Falls back to CURVA_BACKEND_URL env var
+ *                                    then http://localhost:3700 when unset.
  */
 function createDemoTimeline(deps = {}) {
   const {
@@ -104,7 +121,8 @@ function createDemoTimeline(deps = {}) {
     log = () => {},
     emit = () => {},
     now = () => Date.now(),
-    timeline: timelineOverride = null
+    timeline: timelineOverride = null,
+    backendUrl = null
   } = deps
 
   if (attendance) { /* referenced for future extension; keep lint quiet */ }
@@ -133,6 +151,73 @@ function createDemoTimeline(deps = {}) {
 
   function safeEmit(event, payload) {
     try { emit(event, payload) } catch { /* ignore emit faults */ }
+  }
+
+  function resolveBackendUrl() {
+    if (typeof backendUrl === 'string' && backendUrl.length > 0) return backendUrl
+    try {
+      const v = (typeof process !== 'undefined' && process.env
+        && process.env.CURVA_BACKEND_URL) || ''
+      if (v) return v
+    } catch { /* noop */ }
+    return 'http://localhost:3700'
+  }
+
+  /**
+   * Demo-mode tip: POST to backend /wdk/relay/demo-self-tip so the sponsor
+   * signs a self-tip and produces a live Sepolia tx. NEVER throws — a failure
+   * only logs a warn line so the timeline keeps running through the rest of
+   * the 3-minute pitch. On success, emits a `tip:submitted` event carrying
+   * txHash + explorer_url in the SAME shape the peer-signed path uses (see
+   * bare/tip.js fire('submitted', row) which fills tx_hash + explorer_url on
+   * the system:tip chat message). This lets the RoomHeader tip chip and any
+   * other listener treat the demo tip identically to a real peer tip.
+   */
+  async function runSelfTipDemo(args) {
+    const amount = (args && typeof args.amount === 'string') ? args.amount : '1000000'
+    if (typeof fetch !== 'function') {
+      safeLog('warn', 'demo:timeline self-tip skipped, fetch unavailable')
+      return
+    }
+    const url = resolveBackendUrl().replace(/\/+$/, '') + '/wdk/relay/demo-self-tip'
+    let resp
+    try {
+      resp = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        body: JSON.stringify({ amount })
+      })
+    } catch (err) {
+      safeLog('warn', 'demo:timeline self-tip failed', { message: err && err.message })
+      return
+    }
+    let json = null
+    try { json = await resp.json() } catch { /* fall through */ }
+    if (!resp.ok || !json || json.success !== true) {
+      safeLog('warn', 'demo:timeline self-tip failed', {
+        status: resp.status,
+        code: json && json.error && json.error.code,
+        message: (json && json.error && json.error.message) || 'non-ok response'
+      })
+      return
+    }
+    const data = json.data || {}
+    const txHash = typeof data.txHash === 'string' ? data.txHash : null
+    const explorerUrl = typeof data.explorerUrl === 'string' ? data.explorerUrl : null
+    safeLog('info', 'demo:timeline real self-tip landed', { txHash, explorerUrl })
+    // Emit the same event shape the peer-signed path uses. tip.js fires
+    // 'submitted' via onStateChange with the full row; here we only have the
+    // backend response so we mirror the essential fields (tx_hash, amount,
+    // explorer_url) that downstream renderers key off.
+    safeEmit('tip:submitted', {
+      tx_hash: txHash,
+      amount,
+      explorer_url: explorerUrl,
+      from_address: typeof data.from === 'string' ? data.from : null,
+      to_address: typeof data.to === 'string' ? data.to : null,
+      status: 'submitted',
+      source: 'demo-self-tip'
+    })
   }
 
   function elapsedMs() {
@@ -216,6 +301,17 @@ function createDemoTimeline(deps = {}) {
         }
 
         case 'tip.propose': {
+          // Two paths:
+          //   demoMode=true  -> POST backend /wdk/relay/demo-self-tip so the
+          //                     sponsor produces a REAL Sepolia tx that judges
+          //                     can click through. The stage peer wallet has
+          //                     zero USDT and zero Sepolia gas.
+          //   demoMode=false -> fall through to the peer-signed tip flow
+          //                     (tip.proposeTip). Production default.
+          if (demoModeEnabled()) {
+            await runSelfTipDemo(event.args)
+            return
+          }
           if (!tip || typeof tip.proposeTip !== 'function') return
           await tip.proposeTip({ amount: event.args.amount })
           return
