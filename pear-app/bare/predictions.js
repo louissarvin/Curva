@@ -106,6 +106,18 @@ function createPredictionsClient(opts = {}) {
     ? opts.fetch
     : (typeof fetch === 'function' ? fetch : null)
 
+  // D2 demo state. `enableDemoMode()` toggles this on; `attachPlayhead()`
+  // subscribes to a playhead and calls openPool + publishResult at fixed
+  // match_time_ms boundaries. Off by default so unit tests and production
+  // code paths remain unaffected.
+  //
+  // Fields:
+  //   on               boolean, master switch
+  //   poolWindowMs     how long the stake window stays open after auto-open
+  //   entryStakeAtomic decimal-string atomic units for the demo entry stake
+  //                    (default 1 USDT = 1_000_000 at 6 decimals)
+  let demoMode = { on: false, poolWindowMs: 20 * 60_000, entryStakeAtomic: '1000000' }
+
   // Small HTTP helper that peels the backend { success, error, data } envelope
   // into { ok, data } | { ok, error }. Mirrors bare/backend.js request() but
   // is inlined so we don't need to widen the backend client's public surface.
@@ -389,24 +401,31 @@ function createPredictionsClient(opts = {}) {
       throw new PredictionsError(res.error?.code || 'BACKEND_ERROR', res.error?.message || 'submitPrediction failed')
     }
     const data = res.data || {}
-    // Append a `prediction` chat row so peers see the entry in real time.
-    // Note: this is NOT a host-only system:pool-* type so we route it as a
-    // regular text-shaped msg-lite. Because chat.sendSystem validates strictly
-    // and rejects unknown types, we build a minimal-safe display event using
-    // a `msg` type with an embedded [prediction] prefix. This avoids adding a
-    // new Autobase message type in the middle of Wave 11 (would require
-    // matching backend fix + validator + host-writer gate).
+    // D2: emit a distinct `system:prediction-stake` chat row so the renderer
+    // can render a "stake pill" instead of a plain text line. Peer-writer-
+    // allowed (unlike tip-ack / pool-opened which are host-only), because any
+    // promoted peer can stake their own USDT via EIP-3009. Backend remains
+    // authoritative on the txHash lookup path, so a forged pill without a
+    // matching backend row is harmless (see memo, Known gotchas: writer
+    // authorship for system:prediction-stake).
+    //
+    // Payload matches the memo contract:
+    //   { handle, teamCode, amountUsdt, tx } + goal fields for exact-score.
     try {
-      const goalStr = mode === 'exact-score' ? ` ${hg}-${ag}` : ''
       await chat.sendSystem({
-        type: 'msg',
+        type: 'system:prediction-stake',
         by_peer: myPubkey,
-        text: `[prediction] ${peerHandle} bet ${winner}${goalStr} • tx ${(data.txHash || '').slice(0, 12)}`,
         match_time_ms: 0,
-        wall_clock_ms: Date.now()
+        wall_clock_ms: Date.now(),
+        peerHandle,
+        winner,
+        homeGoals: mode === 'exact-score' ? hg : null,
+        awayGoals: mode === 'exact-score' ? ag : null,
+        stakeAtomic: stakeAtomic,
+        txHash: typeof data.txHash === 'string' ? data.txHash : ''
       })
     } catch (err) {
-      console.warn('[Curva][Pred] prediction chat append failed:', err?.message)
+      console.warn('[Curva][Pred] prediction stake chat append failed:', err?.message)
     }
 
     statusCache.delete(getMatchIdCacheHint(data))
@@ -579,12 +598,199 @@ function createPredictionsClient(opts = {}) {
     })
   }
 
+  // ---------------------------------------------------------------------------
+  // D2 demo mode
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Turn on demo mode. Does NOT auto-open the pool by itself. The playhead
+   * hook in room.js (task 3) is responsible for triggering openPool at
+   * match_time_ms >= 2000 and publishResult at match_time_ms >= 5_400_000.
+   *
+   * @param {{poolWindowMs?: number, entryAmountUsdt?: number, entryStakeAtomic?: string}} [cfg]
+   */
+  function enableDemoMode(cfg = {}) {
+    const poolWindowMs = Number(cfg.poolWindowMs)
+    const stakeAtomicFromCfg = typeof cfg.entryStakeAtomic === 'string' && DECIMAL_UINT_RE.test(cfg.entryStakeAtomic)
+      ? cfg.entryStakeAtomic
+      : null
+    // entryAmountUsdt is a convenience field (whole USDT units) that we
+    // multiply into atomic units at 6 decimals. USDT on Sepolia + most testnets
+    // uses 6 decimals; if the tokenContract's decimals ever changes we would
+    // switch to reading it dynamically.
+    let stakeAtomicFromWhole = null
+    if (cfg.entryAmountUsdt !== undefined && Number.isFinite(Number(cfg.entryAmountUsdt))) {
+      const usdt = Number(cfg.entryAmountUsdt)
+      if (usdt > 0 && usdt < 1_000_000) {
+        // 6-decimal token: 1 USDT = 1_000_000 atomic units.
+        stakeAtomicFromWhole = String(Math.floor(usdt * 1_000_000))
+      }
+    }
+    demoMode = {
+      on: true,
+      poolWindowMs: Number.isFinite(poolWindowMs) && poolWindowMs > 60_000
+        ? Math.floor(poolWindowMs)
+        : demoMode.poolWindowMs,
+      entryStakeAtomic: stakeAtomicFromCfg || stakeAtomicFromWhole || demoMode.entryStakeAtomic
+    }
+    return { ...demoMode }
+  }
+
+  function isDemoMode() { return !!demoMode?.on }
+  function getDemoConfig() { return { ...demoMode } }
+
+  /**
+   * Attach a playhead. Returns an unsubscribe function. Fires openPool once
+   * at match_time_ms >= 2000 and publishResult once at match_time_ms >=
+   * 5_400_000 (90 min). No-op unless demo mode is on and caller is host.
+   *
+   * Callers must pass opts.matchId (host chose it at pool-open UI) and
+   * opts.getLiveScore (returns {winner, homeGoals, awayGoals}). opts.poolId
+   * is filled in after openPool succeeds.
+   *
+   * @param {object} playhead  bare/playhead.js instance
+   * @param {{
+   *   matchId: string,
+   *   mode?: string,
+   *   getLiveScore: () => Promise<{winner: string, homeGoals: number, awayGoals: number}>,
+   *   poolId?: string
+   * }} opts
+   * @returns {() => void}
+   */
+  function attachPlayhead(playhead, opts = {}) {
+    if (!isDemoMode()) return () => {}
+    if (!isHost) return () => {}
+    if (!playhead || typeof playhead.onUpdate !== 'function') return () => {}
+    if (!opts.matchId) return () => {}
+
+    let openedAt = null
+    let settledAt = null
+    let openedPoolId = typeof opts.poolId === 'string' ? opts.poolId : null
+
+    const off = playhead.onUpdate(async (state) => {
+      if (!state || typeof state.match_time_ms !== 'number') return
+
+      if (!openedAt && state.match_time_ms >= 2_000) {
+        openedAt = Date.now()
+        try {
+          const opened = await openPool({
+            matchId: opts.matchId,
+            mode: opts.mode || 'winner-only',
+            entryStakeAtomic: demoMode.entryStakeAtomic,
+            deadlineMs: Date.now() + demoMode.poolWindowMs
+          })
+          openedPoolId = opened?.poolId || openedPoolId
+        } catch (err) {
+          console.warn('[Curva][Pred] demo auto-open failed:', err?.message)
+        }
+      }
+
+      if (!settledAt && state.match_time_ms >= 5_400_000) {
+        settledAt = Date.now()
+        try {
+          const score = typeof opts.getLiveScore === 'function'
+            ? await opts.getLiveScore()
+            : null
+          if (score && VALID_WINNERS.has(score.winner)) {
+            const pid = openedPoolId
+            if (typeof pid === 'string' && pid.length > 0) {
+              await publishResult({
+                poolId: pid,
+                winner: score.winner,
+                homeGoals: Number(score.homeGoals),
+                awayGoals: Number(score.awayGoals),
+                matchId: opts.matchId
+              })
+            }
+          }
+        } catch (err) {
+          console.warn('[Curva][Pred] demo auto-settle failed:', err?.message)
+        }
+      }
+    })
+    return typeof off === 'function' ? off : () => {}
+  }
+
+  // ---------------------------------------------------------------------------
+  // Host: publishSettlement (D2 addition)
+  // ---------------------------------------------------------------------------
+  /**
+   * Emit a `system:prediction-settle` chat row summarizing pool winners
+   * and losers plus the settlement tx. Peer-writer-allowed follow-on to
+   * publishResult so the renderer can render a settlement pill without
+   * waiting for the SSE payout stream.
+   *
+   * @param {{
+   *   poolId: string,
+   *   winners: Array<{handle?: string, address?: string, amountAtomic?: string}>,
+   *   losers: Array<{handle?: string, address?: string}>,
+   *   tx?: string,
+   *   matchId?: string
+   * }} args
+   */
+  async function publishSettlement({ poolId, winners, losers, tx, matchId } = {}) {
+    assertEnabled()
+    assertHost()
+    validatePoolId(poolId)
+    if (!Array.isArray(winners)) {
+      throw new PredictionsError('VALIDATION_ERROR', 'winners must be an array')
+    }
+    if (!Array.isArray(losers)) {
+      throw new PredictionsError('VALIDATION_ERROR', 'losers must be an array')
+    }
+    const safeWinners = winners.slice(0, 32).map(sanitizeSettlementRow)
+    const safeLosers = losers.slice(0, 32).map(sanitizeSettlementRow)
+    const txStr = typeof tx === 'string' && HEX_TX_RE.test(tx) ? tx : ''
+
+    try {
+      await chat.sendSystem({
+        type: 'system:prediction-settle',
+        by_peer: myPubkey,
+        match_time_ms: 90 * 60 * 1000,
+        wall_clock_ms: Date.now(),
+        poolId,
+        matchId: typeof matchId === 'string' ? matchId : null,
+        winners: safeWinners,
+        losers: safeLosers,
+        txHash: txStr
+      })
+    } catch (err) {
+      console.warn('[Curva][Pred] system:prediction-settle append failed:', err?.message)
+      throw new PredictionsError('BROADCAST_FAILED', err?.message || 'broadcast failed')
+    }
+
+    return {
+      poolId,
+      winners: safeWinners.length,
+      losers: safeLosers.length,
+      txHash: txStr
+    }
+  }
+
+  function sanitizeSettlementRow(row) {
+    if (!row || typeof row !== 'object') return { handle: '', address: '' }
+    const out = { handle: '', address: '' }
+    if (typeof row.handle === 'string') out.handle = row.handle.slice(0, 64)
+    if (typeof row.address === 'string' && HEX_ADDR_RE.test(row.address)) {
+      out.address = row.address.toLowerCase()
+    }
+    if (typeof row.amountAtomic === 'string' && DECIMAL_UINT_RE.test(row.amountAtomic)) {
+      out.amountAtomic = row.amountAtomic
+    }
+    return out
+  }
+
   return {
     openPool,
     submitPrediction,
     publishResult,
+    publishSettlement,
     getPoolStatus,
     announcePayout,
+    enableDemoMode,
+    attachPlayhead,
+    isDemoMode,
+    getDemoConfig,
     get enabled() { return enabled },
     get isHost() { return isHost }
   }
