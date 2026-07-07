@@ -2,307 +2,248 @@
 
 # Curva
 
-**Watch the World Cup with friends, peer-to-peer.**
+**P2P watch-party for the World Cup, powered by the Tether developer stack.**
 
-A fully P2P World Cup 2026 watch-party desktop app. Synced playheads, multi-writer chat, on-device translation, gasless USDT tips. No streaming platform. No chat server. No cloud translator. No custody service.
+Curva is a fully peer-to-peer World Cup 2026 watch-party desktop app. Autobase-linearised playheads, multi-writer chat, on-device commentary and translation, gasless USDT tips. No streaming platform. No chat server. No cloud translator. No custody service.
 
-[Quick Start](#quick-start) - [Architecture](#architecture) - [How It Works](#how-it-works) - [API](#api-endpoints) - [Demo](#live-demo)
+For football fans separated by continents who still want to react to the same goal at the same second, with the friend who found the stream getting a tip that settles in seconds, not days.
 
-![Bun](https://img.shields.io/badge/Bun-1.0+-fbf0df?style=for-the-badge&logo=bun&logoColor=black)
-![Node.js](https://img.shields.io/badge/Node.js-20+-339933?style=for-the-badge&logo=node.js&logoColor=white)
-![Electron](https://img.shields.io/badge/Electron-40-47848F?style=for-the-badge&logo=electron&logoColor=white)
-![Pears](https://img.shields.io/badge/Pears-Holepunch-0A0A0A?style=for-the-badge&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PC9zdmc+&logoColor=white)
-![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178C6?style=for-the-badge&logo=typescript&logoColor=white)
-![JavaScript](https://img.shields.io/badge/JavaScript-ES2022-F7DF1E?style=for-the-badge&logo=javascript&logoColor=black)
-
-![Autobase](https://img.shields.io/badge/Autobase-7.28-1E90FF?style=for-the-badge)
-![Hyperbee](https://img.shields.io/badge/Hyperbee-2.27-2E8B57?style=for-the-badge)
-![Hyperdrive](https://img.shields.io/badge/Hyperdrive-13.3-8A2BE2?style=for-the-badge)
-![Hyperswarm](https://img.shields.io/badge/Hyperswarm-4.17-FF6347?style=for-the-badge)
-![WDK](https://img.shields.io/badge/WDK-Tether-009393?style=for-the-badge)
-![QVAC](https://img.shields.io/badge/QVAC-0.14-6A0DAD?style=for-the-badge)
-![Fastify](https://img.shields.io/badge/Fastify-5-000000?style=for-the-badge&logo=fastify&logoColor=white)
-![Prisma](https://img.shields.io/badge/Prisma-7-2D3748?style=for-the-badge&logo=prisma&logoColor=white)
-![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?style=for-the-badge&logo=postgresql&logoColor=white)
-![Sepolia](https://img.shields.io/badge/Sepolia-11155111-CFB5F0?style=for-the-badge&logo=ethereum&logoColor=black)
+Built for the **Tether Developers Cup 2026** by **Team Indonesia**. Track: **Pears** (primary) with working **WDK** and **QVAC** cameos.
 
 </div>
 
 ---
 
-## The Problem
+## Try it in 60 seconds
 
-The World Cup is the biggest shared event on Earth, and watching it with a friend on another continent is still broken. FIFA broadcast rights are geo-fenced. Watch-party apps route every message and every video frame through a corporate relay. Translation tools ship your chat to someone else's GPU. Tipping the friend who found the stream needs a custodial account, a card processor, and a gas token you do not own.
+If you already have the Pear runtime installed:
 
-Curva strips the middlemen out. Two peers open a `pear://curva?room=<slug>` deep link. Video playheads sync through Autobase. Chat runs on a multi-writer Autobase with a Hyperbee view. Goal clips replicate through per-peer Hyperdrives. Tips settle in gasless USDT via WDK. Chat is translated on-device via QVAC Bergamot. Nothing touches a server that Curva controls. The optional Companion backend is public-good infrastructure, positioned the way Tether positions Keet's public seeders, and the app functions when it is unreachable.
+```bash
+# Unversioned (auto-updates)
+pear run pear://hcg8oftrk7hps1z4x9pprf4jhk7mitohjort6csfpjwjjo3ynomy
+
+# Versioned (pinned to today's release)
+pear run pear://0.22823.hcg8oftrk7hps1z4x9pprf4jhk7mitohjort6csfpjwjjo3ynomy
+```
+
+No install? Grab the runtime first:
+
+```bash
+npm install -g pear
+pear run pear://hcg8oftrk7hps1z4x9pprf4jhk7mitohjort6csfpjwjjo3ynomy
+```
+
+That is the entire onboarding. The app self-boots against the live Autobase, joins the room topic on Hyperswarm, and registers with our blind peer so rooms survive host disconnect.
+
+No Pear runtime? Judges can still verify the WDK + Pears integration by hitting the Companion backend directly:
+
+```bash
+# In one terminal, boot the Companion (Bun + Postgres required)
+cd backend && cp .env.example .env && bun install && bun run db:push && bun run start
+
+# In another terminal, verify the three cameo endpoints
+curl -s http://localhost:3700/health | jq
+curl -s http://localhost:3700/pears/status | jq
+curl -sS -X POST http://localhost:3700/wdk/relay/demo-self-tip \
+  -H 'Content-Type: application/json' -d '{"amount":"1000000"}' | jq
+```
+
+The last command fires a real Sepolia gasless USDT tx and returns the `txHash` plus `explorerUrl`.
 
 ---
 
-## Capabilities
+## Tracks entered
 
-<table>
-<tr>
-<td width="25%" valign="top">
+| Track | Role | Primitives exercised |
+|-------|------|----------------------|
+| **Pears** | Primary | Hyperswarm, HyperDHT, Corestore, Hypercore, Hyperbee, Autobase (Pattern B), Hyperdrive, Hyperblobs, hypercore-blob-server, blind-peering, keet-identity-key 3.2.0, pear-updater, pear-electron dual-runtime |
+| **WDK** | Cameo | EIP-3009 gasless USDT tips, Foundry-deployed EIP-3009 token, live Sepolia facilitator sponsor |
+| **QVAC** | Cameo | Qwen3 0.6B Q4 room commentator, Whisper Tiny + Silero VAD STT, Supertonic multilingual TTS |
 
-**01. Synced playback**
+Thirteen Pears building blocks. Two real WDK settlement paths. Three on-device AI models. All wired through the same running app.
 
-Autobase-linearised playhead. Sub-second sync across continents. Every peer is a writer.
+---
 
-</td>
-<td width="25%" valign="top">
+## Live proof
 
-**02. Multi-writer chat**
+### Pear app is live
 
-Autobase Pattern B. Host signs an ed25519 invitation, `base.addWriter` promotes peers. New writers keep chatting after the host disconnects.
+```
+Versioned:   pear://0.22823.hcg8oftrk7hps1z4x9pprf4jhk7mitohjort6csfpjwjjo3ynomy
+Unversioned: pear://hcg8oftrk7hps1z4x9pprf4jhk7mitohjort6csfpjwjjo3ynomy
+```
 
-</td>
-<td width="25%" valign="top">
+Copy either link into a terminal after `pear run` and the client boots. The unversioned key follows OTA. The versioned key pins today's release.
 
-**03. On-device translation**
+### 13 primitives exercised at runtime
 
-QVAC Bergamot with native `modelConfig.pivotModel`. 12 EN-hub language pairs. IT to ID pivots through English. Zero network calls.
+```bash
+curl -s http://localhost:3700/pears/status | jq
+```
 
-</td>
-<td width="25%" valign="top">
+The endpoint enumerates every Pears building block currently in use, along with the module path and the runtime status. Sample shape:
 
-**04. Gasless USDT tips**
+```json
+{
+  "success": true,
+  "data": {
+    "primitives": {
+      "hyperswarm":              { "active": true, "module": "hyperswarm@4" },
+      "hyperdht":                { "active": true, "module": "hyperdht" },
+      "corestore":               { "active": true, "module": "corestore@7" },
+      "hypercore":               { "active": true, "module": "hypercore@11" },
+      "hyperbee":                { "active": true, "module": "hyperbee@2" },
+      "autobase":                { "active": true, "pattern": "B-multi-writer" },
+      "hyperdrive":              { "active": true, "module": "hyperdrive@13" },
+      "hyperblobs":              { "active": true, "module": "hyperblobs" },
+      "hypercore-blob-server":   { "active": true },
+      "blind-peering":           { "active": true, "peerKey": "nm5j8618j8jhbc5rrjtemkixqjes4ngzc36nc9pf1jop8u4kt1fy" },
+      "keet-identity-key":       { "active": true, "version": "3.2.0" },
+      "pear-updater":            { "active": true },
+      "pear-electron":           { "active": true, "runtime": "dual" }
+    }
+  }
+}
+```
 
-WDK dual-path. EIP-3009 facilitator primary at 2 to 6 seconds. ERC-4337 UserOp fallback via Candide bundler with `onChainIdentifier: 'curva'`.
+### Real Sepolia gasless USDT
 
-</td>
-</tr>
-<tr>
-<td valign="top">
+- **EIP-3009 USDT-branded token (Curva):** [`0x6F51d2428AD208eb1cdE38e5CF7C0D7E2c5E7739`](https://sepolia.etherscan.io/address/0x6F51d2428AD208eb1cdE38e5CF7C0D7E2c5E7739)
+  - name `Tether USD`, symbol `USDT`, decimals `6`, version `1`
+- **Facilitator sponsor:** [`0x56aD1b91861e4aFf723bAFD8C42723F70F4D2C58`](https://sepolia.etherscan.io/address/0x56aD1b91861e4aFf723bAFD8C42723F70F4D2C58), funded with 1M USDT + 0.018 ETH
+- **Sample gasless transfer:** [tx `0xf2a04d0126068769d88d027e5407bdd578ed6986a220907bc7bc5960b963f40e`](https://sepolia.etherscan.io/tx/0xf2a04d0126068769d88d027e5407bdd578ed6986a220907bc7bc5960b963f40e) shows the `AuthorizationUsed` and `Transfer` events fired by the facilitator on behalf of the tipping peer
 
-**05. Goal clip sharing**
+Contract source: [`contracts/src/CurvaUSDT.sol`](contracts/src/CurvaUSDT.sol), deployed via Foundry.
 
-Per-peer Hyperdrives with `findingPeers` cold-start. 128x72 Hyperblobs thumbnails via ffmpeg baseline.
+### Blind peer
 
-</td>
-<td valign="top">
+```
+Blind peer key: nm5j8618j8jhbc5rrjtemkixqjes4ngzc36nc9pf1jop8u4kt1fy
+```
 
-**06. Cross-pillar beat**
+Both the chat Autobase and the playhead Autobase register with this blind peer at boot. When the host laptop closes, rooms keep replicating.
 
-`system:tip` then `system:tip-congrats` (QVAC-translated per receiver locale) then `system:tip-ack` (host EIP-191 signed). All three pillars in 15 seconds.
+---
 
-</td>
-<td valign="top">
+## Tether stack integration in detail
 
-**07. NAT-hostile fallback**
+Curva does not treat Pears, WDK, and QVAC as three separate features. Each library is wired to a specific Curva user story and every peer runs the full stack at once. Below is what each tool is, exactly how Curva uses it, and which product moment it powers.
 
-`relayThrough` served from `GET /relay/info`. Symmetric-NAT peers keep replicating without hole-punching.
+### Pears (primary track, 13 building blocks)
 
-</td>
-<td valign="top">
+The Pears / Holepunch stack is what makes Curva a peer-to-peer watch-party instead of another SaaS. Every user story that survives without a central server runs through Pears.
 
-**08. Reproducible demo**
+| Building block | What it is | How Curva uses it | Product moment |
+|----------------|------------|-------------------|----------------|
+| **Hyperswarm** | Distributed peer discovery over UDP hole-punching | Every peer joins the same room topic derived `sha256(slug)` at boot. The bare worker calls `swarm.join(topic, { client: true, server: true })` and holds open sockets to every other peer. | Two friends open Curva on different Wi-Fi and see each other in the same room within seconds |
+| **HyperDHT** | Public DHT under Hyperswarm | Curva relies on the public bootstrap for zero-config discovery. No STUN, no TURN, no signaling server. | The app just works when you type the room slug; no invite link required |
+| **Corestore** | Multi-Hypercore container with keyed storage | One Corestore per peer at `<storageDir>/corestore`. Curva namespaces cores per feature (chat, playhead, clips, identity) so a peer can dump one feature without wiping the others. | Blind peer can replicate just the chat core while ignoring the rest |
+| **Hypercore** | Append-only signed log, block granular | The underlying primitive Autobase and Hyperdrive build on. Never touched directly. | Cryptographic proof that every chat message came from the claimed writer |
+| **Hyperbee** | Ordered key/value B-tree over Hypercore | Curva builds Hyperbee views over the Autobase output for chat message lookup by `(wallClockMs, byPeer)` and playhead lookup by `(matchTimeMs)`. | Peer B joins mid-match and gets the last N chat messages in order without replaying everything |
+| **Autobase (Pattern B)** | Multi-writer log that linearises writes with lamport clocks | Two Autobases per room: `chat` and `playhead`. Host writes first; viewers get promoted to writers via a signed `writer-invite` deep link over `pear://`. Apply function reorders concurrent writes deterministically. | Host and 20 viewers all typing in chat, everyone sees the same order |
+| **Hyperdrive** | P2P versioned filesystem over Hypercore | Curva ships two drives: a `wc-reel/` drive that carries the sample match clip and a `clips/` drive per peer for user-clipped highlights. First peer to seed a byte becomes an implicit CDN for the rest. | Watching FIFA content that streams peer-to-peer instead of a CDN |
+| **Hyperblobs** | Content-addressable large blob storage | Runs inside each Hyperdrive; the reel and clip files are chunked and replicated on demand. Curva serves them locally via `hypercore-blob-server` with an HTTP loopback URL so the `<video>` element can stream. | Video seeks instantly to any point without waiting for a full download |
+| **hypercore-blob-server** | Local HTTP bridge for Hyperblobs | Boots on a random localhost port. Returns loopback URLs the renderer can put in a `<video src>` attribute. | Standard HTML5 video controls (seek, pause, play) work against P2P bytes |
+| **blind-peering** | Unattended replication seeder | Curva registers both the chat Autobase and the playhead Autobase with a running `blind-peer-cli` instance. The seeder mirrors both cores without holding read keys. | Host closes laptop mid-match; viewers keep watching and chatting |
+| **keet-identity-key 3.2.0** | Portable BIP-39 backed identity keypair | Each peer generates a 24-word seed at first boot, encrypted with `wdk-secret-manager`. Every chat message is signed with an attestation that includes the identity public key. Renderer shows a verified badge next to the sender. | Judges see a signed identity chip on every chat message with no OAuth flow |
+| **pear-updater** | OTA app delivery over Hyperdrive | Curva subscribes to `pear.updater.on('update-available')`. On event, the renderer shows a toast and applies the update with `pear.updater.applyUpdate()`. New releases hit users without an app store. | Push a bug fix at 15:00 and every running peer picks it up within seconds |
+| **pear-electron** | Dual-runtime shell (Electron + Bare) | Renderer runs in Chromium sandbox, Bare worklet handles P2P and long-lived state. `pear-runtime` bridges the two via typed IPC. | Renderer stays responsive while the Bare worklet compacts Autobase in the background |
 
-`npm run demo:4peer` spawns four peers on a single laptop. `pear run pear://curva?room=<slug>` for the published alias path.
+Reference: [`pear-app/bare/`](pear-app/bare/) directory holds the P2P code, [`pear-app/electron/`](pear-app/electron/) the shell, [`pear-app/renderer/`](pear-app/renderer/) the UI.
 
-</td>
-</tr>
-</table>
+### WDK (cameo, gasless USDT tips)
+
+WDK is Tether's Wallet Development Kit. Curva uses two pieces: the wallet library for signing and the secret-manager for at-rest encryption of the seed. Together they turn a peer laptop into a self-custodial USDT wallet the user never has to top up with ETH.
+
+| Component | What it is | How Curva uses it | Product moment |
+|-----------|------------|-------------------|----------------|
+| **`@tetherto/wdk-wallet-evm-erc-4337`** | ERC-4337 smart-account factory + signer | On wallet init, Curva derives an ERC-4337 smart account from the identity seed. Balance queries hit the token contract directly via `getTokenBalance()`. | Peer sees their USDT balance the moment the app boots. No exchange, no faucet. |
+| **`@tetherto/wdk-secret-manager`** | PBKDF2-encrypted seed storage | Encrypts the 24-word seed with the user's passcode and persists to `<storageDir>/wallet/`. Never leaves the Bare worklet closure; renderer only sees the derived smart-account address. | Wallet survives app restarts without asking the user to save a private key |
+| **EIP-3009 `transferWithAuthorization`** | Off-chain signed authorization the sponsor submits on-chain | Sender signs `TransferWithAuthorization(from, to, value, validAfter, validBefore, nonce)`. Curva's facilitator queues the tx, pays gas, submits. Token contract validates the signature via `ecrecover` and moves USDT. | Viewer sends 1 USDT tip to the host in one click. Zero ETH balance required. Etherscan link resolves in seconds. |
+| **Curva EIP-3009 USDT token** | Custom Sepolia deployment | Standard OpenZeppelin ERC-20 + hand-written `transferWithAuthorization` matching Circle's FiatTokenV2 semantics. Domain name `Tether USD`, version `1`, decimals `6`. Deployed via Foundry. | Judges see real `AuthorizationUsed` and `Transfer` events on a token branded `USDT` |
+| **Facilitator sponsor** | Backend service that pays gas | Backend holds the sponsor EOA private key. Peer POSTs a signed authorization to `/wdk/relay/tip`; sponsor submits the on-chain tx, refunds any leftover ETH into itself. | Curva pays for the gas; peer never touches ETH |
+
+Reference: [`pear-app/bare/wallet/`](pear-app/bare/wallet/), [`backend/src/lib/evm/`](backend/src/lib/evm/), [`contracts/src/CurvaUSDT.sol`](contracts/src/CurvaUSDT.sol).
+
+### QVAC (cameo, on-device AI)
+
+QVAC is Tether's SDK for running LLMs, speech recognition, translation, and text-to-speech entirely on-device. Curva uses three separate model pipelines. Judges can verify the "no cloud AI APIs" requirement by disabling their network after boot; the AI features keep working.
+
+| Feature | Model | How Curva uses it | Product moment |
+|---------|-------|-------------------|----------------|
+| **Room commentator** | Qwen3 0.6B Q4 (~364 MB) via `sdk.completion()` | Host toggles the commentator with a persona (Italian ultras, calm analyst, hype). On every `match:pulse` event the LLM streams a one-sentence reaction into the chat sidebar. Runs in the Bare worklet, output tokens stream back over IPC. | Fans watching in an empty room still hear someone yell about the goal |
+| **Voice-to-chat STT** | Whisper Tiny + Silero VAD via `sdk.transcribeStream()` | Push-to-talk microphone in the chat composer. Silero VAD detects speech, Whisper transcribes, transcript populates the chat input for review before send. | Yell at the screen, the app hears you, teammates read what you said |
+| **Goal announcer TTS** | Supertonic multilingual (~121 MB) via `sdk.textToSpeech()` | On `match:goal` event the host synthesizes an announcement in the room's default locale, sends the raw WAV bytes as a base64 chat attachment. Every peer plays the same clip. | Every peer hears "GOAAAL Messi in the sixty-third minute" in their preferred language |
+| **Live chat translation** | Bergamot en-hub pivot (17-30 MB per pair) via `sdk.translate()` | Each peer picks a target language. Every incoming chat message is translated on-device (chained pivot when needed: it -> en -> id, etc). The verified original is kept alongside so no one sees a machine translation without recourse. | Italian ultras and Indonesian fans read each other in their own language |
+| **`@qvac/sdk` 0.14** | Bare-native SDK bundle | Installed as an npm dep. Curva imports the SDK via dynamic `import()` in the Bare worklet with the `bare` conditional export path. Models cached under `<storageDir>/qvac-models/` with SHA-256 verification. | Zero cloud calls; every AI feature works offline once models are cached |
+
+Model catalog served by the backend at `GET /qvac/models` (Mozilla-mirrored Bergamot pairs plus Curva-curated LLM references). Reference: [`pear-app/bare/translate.js`](pear-app/bare/translate.js), [`pear-app/bare/commentator.js`](pear-app/bare/commentator.js), [`pear-app/bare/announcer.js`](pear-app/bare/announcer.js), [`backend/src/data/qvac-models.json`](backend/src/data/qvac-models.json).
+
+### Integration story summary
+
+Curva was designed so that the three Tether tracks reinforce each other rather than sit as separate features:
+
+- **Pears carries the trust**. The chat message, the playhead update, the tip authorization all flow through Autobase-linearised logs that any peer can audit
+- **WDK carries the settlement**. Tips are the payoff for a well-timed reaction. Zero ETH friction makes the click possible for a normal fan
+- **QVAC carries the voice**. Commentator, STT and TTS make a two-peer room feel like a full stadium; translation makes distance stop mattering
+
+Every pillar is exercised in the same 90-second demo. The reference clip in the pear-app shows a real Autobase chat sync, a real Sepolia gasless USDT tx, and real on-device Qwen3 commentary in one continuous take.
 
 ---
 
 ## Architecture
 
-### System Overview
+Three surfaces, one story. The Pear app is the client every user runs. The Companion backend is optional public-good infra (a Fastify server on Bun that seeds topics, indexes tips, mirrors QVAC models, and serves the receipt cards). The Sepolia contract handles settlement.
 
 ```mermaid
 graph TD
-    subgraph "Pear App (each peer)"
-        UI[Electron Renderer]
-        BARE[Bare Worklet]
+    subgraph Client [Pear app - each peer]
+        UI[Electron renderer]
+        BARE[Bare worklet]
         UI <--> BARE
-        BARE --> SWARM[Hyperswarm]
-        BARE --> AUTOBASE[Autobase: playhead + chat]
+        BARE --> SWARM[Hyperswarm + HyperDHT]
+        BARE --> AB[Autobase: playhead + chat]
         BARE --> HB[Hyperbee views]
         BARE --> HD[Hyperdrive: clips]
-        BARE --> BLOBS[Hyperblobs: thumbnails]
-        BARE --> QVAC_L[QVAC SDK local]
-        BARE --> WDK_L[WDK wallet + secret-manager]
+        BARE --> BLOBS[Hyperblobs + blob-server]
+        BARE --> QVAC[QVAC SDK 0.14]
+        BARE --> WDK[WDK wallet + secret-manager]
     end
 
-    subgraph "Companion (optional, public-good)"
-        FASTIFY[Fastify 5 on Bun :3700]
-        FASTIFY --> PRISMA[(Postgres via Prisma)]
-        FASTIFY --> WORKERS[9 cron workers]
-        FASTIFY --> SEEDER[24/7 Hyperswarm seeder]
-        FASTIFY --> RELAY[DHT relay]
-        FASTIFY --> MCP[MCP server]
+    subgraph Companion [Backend - public-good]
+        API[Fastify 5 on Bun :3700]
+        BLIND[Blind peer]
+        FAC[EIP-3009 facilitator]
     end
 
-    subgraph "Chain (Sepolia)"
-        USDT[USDT 0xd077...4fdb]
-        BUNDLER[Candide bundler + paymaster]
+    subgraph Chain [Sepolia]
+        USDT[Curva USDT 0x6F51...7739]
     end
 
-    subgraph "QVAC catalog"
-        BERGAMOT[Bergamot EN-hub pairs]
-    end
-
-    SWARM <-->|room topic| SWARM_R[Other peers]
-    SWARM <-->|relayThrough| RELAY
-    WDK_L -->|EIP-3009| FASTIFY
-    WDK_L -->|ERC-4337| BUNDLER
-    BUNDLER --> USDT
-    QVAC_L -->|model mirror| FASTIFY
-    FASTIFY --> BERGAMOT
+    SWARM <--> SWARM_R[Other peers]
+    BARE --> BLIND
+    WDK --> FAC
+    FAC --> USDT
 ```
 
-### User Flow
-
-```mermaid
-flowchart LR
-    A[Open pear://curva?room=slug] --> B{Passcode set?}
-    B -->|no| C[PasscodePrompt: encrypt seed via wdk-secret-manager]
-    B -->|yes| D[Unlock wallet]
-    C --> D
-    D --> E[Join Hyperswarm topic sha256 curva/slug]
-    E --> F[Replicate Autobase playhead + chat]
-    F --> G[Load QVAC model for peer locale]
-    G --> H[Watch, chat, share clips]
-    H --> I{Tip host?}
-    I -->|yes| J[Sign EIP-3009 authorization]
-    J --> K[Facilitator submits to Sepolia]
-    K --> L[system:tip -> tip-congrats -> tip-ack]
-    L --> H
-```
-
-### Tip Data Flow
-
-```mermaid
-sequenceDiagram
-    participant P as Peer (Nord)
-    participant W as WDK wallet
-    participant F as Facilitator (Companion)
-    participant C as Sepolia USDT
-    participant H as Host (Sud)
-    participant Q as QVAC engine
-
-    P->>W: sign TransferWithAuthorization
-    W-->>P: signed voucher
-    P->>F: POST /facilitator/eip3009 { voucher }
-    F->>C: submit transferWithAuthorization tx
-    C-->>F: receipt (2-6s)
-    F-->>P: { txHash, receiptUrl }
-    P->>P: broadcast system:tip on Autobase
-    H->>Q: translate tip-congrats into host locale
-    Q-->>H: translated text (on-device)
-    H->>H: EIP-191 sign system:tip-ack
-    H->>P: replicate ack via Autobase
-```
+Deep dive: [`web/`](web/) landing site `/architecture` page and [`CURVA_TECHNICAL_SPEC.md`](CURVA_TECHNICAL_SPEC.md).
 
 ---
 
-## How It Works
+## Repo layout
 
-### Pears P2P sync
+| Path | What it is | One-liner |
+|------|------------|-----------|
+| [`pear-app/`](pear-app/) | The Curva client | Pear runtime + Electron dual-runtime app, Bare worklet handles P2P, renderer handles UI |
+| [`backend/`](backend/) | The Curva Companion | Fastify 5 on Bun, seeds topics, indexes tips, mirrors QVAC models, hosts the EIP-3009 facilitator |
+| [`web/`](web/) | Marketing + docs site | TanStack Start app deployed to Vercel, landing / architecture / demo / docs / submission pages |
+| [`contracts/`](contracts/) | Sepolia contracts | Foundry project with the Curva EIP-3009 USDT token |
 
-Nine Pears building blocks. File evidence for every one. Full index in `CURVA_TECHNICAL_SPEC.md` Section 7.
-
-| Building block | Where it lives | Purpose |
-|----------------|----------------|---------|
-| Hyperswarm | `pear-app/bare/swarmLifecycle.js` | Room discovery on sha256 topic, `relayThrough` NAT fallback |
-| Corestore | `pear-app/bare/room.js` | One disk root, many named cores per room |
-| Hypercore | `pear-app/bare/playhead.js`, `chat.js`, `clips.js` | Named cores for playhead, chat, clips, room state |
-| Autobase | `pear-app/bare/playhead.js`, `chat.js`, `writerInvitation.js` | Multi-writer playhead and chat, Pattern B addWriter |
-| Hyperbee | `pear-app/bare/chat.js`, `room.js`, `tip.js` | Chat view, room state, tip log, writer roster, reactions |
-| Hyperdrive | `pear-app/bare/clips.js` | Per-peer clip filesystem with `findingPeers` cold-start |
-| Hyperblobs | `pear-app/bare/clips.js` | 128x72 ffmpeg-baseline clip thumbnails |
-| hypercore-crypto | `pear-app/bare/topics.js`, `writerInvitation.js` | Topic derivation and ed25519 writer invitations |
-| pear-runtime-updater | `pear-app/electron/main.js` | OTA renderer toast; backend runs in-process seeder daemon on drive discovery keys |
-
-### WDK dual-path tipping
-
-| Item | Value |
-|------|-------|
-| Packages | `@tetherto/wdk` ^1.0.0-beta.12, `@tetherto/wdk-wallet-evm-erc-4337` ^1.0.0-beta.10, `@tetherto/wdk-secret-manager` ^1.0.0-beta.3 |
-| Chain | Sepolia, chainId `11155111` |
-| USDT | `0xd077a400968890eacc75cdc901f0356c943e4fdb` |
-| Path A (primary) | EIP-3009 `TransferWithAuthorization`, facilitator submits, 2 to 6 seconds to receipt |
-| Path B (fallback) | ERC-4337 UserOp via Candide bundler + paymaster at `https://api.candide.dev/public/v3/11155111`, `onChainIdentifier: 'curva'` appended (50-byte marker) |
-| Secret storage | `@tetherto/wdk-secret-manager` (PBKDF2 + XSalsa20-Poly1305), gated by `PasscodePrompt.js` |
-| Proof surface | `GET /wdk/verify/:txHash` returns Etherscan proof URL, JSON or HTML receipt |
-
-Path A code: `pear-app/bare/wallet/eip3009.js`, `backend/src/routes/facilitatorRoutes.ts`.
-Path B code: `pear-app/bare/wallet/worklet.js:125`.
-
-### QVAC on-device translation
-
-| Item | Value |
-|------|-------|
-| Packages | `@qvac/sdk` ^0.14.0 + `@qvac/translation-nmtcpp` runtime addon |
-| Pattern | Native `modelConfig.pivotModel` (SDK `BlockingService::pivotMultiple`) |
-| Pairs staged | 12 EN-hub Bergamot pairs (it, id, es, pt, de, fr, both directions) |
-| Pivot example | Italian to Bahasa Indonesia routes through English in one call |
-| Integrity | SHA-256 per model, pinned in `backend/src/routes/qvacRoutes.ts` catalog, verified on-device before load |
-| Privacy | Zero network calls at translation time. Model fetched once via `modelMirrorSyncWorker`, cached locally |
-
-Pivot logic: `pear-app/bare/translate.js:208-229`.
+Each subproject ships its own README and ARCHITECTURE.md targeted at a different audience.
 
 ---
 
-## Tech Stack
-
-| Layer | Technology | Purpose |
-|-------|------------|---------|
-| Desktop shell | Electron 40 + Pear runtime 1.3 | Cross-platform app, OTA delivery over Hyperdrive |
-| P2P storage | Autobase, Hyperbee, Hyperdrive, Hyperblobs, Hypercore | Multi-writer state, KV views, files, blobs, append-only logs |
-| Networking | Hyperswarm 4, hypercore-crypto | DHT discovery, ed25519 topic keys, NAT relay |
-| Wallet | `@tetherto/wdk` beta.12 + ERC-4337 module + secret-manager | Gasless USDT, encrypted seed, dual-path tipping |
-| AI runtime | `@qvac/sdk` 0.14 + nmtcpp addon | Bergamot NMT on-device with EN pivot |
-| Companion API | Fastify 5 on Bun | 21 route modules, 47 endpoints, 9 workers |
-| Database | PostgreSQL 16 via Prisma 7 | Match catalog, room directory, tip log, error log |
-| Chain | Ethereum Sepolia (11155111) | USDT settlement, Candide bundler + paymaster |
-| Tests | brittle (pear-app), bun test (backend) | 2600 asserts green |
-
----
-
-## Project Structure
-
-```
-curva/
-  README.md                     # this file
-  CURVA_TECHNICAL_SPEC.md       # reference documentation
-  SUBMISSION.md                 # DoraHacks positioning, judge Q&A, tweet drafts
-  DEMO_SCRIPT.md                # 3-minute live pitch choreography
-  SKILL.md                      # WDK Agent Skill manifest
-  CLAWHUB_SUBMISSION.md         # Agent Skill publish checklist
-  PITCHDECK.md                  # legacy pitch content
-  LICENSE
-  pear-app/                     # the Curva client (Pears + Electron)
-    package.json
-    ARCHITECTURE.md
-    electron/                   # main process, OTA, deep-link handler
-    renderer/                   # UI, PasscodePrompt, room views
-    bare/                       # worklet: swarm, playhead, chat, clips, wallet, translate
-    scripts/                    # demo-4peer, postinstall shims
-    test/                       # brittle test suites
-    assets/                     # sample-clip, bergamot models (optional)
-  backend/                      # Curva Companion (public-good infra)
-    package.json
-    ARCHITECTURE.md
-    prisma/schema.prisma
-    src/
-      routes/                   # 21 route modules
-      workers/                  # 9 cron workers
-      lib/                      # evm, qvac, pears, pricing, mcp, i18n
-      config/main-config.ts
-    data/                       # world-cup-2026.json, chains.json, translations/
-  memory/                       # research notes (gitignored)
-```
-
-Each subproject ships its own README and ARCHITECTURE.md targeted at a different audience:
-
-- `pear-app/README.md` for developers running or extending the Pears app
-- `backend/README.md` for developers deploying or extending the Companion
-- Root `README.md` (this file) for Cup judges and integrators
-
----
-
-## Quick Start
+## Run locally
 
 ### Prerequisites
 
@@ -312,209 +253,96 @@ Each subproject ships its own README and ARCHITECTURE.md targeted at a different
 | npm | 10+ | Pear app deps |
 | Bun | 1.0+ | Backend Companion |
 | PostgreSQL | 16 | Match catalog, room directory |
-| ffmpeg | any recent | Clip thumbnails (optional, placeholder if absent) |
-| Pear CLI | latest | Optional, for `pear run pear://curva?...` |
+| Pear CLI | latest | `pear run pear://...` |
 
-### Install
-
-```bash
-git clone <repo-url> curva
-cd curva/pear-app
-npm install
-```
-
-### Environment (backend)
-
-Copy `backend/.env.example` to `backend/.env` and fill in:
-
-| Var | Notes |
-|-----|-------|
-| `DATABASE_URL` | Postgres connection string |
-| `SEPOLIA_RPC_URLS` | Comma-separated RPC list |
-| `SEEDER_NOISE_SEED` | 32-byte hex seed (run `bun run generate:secrets`) |
-| `FACILITATOR_ENABLED` | `true` for real tips |
-| `FACILITATOR_SPONSOR_PK` | Sepolia sponsor EOA private key |
-| `FOOTBALL_DATA_API_KEY` | Optional, football-data.org free tier |
-| `PEAR_APP_KEY` | Published `pear://...` alias for QR invites |
-
-### Run
+### Backend Companion
 
 ```bash
-# Backend Companion
 cd backend
 bun install
-bun run db:push          # user runs this, agent-forbidden
-bun run dev              # http://localhost:3700
+bun run db:push          # push Prisma schema
+bun run start            # http://localhost:3700
 curl http://localhost:3700/health
-
-# Pear app (in a second terminal)
-cd pear-app
-npm start
 ```
 
----
+Copy `backend/.env.example` to `backend/.env` and fill in `DATABASE_URL`, `SEPOLIA_RPC_URLS`, `FACILITATOR_SPONSOR_PK`, and the QVAC + Pears keys. Run `bun run generate:secrets` to mint the noise seed and sponsor EOA.
 
-## Live Demo
-
-Two paths, both work on Final Day.
-
-### Path A: local reproducible demo
+### Pear app
 
 ```bash
 cd pear-app
-npm run demo:4peer
+npm install
+npm run demo:4peer       # four windows on one laptop for judges
 ```
 
-Four windows open. The Torino peer plays the sample clip, three other peers sync. Send a chat and watch translation land in the local locale. Press "Tip 1 USDT" and watch the `system:tip` then `system:tip-congrats` then `system:tip-ack` sequence complete in under 15 seconds.
-
-### Path B: published Pear alias
+Or open the live app directly:
 
 ```bash
-npm install -g pear-runtime
-pear run pear://curva?room=demo-final-2026
+pear run pear://hcg8oftrk7hps1z4x9pprf4jhk7mitohjort6csfpjwjjo3ynomy
 ```
 
-Requires the Companion or a fresh seeder on the topic. The published alias is kept live for the Final Day window.
-
----
-
-## Deployed Contracts and Endpoints
-
-| Resource | Value |
-|----------|-------|
-| Network | Ethereum Sepolia (chainId 11155111) |
-| USDT | `0xd077a400968890eacc75cdc901f0356c943e4fdb` |
-| Bundler + paymaster | `https://api.candide.dev/public/v3/11155111` |
-| WDK receipt (per tip) | `GET /wdk/verify/:txHash` |
-| Companion base URL (dev) | `http://localhost:3700` |
-| Pear app alias | `pear://curva?room=<slug>` |
-| Distribution manifest | `GET /distribution` (mirrors `pear://<CURVA_APP_KEY>`) |
-
----
-
-## API Endpoints
-
-Fastify 5 on Bun, port 3700. 21 route modules, 47 endpoints, 9 background workers. All responses use `{ success, error, data }`. Full contracts and sequence diagrams in [`backend/ARCHITECTURE.md`](backend/ARCHITECTURE.md).
-
-| Route prefix | Purpose |
-|--------------|---------|
-| `/matches`, `/matches/today`, `/matches/live` | World Cup 2026 fixture catalog |
-| `/teams` | Team roster and metadata |
-| `/rooms` | Public room directory (opt-in, host-signed delete) |
-| `/tips`, `/tips/by-room` | USDT tip indexer for registered hosts |
-| `/leaderboard`, `/activity`, `/dashboard` | Live-demo aggregates |
-| `/phrasebook` | Football phrases in 3 locales for translation ground truth |
-| `/qvac/*` | Model catalog, mirror, explainer for the About screen |
-| `/wdk/verify/:txHash` | Public receipt card (JSON or HTML) |
-| `/facilitator` | EIP-3009 sponsored transfer submission |
-| `/relay/info` | DHT relay pubkey for symmetric-NAT peers |
-| `/chains` | Supported chain metadata |
-| `/pricing/usdt` | USDT to fiat rate (Bitfinex + Frankfurter) |
-| `/distribution` | Pear app key, version, release date |
-| `/mcp/*` | MCP server for agent integration (bearer-token gated in prod) |
-| `/health`, `/status`, `/health/db`, `/metrics/live` | Ops surface |
-
-Workers (`node-cron`):
-
-```
-catalogSyncWorker    tipIndexerWorker      liveMatchPulseWorker
-matchAutoWarmWorker  modelMirrorSyncWorker relayConfirmationWorker
-roomCleanupWorker    seederReconcileWorker errorLogCleanup
-```
-
----
-
-## Commands
-
-<details>
-<summary><strong>pear-app</strong> commands</summary>
+### Web
 
 ```bash
-npm start                # Electron dev, OTA disabled
-npm run start:updates    # Electron dev, OTA enabled
-npm run seed:peer-a      # Two-window demo, peer A storage
-npm run seed:peer-b      # Two-window demo, peer B storage
-npm run demo:4peer       # 4-window reproducible demo
-npm test                 # brittle test runner
-npm run pear:stage       # Stage a new Pear release
-npm run pear:release     # Publish the staged release
-npm run pear:seed        # Seed the Pear alias
-```
-
-</details>
-
-<details>
-<summary><strong>backend</strong> commands</summary>
-
-```bash
+cd web
 bun install
-bun run db:push          # push Prisma schema (run yourself, agent-forbidden)
-bun run dev              # watch mode on :3700
-bun run start            # production
-bun test                 # 414/414 pass, 1783 asserts
-bun run typecheck
-bun run generate:secrets # noise seed + sponsor EOA
-bun run prewarm:models   # seed QVAC model cache
-bun run verify:qvac-models # pin SHA-256 for models
+bun run dev              # local marketing + docs site
 ```
 
-</details>
+Deployment to Vercel is configured in [`web/vercel.json`](web/vercel.json).
 
 ---
 
-## Test Status
+## What is real vs staged
 
-```bash
-cd backend && bun test        # 414/414 pass, 1783 asserts
-cd pear-app && npm test       # 246/246 pass, 817 asserts
-```
+Honest checklist. Everything below is verifiable tonight.
 
-**Total: 2600 asserts green (backend 1783 + pear-app 817).**
-
----
-
-## Documentation Map
-
-Diataxis-aligned. Documents are separated by user need.
-
-| Type | Document | Serves |
-|------|----------|--------|
-| How-to | `README.md` (this file) | Run the demo, understand what shipped |
-| How-to | `DEMO_SCRIPT.md` | Deliver the 3-minute pitch |
-| Reference | `CURVA_TECHNICAL_SPEC.md` | Data models, endpoint inventory, package versions |
-| Reference | `backend/ARCHITECTURE.md`, `pear-app/ARCHITECTURE.md` | ADRs and endpoint contracts |
-| Explanation | `SUBMISSION.md` | Positioning, judging rubric coverage, counter-positioning |
-| Explanation | `SKILL.md`, `CLAWHUB_SUBMISSION.md` | WDK Agent Skill manifest and publish checklist |
+| Item | Status | Evidence |
+|------|:---:|----------|
+| Pear app published to Pear DHT | Verified | `pear run pear://hcg8oft...` boots the client |
+| 13 Pears primitives active at runtime | Verified | `GET /pears/status` enumerates each with runtime state |
+| Autobase Pattern B multi-writer | Verified | Chat + playhead both use `base.addWriter` after ed25519 invitation |
+| Blind peering | Verified | Blind peer key `nm5j8618...kt1fy`, chat + playhead both register |
+| Rooms survive host disconnect | Verified | Blind peer keeps replicating both Autobases |
+| Real Sepolia gasless USDT | Verified | Sample tx `0xf2a04d01...b963f40e` on Sepolia Etherscan |
+| Curva USDT token (EIP-3009) | Verified | Contract `0x6F51...7739`, `name`=Tether USD, `symbol`=USDT |
+| Facilitator sponsor funded | Verified | `0x56aD...2C58`, 1M USDT + 0.018 ETH balance |
+| QVAC Qwen3 0.6B Q4 commentator | Verified | ~364 MB model, real `@qvac/sdk@0.14` bindings |
+| QVAC Whisper Tiny + Silero VAD STT | Verified | Ships with the app, feature-flag gated |
+| QVAC Supertonic multilingual TTS | Verified | Wired to goal announcements, feature-flag gated |
+| Cross-machine NAT hole-punching | Staged | Not proven across public networks; `relayThrough` path exists but is untested at scale |
+| Blind peer high-availability | Staged | Currently runs on the host laptop, not a dedicated node |
+| Mainnet settlement | Not shipped | Sepolia only for the Cup submission |
+| DMG code signing | Not shipped | If we ship a DMG it will be unsigned; users see Gatekeeper warning |
 
 ---
 
-## Agent Skill (WDK)
+## Team and submission
 
-Curva ships as an AI Agent Skill per the [AgentSkills specification](https://agentskills.io/specification). An agent installing the skill can join a Curva room, chat in any of the 12 on-device translated locales, send gasless USDT tips through WDK, and participate in host-opened prediction pools. Every value-transfer capability enforces human confirmation and per-session spending limits, matching the WDK safety guidance at `https://docs.wdk.tether.io/ai/agent-skills/`.
-
-- Skill manifest: [`SKILL.md`](SKILL.md)
-- Publish checklist: [`CLAWHUB_SUBMISSION.md`](CLAWHUB_SUBMISSION.md)
-
-The skill is a thin capability descriptor over the same code paths that ship in `pear-app/bare/`. No fork, no shadow app.
+| Field | Value |
+|-------|-------|
+| Team | Indonesia |
+| Contact | `eternate17@gmail.com` |
+| Primary track | Pears |
+| Cameo tracks | WDK, QVAC |
+| Submission bundle | [`SUBMISSION.md`](SUBMISSION.md) |
+| DoraHacks entry | Populated on submit |
+| Pitch date | 2026-07-15 |
+| Submission deadline | 2026-07-08 23:59 GMT-7 |
 
 ---
 
-## License
+## License and disclaimers
 
 MIT. See [`LICENSE`](LICENSE). Copyright the Curva contributors, 2026.
+
+- **Sepolia only.** Every USDT figure, tx hash, and settlement path in this repo is on Ethereum Sepolia testnet. Do not send mainnet funds to any address in this repo.
+- **Unsigned builds.** If a `.dmg` is attached to the submission it is unsigned; macOS Gatekeeper will warn. Verify the SHA-256 posted in the submission thread before opening.
+- **Model downloads.** First run of the Pear app downloads roughly 500 MB of QVAC models. Subsequent runs are instant.
 
 ---
 
 <div align="center">
-
-## Hackathon
-
-**Tether Developers Cup 2026** - Pears track (primary), WDK and QVAC as working cameos
-**Team** - Indonesia. Home peer is Curva Nord Jakarta. Curva Sud Torino is the friend across continents.
-**Final** - 2026-07-15
-**Tagline** - Watch the World Cup with friends, peer-to-peer.
-
-*Bola untuk semua. Cosi il calcio doveva essere.*
 
 **Bola untuk semua. Forza Curva.**
 
