@@ -6,7 +6,7 @@
 
 A fully P2P watch-party desktop app. Pears (Holepunch) is the whole distribution. No streaming platform, no chat server, no cloud translator, no custodian.
 
-[Why Curva](#why-curva) · [Capabilities](#capabilities) · [Architecture](#architecture) · [How it works](#how-it-works) · [Quick start](#quick-start) · [Publishing](#publishing) · [Testing](#testing)
+[Judge quick-start](#judge-quick-start) · [Why Curva](#why-curva) · [Capabilities](#capabilities) · [Architecture](#architecture) · [How it works](#how-it-works) · [Quick start](#quick-start) · [Publishing](#publishing) · [Testing](#testing)
 
 ![Pears](https://img.shields.io/badge/Pears-Holepunch-000000?style=flat-square)
 ![Bare](https://img.shields.io/badge/Bare-runtime-181717?style=flat-square)
@@ -27,6 +27,38 @@ A fully P2P watch-party desktop app. Pears (Holepunch) is the whole distribution
 ![brittle](https://img.shields.io/badge/brittle-4.0-EE6A55?style=flat-square)
 
 </div>
+
+---
+
+## Judge quick-start
+
+**Zero-install path.** If the Pear runtime is installed, one command boots the live app:
+
+```sh
+npm i -g pear
+pear run pear://hcg8oftrk7hps1z4x9pprf4jhk7mitohjort6csfpjwjjo3ynomy
+```
+
+**From source (Node 20+, macOS Apple Silicon / Linux / Windows).**
+
+```sh
+cd pear-app
+npm install
+npm run start
+```
+
+`npm run start` launches Electron with OTA updates disabled so local iteration is stable.
+
+**Four-peer split-screen demo (the same rig used in the video).**
+
+```sh
+CURVA_DEMO=4 npm run demo:4peer     # 2x2 grid, four independent peers on one machine
+CURVA_DEMO=2 npm run demo:4peer     # two peers side-by-side
+```
+
+Each peer gets its own storage root under `.demo-store/{a,b,c,d}` so they behave as fully independent Curva instances. Add `-- --clean` to wipe stores before booting.
+
+**Prebuilt installer.** If a `.dmg` / `.deb` / `.rpm` / `.zip` is attached to the DoraHacks submission it is unsigned. Verify the SHA-256 in the submission thread. GitHub Releases: <https://github.com/curva-app/curva/releases> (populated at submit time).
 
 ---
 
@@ -331,6 +363,24 @@ Uses [brittle](https://github.com/holepunchto/brittle) as the runner (same as ev
 **Status: 246 / 246 pass, 817 asserts green.**
 
 ---
+
+## Known limitations
+
+Honest checklist for the Cup submission window:
+
+- **Chat sync one-way (B to A) in some sessions.** Fix in progress, target 2026-07-15.
+- **Translation cold boot is slow.** First open of the QVAC pipeline downloads ~500 MB of Bergamot + Whisper + Supertonic + Qwen3 0.6B models. Subsequent runs are instant. Judges on hotel WiFi should expect a few minutes on first `pear run`.
+- **Wallet balance refresh has latency.** After a sponsored tip lands on-chain it can take up to 30 seconds for the peer's balance widget to reflect. The tx hash is available immediately in the tip receipt.
+- **Blind peer runs on the host laptop.** Rooms survive host disconnect only as long as the machine running the blind peer stays online.
+- **Unsigned desktop builds.** macOS Gatekeeper will warn on first open of any `.dmg` we ship.
+
+## Two-peer cross-machine test
+
+Full walkthrough in [`../CROSS_MACHINE_TEST.md`](../CROSS_MACHINE_TEST.md). Short version:
+
+1. On machine A: `pear run pear://hcg8oftrk7hps1z4x9pprf4jhk7mitohjort6csfpjwjjo3ynomy`, join room `qf-1`.
+2. On machine B (separate network): same command, same slug.
+3. Watch chat, playhead, and tip receipts replicate over the Hyperswarm DHT plus blind peer.
 
 ## Backend Companion
 
