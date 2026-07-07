@@ -867,7 +867,7 @@ function withCode (code, message) {
 //
 // This helper does NOT touch translate() or createTranslator(). It is purely
 // additive so the 292 existing tests remain green.
-async function loadSdkLlm ({ modelSrc, onProgress, sdkImpl } = {}) {
+async function loadSdkLlm ({ modelSrc, onProgress, sdkImpl, modelConfig } = {}) {
   if (modelSrc === undefined || modelSrc === null) {
     throw new TypeError('modelSrc required')
   }
@@ -875,11 +875,21 @@ async function loadSdkLlm ({ modelSrc, onProgress, sdkImpl } = {}) {
   if (!sdk || typeof sdk.loadModel !== 'function' || typeof sdk.completion !== 'function') {
     return null
   }
-  const modelId = await sdk.loadModel({
+  // Wave 13B: `modelConfig` passthrough is required so callers (roomBot) can
+  // request `tools: true` at loadModel() time — Qwen3 chat template needs the
+  // flag baked in when the model is loaded; it cannot be flipped per-call.
+  // Verified against pear-app/node_modules/@qvac/sdk/dist/client/api/load-model.d.ts.
+  // Backward-compat: when `modelConfig` is unset we omit the field so the
+  // pre-Wave-13B call site (commentator without tools) behaves identically.
+  const loadOpts = {
     modelSrc,
     modelType: 'llm',
     onProgress: typeof onProgress === 'function' ? onProgress : undefined
-  })
+  }
+  if (modelConfig && typeof modelConfig === 'object') {
+    loadOpts.modelConfig = modelConfig
+  }
+  const modelId = await sdk.loadModel(loadOpts)
   return {
     modelId,
     completion: sdk.completion.bind(sdk),
