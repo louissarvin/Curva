@@ -119,13 +119,39 @@ function fromBase64(str) {
   return arr.buffer
 }
 
+// -- pear.assets branding pack ---
+// Preload-side cache of the last-known branding snapshot. Populated by the
+// `assets:branding` IPC event from workers/main.js. Kept in preload (not the
+// renderer window) so that reads survive renderer reloads within the same
+// preload lifetime.
+const brandingCache = { path: null, bytes: null }
+;(function subscribeBrandingCache() {
+  try {
+    onEvent('assets:branding', (payload) => {
+      if (!payload || typeof payload !== 'object') return
+      brandingCache.path = (typeof payload.path === 'string' && payload.path.length > 0)
+        ? payload.path
+        : null
+      brandingCache.bytes = (typeof payload.bytes === 'number') ? payload.bytes : null
+    })
+  } catch { /* noop; if subscription fails, getBrandingPath() stays null */ }
+})()
+// -- end pear.assets branding pack ---
+
 contextBridge.exposeInMainWorld('curva', {
   // Room lifecycle.
-  joinRoom(slug, isHost) {
+  joinRoom(slug, isHost, opts) {
     if (typeof slug !== 'string' || slug.length === 0 || slug.length > 64) {
       throw new RangeError('slug must be 1-64 chars')
     }
-    return writeMain('room:join', { slug, isHost: !!isHost })
+    // opts.invite (optional): base32url-encoded signed invitation token from
+    // pear.links deep link. When present, the Bare worker decodes via
+    // writerInvitation.decodeInvitationFromUrl and consumes as a Pattern B
+    // writer promotion. See pear-app/bare/writerInvitation.js.
+    const invite = (opts && typeof opts.invite === 'string' && opts.invite.length > 0)
+      ? opts.invite
+      : null
+    return writeMain('room:join', { slug, isHost: !!isHost, invite })
   },
   leaveRoom() {
     return writeMain('room:leave', {})
@@ -198,6 +224,23 @@ contextBridge.exposeInMainWorld('curva', {
   },
   onClipThumb: (cb) => onEvent('clip:thumb', cb),
 
+  // Fetch a same-origin http://127.0.0.1:PORT URL the renderer can drop into
+  // <video src>. The URL is served by hypercore-blob-server in the Bare worker,
+  // is Range-friendly (RFC 7233), and carries a token in its query string. The
+  // token is single-process-scoped: it rotates on Bare worker restart and on
+  // room close. Reply arrives via `curva.onClipLink` with the same requestId.
+  // Docs: https://github.com/holepunchto/hypercore-blob-server
+  getClipLink({ driveKey, blobPath } = {}) {
+    if (typeof driveKey !== 'string' || driveKey.length !== 64) {
+      throw new RangeError('driveKey must be 64-char hex')
+    }
+    if (typeof blobPath !== 'string' || !blobPath.startsWith('/clips/')) {
+      throw new RangeError('blobPath must start with /clips/')
+    }
+    return writeMain('clip:link', { driveKey, blobPath })
+  },
+  onClipLink: (cb) => onEvent('clip:link', cb),
+
   // Backend integration (read-mostly).
   loadMatches(filters) {
     return writeMain('backend:matches', { filters: filters || {} })
@@ -231,6 +274,20 @@ contextBridge.exposeInMainWorld('curva', {
   onPeerConnected:  (cb) => onEvent('peer:connected', cb),
   onPeerDisconnected: (cb) => onEvent('peer:disconnected', cb),
 
+  // -- Supertonic TTS goal announcer (Tier 4) ---
+  // Multilingual on-device goal announcements. The Bare worker owns model
+  // load + synthesis and pushes a WAV base64 payload per event. Off by
+  // default (CURVA_QVAC_TTS_ENABLED). Payload shape:
+  //   { wavBase64, lang, matchId, minute, sizeBytes, sampleRate, text }
+  // The renderer plays it via `new Audio('data:audio/wav;base64,'+wavBase64)`.
+  onAnnouncerAudio:    (cb) => onEvent('announcer:audio', cb),
+  onAnnouncerStatus:   (cb) => onEvent('announcer:status', cb),
+  onAnnouncerLoading:  (cb) => onEvent('announcer:loading', cb),
+  onAnnouncerProgress: (cb) => onEvent('announcer:progress', cb),
+  onAnnouncerReady:    (cb) => onEvent('announcer:ready', cb),
+  onAnnouncerError:    (cb) => onEvent('announcer:error', cb),
+  // -- End Supertonic TTS goal announcer ---
+
   // Phase 2 events.
   onClipAdded:      (cb) => onEvent('clip:added', cb),
   onClipList:       (cb) => onEvent('clip:list', cb),
@@ -241,6 +298,13 @@ contextBridge.exposeInMainWorld('curva', {
   onPublishRoom:    (cb) => onEvent('backend:publish-room', cb),
   onActivityEvent:  (cb) => onEvent('backend:activity', cb),
   onActivityStatus: (cb) => onEvent('backend:activity:status', cb),
+
+  // -- Live match minute overlay --------------------------------------------
+  // Cup Final feature. Bare worker forwards the enriched `match.pulse` SSE
+  // frame as `match:minute-update` with { matchId, minute, status,
+  // injuryTime, ts }. VideoPlayer subscribes to render a floating badge
+  // (top-right of the video wrap). Returns an unsubscribe function.
+  onMatchMinute:    (cb) => onEvent('match:minute-update', cb),
 
   // Phase 3: wallet + tips.
   // Passcode: renderer MAY pass a runtime passcode; in dev the Bare worker
@@ -375,6 +439,56 @@ contextBridge.exposeInMainWorld('curva', {
   },
   getWalletInfo() { return writeMain('wallet:info', {}) },
   getBalance() { return writeMain('wallet:balance', {}) },
+
+  // -- Keet identity (Tier 4 Round 2) ---
+  // Portable identity via keet-identity-key@3.2.0. 24-word BIP-39 mnemonic
+  // that survives reinstall so tips still verify green on a new laptop.
+  //
+  // hasKeetIdentity()      -> Promise<{ present: boolean, enabled: boolean }>
+  // generateNew()          -> Promise<{ mnemonic: string, identityPublicKey: string }>
+  //                           (mnemonic shown ONCE; renderer must drop after display)
+  // restore({ mnemonic })  -> Promise<{ identityPublicKey: string }>
+  // getIdentityPublicKey() -> Promise<{ identityPublicKey: string | null }>
+  //
+  // Note: the task brief calls these "sync". The Bare worker owns the state,
+  // so the only true-sync channel would be ipcRenderer.sendSync to a cache in
+  // electron main. Every other renderer surface in this file uses writeMain
+  // (Promises) for worker-owned state; we match that convention here for
+  // consistency and to avoid a cache-drift bug the first time the mnemonic is
+  // rotated. Renderer awaits before painting.
+  identity: {
+    hasKeetIdentity() {
+      return writeMain('identity:has', {})
+    },
+    generateNew() {
+      return writeMain('identity:generate-new', {})
+    },
+    restore({ mnemonic } = {}) {
+      if (typeof mnemonic !== 'string' || mnemonic.trim().length === 0) {
+        throw new RangeError('mnemonic required')
+      }
+      const words = mnemonic.trim().split(/\s+/)
+      if (words.length !== 24) {
+        throw new RangeError('mnemonic must be exactly 24 BIP-39 words')
+      }
+      // BIP-39 words are ASCII lowercase; reject anything else at the boundary
+      // so an over-clipboard-paste of a decorated string cannot reach the
+      // worker.
+      for (const w of words) {
+        if (!/^[a-z]{3,12}$/.test(w)) {
+          throw new RangeError('mnemonic contains non-BIP39 token')
+        }
+      }
+      return writeMain('identity:restore', { mnemonic: words.join(' ') })
+    },
+    getIdentityPublicKey() {
+      return writeMain('identity:get-public-key', {})
+    },
+    onIdentityReady: (cb) => onEvent('identity:ready', cb),
+    onIdentityError: (cb) => onEvent('identity:error', cb)
+  },
+  // -- End Keet identity (Tier 4 Round 2) ---
+
   // T6/T7 alias for callers that prefer the more explicit name.
   getWalletBalance() { return writeMain('wallet:balance', {}) },
   tipHost({ amount, note } = {}) {
@@ -394,6 +508,39 @@ contextBridge.exposeInMainWorld('curva', {
   getTips({ limit = 100 } = {}) {
     return writeMain('tip:list', { limit })
   },
+
+  // -- ERC-4337 batch tip (Tier 4) ---
+  // Sends 2..5 USDT transfers as one UserOperation via Safe MultiSend. All
+  // validation at the boundary; the Bare worker AND the wallet worklet
+  // re-validate before signing.
+  tipBatch({ recipients } = {}) {
+    if (!Array.isArray(recipients)) {
+      throw new TypeError('recipients must be an array')
+    }
+    if (recipients.length < 2 || recipients.length > 5) {
+      throw new RangeError('recipients must contain 2..5 entries')
+    }
+    for (let i = 0; i < recipients.length; i++) {
+      const r = recipients[i]
+      if (!r || typeof r !== 'object') {
+        throw new TypeError(`recipients[${i}] must be an object`)
+      }
+      if (typeof r.address !== 'string' || !/^0x[0-9a-fA-F]{40}$/.test(r.address)) {
+        throw new RangeError(`recipients[${i}].address must be 0x + 20-byte hex`)
+      }
+      if (typeof r.amountAtomicUsdt !== 'string' || !/^[1-9][0-9]*$/.test(r.amountAtomicUsdt)) {
+        throw new RangeError(`recipients[${i}].amountAtomicUsdt must be a positive integer string`)
+      }
+      if (r.handle !== undefined && (typeof r.handle !== 'string' || r.handle.length > 64)) {
+        throw new RangeError(`recipients[${i}].handle must be string (max 64) or omitted`)
+      }
+    }
+    return writeMain('tip:batch', { recipients })
+  },
+  onTipBatchPending:   (cb) => onEvent('tip:batch-pending', cb),
+  onTipBatchConfirmed: (cb) => onEvent('tip:batch-confirmed', cb),
+  onTipBatchFailed:    (cb) => onEvent('tip:batch-failed', cb),
+  // -- end ERC-4337 batch tip (Tier 4) ---
 
   onWalletReady:      (cb) => onEvent('wallet:ready', cb),
   onWalletInfo:       (cb) => onEvent('wallet:info', cb),
@@ -749,6 +896,59 @@ contextBridge.exposeInMainWorld('curva', {
   },
   // ===== END ATTENDANCE (Wave 14) =====
 
+  // ===== TACTICAL DRAWING CHANNEL =====
+  // Ephemeral P2P drawing overlay on top of a paused video frame. Strokes are
+  // fire-and-forget over a protomux channel that rides the existing corestore
+  // replication stream. Never touches Autobase or Hyperbee. Host-only
+  // freeze/unfreeze; peers ignore forged host frames (validated on the worker
+  // side against the room-state `room/host-pubkey`).
+  //
+  // Payload shapes:
+  //   stroke:    { strokeId, kind: 'freehand'|'line'|'arrow', points: [[x,y],...],
+  //                color, widthPx, ts }
+  //   presence:  { peerKey, cursor: { x, y }, tool: 'pen'|'eraser' }
+  //   typing:    { peerKey, ts }
+  //   freeze:    { videoTsMs }   (senderPeerKey stamped by the worker)
+  //   unfreeze:  { videoTsMs }   (senderPeerKey stamped by the worker)
+  //
+  // Coordinates are normalized to [0..1] relative to the video element.
+  sendTacticalStroke(payload) {
+    if (!payload || typeof payload !== 'object') {
+      throw new TypeError('tactical stroke payload required')
+    }
+    return writeMain('tactical:send-stroke', payload)
+  },
+  sendTacticalPresence(payload) {
+    if (!payload || typeof payload !== 'object') {
+      throw new TypeError('tactical presence payload required')
+    }
+    return writeMain('tactical:send-presence', payload)
+  },
+  sendTacticalTyping(payload) {
+    if (!payload || typeof payload !== 'object') {
+      throw new TypeError('tactical typing payload required')
+    }
+    return writeMain('tactical:send-typing', payload)
+  },
+  sendTacticalFreeze(payload) {
+    if (!payload || typeof payload !== 'object') {
+      throw new TypeError('tactical freeze payload required')
+    }
+    return writeMain('tactical:send-freeze', payload)
+  },
+  sendTacticalUnfreeze(payload) {
+    if (!payload || typeof payload !== 'object') {
+      throw new TypeError('tactical unfreeze payload required')
+    }
+    return writeMain('tactical:send-unfreeze', payload)
+  },
+  onTacticalStroke:   (cb) => onEvent('tactical:stroke', cb),
+  onTacticalPresence: (cb) => onEvent('tactical:presence', cb),
+  onTacticalTyping:   (cb) => onEvent('tactical:typing', cb),
+  onTacticalFreeze:   (cb) => onEvent('tactical:freeze', cb),
+  onTacticalUnfreeze: (cb) => onEvent('tactical:unfreeze', cb),
+  // ===== END TACTICAL DRAWING CHANNEL =====
+
   // ===== BLIND PEERING (Wave 15) =====
   // Third-party blind-peering seeder registration bridge. All methods are
   // safe no-ops when CURVA_BLIND_PEERING_ENABLED != 'true' or when
@@ -778,7 +978,61 @@ contextBridge.exposeInMainWorld('curva', {
       onEvent('tip:failed', (p) => cb('failed', p))
     ]
     return () => offs.forEach((f) => { try { f() } catch { /* noop */ } })
-  }
+  },
+
+  // -- pear.assets branding pack ---
+  // The Bare worker reads `Pear.app.assets.branding.path` (see
+  // bare/assets.js) and emits `assets:branding` with `{path, bytes}`. The
+  // path is null until the drive lands (async passive fetch per Pear docs).
+  // Renderer must render a bundled fallback first, then re-render when the
+  // event delivers a truthy path.
+  //
+  // `getBrandingPath()` is a synchronous accessor over the cached last-known
+  // path. `onBranding(cb)` streams every update including the initial null
+  // snapshot the worker emits at boot.
+  //
+  // `refreshBranding()` asks the worker to re-read the Pear runtime state.
+  // Useful because Pear docs describe no fetch-complete event; the renderer
+  // polls at low frequency until it sees a non-null path.
+  getBrandingPath() {
+    return brandingCache.path
+  },
+  getBrandingBytes() {
+    return brandingCache.bytes
+  },
+  onBranding(cb) {
+    if (typeof cb !== 'function') throw new TypeError('cb required')
+    // Deliver the current cached value immediately so subscribers don't
+    // race the initial emit. Then attach to future updates.
+    try { cb({ path: brandingCache.path, bytes: brandingCache.bytes }) } catch { /* noop */ }
+    return onEvent('assets:branding', (payload) => {
+      cb({ path: brandingCache.path, bytes: brandingCache.bytes })
+      void payload
+    })
+  },
+  refreshBranding() {
+    return writeMain('assets:refresh', {})
+  },
+  // -- end pear.assets branding pack ---
+
+  // -- Demo automation (Tier polish) ---
+  // One-button pitch driver. Host-only + feature-flagged behind
+  // CURVA_DEMO_AUTOMATION_ENABLED in the Bare worker. Every action is a
+  // passthrough into an already-shipped code path (chat.send, chat.appendGoal,
+  // tip.proposeTip, predictions.openPool + publishSettlement, playhead.setState,
+  // announcer.speak, commentator.onGoalCluster). No new features. See
+  // bare/demoTimeline.js.
+  demoTimeline: {
+    start() { return writeMain('demo:start', {}) },
+    stop()  { return writeMain('demo:stop', {}) },
+    status() { return writeMain('demo:status', {}) }
+  },
+  // Subscriber for {state, elapsedMs, currentStep, totalSteps} ticks emitted
+  // by the timeline on every step boundary. Renderer uses this to drive the
+  // floating "elapsed / step of totalSteps" label.
+  onDemoTimelineTick(cb) { return onEvent('demo:tick', cb) },
+  onDemoTimelineStatus(cb) { return onEvent('demo:status', cb) }
+  // -- end Demo automation (Tier polish) ---
 })
 
 // Allowlist for openExternal. Enforced on BOTH sides — the renderer preload
