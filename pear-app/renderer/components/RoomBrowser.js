@@ -59,16 +59,149 @@ export function mountRoomBrowser({ container, curva, onJoin } = {}) {
 
   const title = document.createElement('h2')
   title.className = 'curva-browser__title'
-  title.textContent = 'Live and upcoming matches'
+  title.textContent = 'Watch-party rooms'
 
   const subtitle = document.createElement('p')
   subtitle.className = 'curva-browser__subtitle'
-  subtitle.textContent = 'pick a match to join or create a watch-party room.'
+  subtitle.textContent = 'Open a room as host, or join one your friends have already published.'
 
   // Non-blocking banner shown when the backend is unreachable.
   const banner = document.createElement('div')
   banner.className = 'curva-browser__banner'
   banner.hidden = true
+
+  // Wave 17: "Create new room" primary CTA + collapsible form. Sits above
+  // the fixture list so the host's own room is the highest-affordance action
+  // in the lobby. Everything below is discovery of other peers' rooms.
+  //
+  // Slug validation mirrors backend/src/utils/curvaValidators.ts SLUG_RE so
+  // the form rejects at the client boundary before we ever hit /rooms.
+  // Publish toggle default = ON because the primary demo path is "host
+  // publishes, viewer joins from directory". Turn off if the host only wants
+  // an invite-only room.
+  const createSection = document.createElement('section')
+  createSection.className = 'curva-browser__create'
+
+  // Wave 17 v2: expose the create form inline all the time. The old expand/
+  // collapse toggle button became a second "Create" button next to the form's
+  // own submit button, which was the exact two-button trap we were trying to
+  // remove. The form is short (three fields), so always showing it is cheap
+  // and gives judges a single obvious action.
+  const createHeading = document.createElement('h3')
+  createHeading.className = 'curva-browser__create-heading'
+  createHeading.textContent = 'Create a room'
+
+  const createForm = document.createElement('form')
+  createForm.className = 'curva-browser__create-form'
+  createForm.setAttribute('aria-label', 'Create a new room')
+  createForm.noValidate = true // handle validation ourselves for inline hints
+
+  const slugField = document.createElement('label')
+  slugField.className = 'curva-browser__field'
+  const slugLabel = document.createElement('span')
+  slugLabel.textContent = 'Room slug'
+  const slugInput = document.createElement('input')
+  slugInput.type = 'text'
+  slugInput.placeholder = 'wc26-final'
+  slugInput.autocomplete = 'off'
+  slugInput.spellcheck = false
+  slugInput.className = 'curva-browser__input'
+  slugInput.setAttribute('aria-describedby', 'curva-browser-slug-hint')
+  const slugHint = document.createElement('span')
+  slugHint.className = 'curva-browser__hint'
+  slugHint.id = 'curva-browser-slug-hint'
+  slugHint.textContent = '4-32 chars. Lowercase letters, numbers and dashes. Must start and end with a letter or number.'
+  slugField.appendChild(slugLabel)
+  slugField.appendChild(slugInput)
+  slugField.appendChild(slugHint)
+
+  const nameField = document.createElement('label')
+  nameField.className = 'curva-browser__field'
+  const nameLabel = document.createElement('span')
+  nameLabel.textContent = 'Room name (optional)'
+  const nameInput = document.createElement('input')
+  nameInput.type = 'text'
+  nameInput.placeholder = 'e.g. WC26 Final Watch Party'
+  nameInput.autocomplete = 'off'
+  nameInput.maxLength = 64
+  nameInput.className = 'curva-browser__input'
+  const nameHint = document.createElement('span')
+  nameHint.className = 'curva-browser__hint'
+  nameHint.textContent = 'Shown to your viewers. Falls back to the slug when empty.'
+  nameField.appendChild(nameLabel)
+  nameField.appendChild(nameInput)
+  nameField.appendChild(nameHint)
+
+  const publishRow = document.createElement('label')
+  publishRow.className = 'curva-browser__field curva-browser__field--check'
+  const publishCheck = document.createElement('input')
+  publishCheck.type = 'checkbox'
+  publishCheck.checked = true
+  publishCheck.className = 'curva-browser__check'
+  const publishText = document.createElement('span')
+  publishText.textContent = 'Publish to the STADIUM directory so any peer can discover it'
+  publishRow.appendChild(publishCheck)
+  publishRow.appendChild(publishText)
+
+  const errorLine = document.createElement('div')
+  errorLine.className = 'curva-browser__error'
+  errorLine.hidden = true
+  errorLine.setAttribute('role', 'alert')
+
+  const submitRow = document.createElement('div')
+  submitRow.className = 'curva-browser__submit-row'
+  const submitBtn = document.createElement('button')
+  submitBtn.type = 'submit'
+  submitBtn.className = 'curva-browser__btn curva-browser__btn--primary'
+  submitBtn.textContent = 'Create room and enter as host'
+  submitRow.appendChild(submitBtn)
+
+  createForm.appendChild(slugField)
+  createForm.appendChild(nameField)
+  createForm.appendChild(publishRow)
+  createForm.appendChild(errorLine)
+  createForm.appendChild(submitRow)
+
+  createSection.appendChild(createHeading)
+  createSection.appendChild(createForm)
+
+  slugInput.addEventListener('input', () => {
+    // Live-normalise the character SET so users see only backend-legal chars
+    // (lowercase, digits, dashes). Do NOT trim leading/trailing dashes here —
+    // that would eat every dash the moment the user types it. Full sanitize +
+    // isValidSlug run on submit.
+    const before = slugInput.value
+    const norm = sanitizeSlugSoft(before)
+    if (before !== norm) {
+      // Preserve caret position when we only lowercased or filtered chars,
+      // since we didn't insert or delete anything net.
+      const caret = slugInput.selectionStart
+      slugInput.value = norm
+      try { slugInput.setSelectionRange(caret, caret) } catch { /* noop */ }
+    }
+    if (!errorLine.hidden) {
+      errorLine.hidden = true
+      errorLine.textContent = ''
+    }
+  })
+
+  function submitCreate (e) {
+    e.preventDefault()
+    const rawSlug = sanitizeSlug(slugInput.value)
+    if (!isValidSlug(rawSlug)) {
+      errorLine.textContent = 'Slug must be 4-32 characters, only a-z / 0-9 / dashes, and cannot start or end with a dash.'
+      errorLine.hidden = false
+      slugInput.focus()
+      return
+    }
+    slugInput.value = rawSlug
+    const displayName = String(nameInput.value || '').trim().slice(0, 64).replace(/[\x00-\x1f]/g, '')
+    const publish = !!publishCheck.checked
+    // Disable while the join fires so double-click doesn't stack calls.
+    submitBtn.disabled = true
+    onJoin(rawSlug, true, { publish, displayName })
+  }
+  createForm.addEventListener('submit', submitCreate)
 
   const list = document.createElement('ul')
   list.className = 'curva-browser__list'
@@ -91,7 +224,7 @@ export function mountRoomBrowser({ container, curva, onJoin } = {}) {
   const manual = document.createElement('div')
   manual.className = 'curva-browser__manual'
   const manualLabel = document.createElement('label')
-  manualLabel.textContent = 'Or join a custom room by slug:'
+  manualLabel.textContent = 'Know the slug? Join a room directly:'
   const manualInput = document.createElement('input')
   manualInput.type = 'text'
   manualInput.placeholder = 'room-slug (e.g. torino-vs-jakarta)'
@@ -124,6 +257,7 @@ export function mountRoomBrowser({ container, curva, onJoin } = {}) {
 
   container.appendChild(title)
   container.appendChild(subtitle)
+  container.appendChild(createSection)
   container.appendChild(banner)
   container.appendChild(seederChip)
   container.appendChild(loading)
@@ -152,52 +286,55 @@ export function mountRoomBrowser({ container, curva, onJoin } = {}) {
 
   function renderList() {
     list.textContent = ''
-    const ids = [...matchesById.keys()]
     if (matchesArrived) loading.hidden = true
 
-    if (ids.length === 0) {
+    // Wave 17 v3: one card per ROOM (not per match). The old fixture-first
+    // layout nested rooms inside "TBD vs TBD" wrappers which added visual
+    // clutter for zero information (WC26 fixture data is all placeholder).
+    // Each card now shows one room: slug as title, host handle, badge,
+    // live peer count, big Join button. Rooms are ordered by public first
+    // (STADIUM discovery is the primary demo path), then newest-created.
+    const rooms = []
+    for (const arr of roomsByMatchId.values()) {
+      for (const r of arr) {
+        if (!r || typeof r.slug !== 'string') continue
+        rooms.push(r)
+      }
+    }
+
+    // Always start each render with the empty state hidden. We only re-show
+    // it in the two explicit end-states below (no data yet, or zero rooms).
+    empty.hidden = true
+
+    if (rooms.length === 0) {
       if (matchesArrived) {
         empty.hidden = false
         empty.textContent = backendFailed
-          ? 'Backend unreachable. Join a custom room by slug below.'
-          : 'Be the first — create a room for tonight\'s match.'
+          ? 'Backend unreachable. Create a room above to start hosting your own.'
+          : 'No public rooms yet — create one above to start hosting.'
       }
       return
     }
-    empty.hidden = true
 
-    // Sort: live > upcoming (soonest first) > finished
-    ids.sort((a, b) => {
-      const ma = matchesById.get(a)
-      const mb = matchesById.get(b)
-      const orderStatus = (s) => {
-        if (s === 'in_progress' || s === 'live') return 0
-        if (s === 'scheduled' || s === 'upcoming') return 1
-        return 2
-      }
-      const sa = orderStatus(ma?.status)
-      const sb = orderStatus(mb?.status)
-      if (sa !== sb) return sa - sb
-      const ta = new Date(ma?.utcDate || ma?.kickoffAt || 0).getTime()
-      const tb = new Date(mb?.utcDate || mb?.kickoffAt || 0).getTime()
-      return ta - tb
+    // Sort: STADIUM (public) first, then by createdAt desc (newest first).
+    // Judges landing on the lobby should see the freshest public rooms up
+    // top; private/invite-only rooms sink to the bottom.
+    rooms.sort((a, b) => {
+      const va = a.visibility === 'public' ? 0 : 1
+      const vb = b.visibility === 'public' ? 0 : 1
+      if (va !== vb) return va - vb
+      const ta = new Date(a.createdAt || 0).getTime()
+      const tb = new Date(b.createdAt || 0).getTime()
+      return tb - ta
     })
 
-    for (const id of ids) {
-      const match = matchesById.get(id)
-      const rooms = roomsByMatchId.get(id) || []
-      // Wave 8B T3 Phase 2: replace backend-reported count with live DHT
-      // count if we have one for any of this match's room slugs. `liveCount`
-      // is undefined until the DHT lookup returns for at least one slug.
-      let liveCount
-      for (const r of rooms) {
-        const hex = slugToTopicHex.get(r.slug)
-        if (hex && livePeerCountsByHex.has(hex)) {
-          const c = livePeerCountsByHex.get(hex)
-          liveCount = (liveCount || 0) + c
-        }
-      }
-      list.appendChild(renderMatchCard(match, rooms, onJoin, liveCount))
+    for (const room of rooms) {
+      const hex = slugToTopicHex.get(room.slug)
+      const liveCount = hex && livePeerCountsByHex.has(hex)
+        ? livePeerCountsByHex.get(hex)
+        : undefined
+      const match = room.matchId ? matchesById.get(room.matchId) : null
+      list.appendChild(renderRoomCard(room, match, onJoin, liveCount))
     }
   }
 
@@ -400,15 +537,17 @@ function renderMatchCard(match, rooms, onJoin, liveCount) {
   const actions = document.createElement('div')
   actions.className = 'curva-browser__card-actions'
 
-  const createBtn = document.createElement('button')
-  createBtn.type = 'button'
-  createBtn.className = 'curva-browser__btn curva-browser__btn--primary'
-  createBtn.textContent = 'Create room'
-  createBtn.addEventListener('click', () => {
-    const slug = slugify(match.id + '-' + Math.random().toString(36).slice(2, 6))
-    onJoin(slug, true)
-  })
-  actions.appendChild(createBtn)
+  // Wave 17 UX: the per-fixture "Create room" button is retired. Room creation
+  // now flows through the single "+ Create a new room" primary CTA at the top
+  // of the lobby (see mountRoomBrowser createSection). Reasons:
+  //   1. Two "Create room" buttons on one screen made the flow ambiguous.
+  //   2. The per-fixture button auto-generated a slug from `match.id + rand`
+  //      which was worse UX than letting the host pick their own.
+  //   3. The WC26 fixture data is all TBD placeholders today, so we would
+  //      have been prompting hosts to create rooms tied to fictional matches.
+  // Fixture cards now only show Join buttons for existing rooms; if a fixture
+  // has zero rooms attached AND is TBD, the outer filter in renderList() hides
+  // the whole card so the lobby doesn't render dead cards.
 
   for (const r of rooms.slice(0, 3)) {
     const roomRow = document.createElement('span')
@@ -434,6 +573,72 @@ function renderMatchCard(match, rooms, onJoin, liveCount) {
 
     actions.appendChild(roomRow)
   }
+
+  li.appendChild(head)
+  li.appendChild(meta)
+  li.appendChild(actions)
+  return li
+}
+
+// Wave 17 v3: single-room card. Room is the first-class entity; match data
+// only decorates it when present. All string inputs pass through textContent
+// (XSS-safe) — slug/hostHandle/team names come from the backend but they're
+// still peer-supplied at creation time so no innerHTML anywhere.
+function renderRoomCard(room, match, onJoin, liveCount) {
+  const li = document.createElement('li')
+  li.className = 'curva-browser__card curva-browser__card--room'
+
+  const head = document.createElement('div')
+  head.className = 'curva-browser__card-head'
+
+  // Title = room slug. When the backend gains a `title` field we swap in
+  // room.title || room.slug.
+  const titleEl = document.createElement('span')
+  titleEl.className = 'curva-browser__room-title'
+  titleEl.textContent = room.slug || '(unnamed room)'
+
+  const badge = document.createElement('span')
+  badge.className = 'curva-browser__badge curva-browser__badge--stadium'
+  badge.textContent = room.visibility === 'public' ? 'STADIUM' : 'PRIVATE'
+  badge.title = room.visibility === 'public'
+    ? 'Public room in the STADIUM directory. Any peer with the Curva app can discover and join.'
+    : 'Private room. Only peers with the slug can join.'
+  if (room.visibility !== 'public') {
+    badge.classList.add('curva-browser__badge--private')
+  }
+
+  head.appendChild(titleEl)
+  head.appendChild(badge)
+
+  // Sub-line: host handle + optional match/kickoff.
+  const meta = document.createElement('div')
+  meta.className = 'curva-browser__card-meta'
+  const metaParts = []
+  if (room.hostHandle) metaParts.push('host: ' + String(room.hostHandle))
+  const home = match ? teamName(match.homeTeam) : null
+  const away = match ? teamName(match.awayTeam) : null
+  if (match && home && away && !(home === 'TBD' && away === 'TBD')) {
+    metaParts.push(home + ' vs ' + away)
+    metaParts.push(statusLabel(match.status))
+    const k = kickoffLine(match)
+    if (k) metaParts.push(k)
+  }
+  if (typeof liveCount === 'number') {
+    metaParts.push(liveCount + ' peers on DHT (live)')
+  } else if (Number(room.peerCount) > 0) {
+    metaParts.push(room.peerCount + ' fans watching')
+  }
+  meta.textContent = metaParts.join(' • ')
+
+  const actions = document.createElement('div')
+  actions.className = 'curva-browser__card-actions'
+
+  const joinBtn = document.createElement('button')
+  joinBtn.type = 'button'
+  joinBtn.className = 'curva-browser__btn curva-browser__btn--primary curva-browser__btn--join'
+  joinBtn.textContent = 'Join room'
+  joinBtn.addEventListener('click', () => onJoin(String(room.slug), false))
+  actions.appendChild(joinBtn)
 
   li.appendChild(head)
   li.appendChild(meta)
@@ -479,11 +684,32 @@ function sanitizeSlug(input) {
     .slice(0, 64)
 }
 
+// Live-input variant used by the "Create room" form. Preserves leading and
+// trailing dashes so the user can type `wc26-final` one character at a time;
+// the full sanitizeSlug + isValidSlug run on submit. Mirrored in
+// roomBrowserHelpers.cjs.js so brittle tests bind to the same regex.
+function sanitizeSlugSoft(input) {
+  return String(input || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, '-')
+    .replace(/-+/g, '-')
+    .slice(0, 64)
+}
+
+// Mirror of backend/src/utils/curvaValidators.ts SLUG_RE. Length 4-32.
+const SLUG_RE = /^[a-z0-9]([a-z0-9-]{2,30})[a-z0-9]$/
+
+function isValidSlug(input) {
+  if (typeof input !== 'string') return false
+  if (input.length < 4 || input.length > 32) return false
+  return SLUG_RE.test(input)
+}
+
 function slugify(input) {
   return sanitizeSlug(input)
 }
 
-// Note: pure helpers (sanitizeSlug, statusLabel, kickoffLine, nameToFlag,
-// iso2Flag, FLAG_ISO2) are duplicated in ./roomBrowserHelpers.cjs.js so
-// brittle tests can require() them without an ESM/CJS interop dance. Any
+// Note: pure helpers (sanitizeSlug, isValidSlug, statusLabel, kickoffLine,
+// nameToFlag, iso2Flag, FLAG_ISO2) are duplicated in ./roomBrowserHelpers.cjs.js
+// so brittle tests can require() them without an ESM/CJS interop dance. Any
 // change here MUST be mirrored in that file.

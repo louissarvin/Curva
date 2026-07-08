@@ -178,7 +178,7 @@ function createBackendClient(baseUrl, { lang = 'en', timeoutMs = DEFAULT_TIMEOUT
       if (!slug) return Promise.resolve({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'slug required' } })
       return request('/rooms/' + encodeURIComponent(slug))
     },
-    publishRoom({ slug, matchId, hostHandle, hostSmartAddress, hostOwnerAddress, expiresAt } = {}) {
+    publishRoom({ slug, matchId, hostHandle, hostSmartAddress, hostOwnerAddress, expiresAt, visibility } = {}) {
       // 2026-07-07: matchId is now optional. Slug-only joins (e.g. `--room
       // wc26-final`) do not know the underlying match cuid; the backend
       // auto-resolves final > first scheduled when matchId is absent. Do NOT
@@ -189,6 +189,12 @@ function createBackendClient(baseUrl, { lang = 'en', timeoutMs = DEFAULT_TIMEOUT
       }
       const body = { slug, hostHandle, hostSmartAddress, hostOwnerAddress, expiresAt }
       if (matchId) body.matchId = matchId
+      // Wave 17: opt into STADIUM (public) visibility so the lobby can
+      // discover the room. Backend defaults to 'private' when absent, which
+      // was why every create-form room stayed invisible to viewers.
+      if (visibility === 'public' || visibility === 'private') {
+        body.visibility = visibility
+      }
       return request('/rooms', {
         method: 'POST',
         body: JSON.stringify(body)

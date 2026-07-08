@@ -70,11 +70,47 @@ function sanitizeSlug(input) {
     .slice(0, 64)
 }
 
+// Live-input sanitizer for the "Create room" form. Does the SAME character
+// filtering + lowercasing as sanitizeSlug, but PRESERVES leading and trailing
+// dashes so the user can still type `wc26-final` one character at a time.
+// The full sanitizeSlug runs on submit (and on isValidSlug), which trims the
+// dashes at that boundary.
+function sanitizeSlugSoft(input) {
+  return String(input || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, '-')
+    .replace(/-+/g, '-')
+    .slice(0, 64)
+}
+
+// Mirror of backend/src/utils/curvaValidators.ts SLUG_RE.
+// Length: >= 4 and <= 32. Pattern: lower-alnum start, [a-z0-9-] middle (2-30
+// chars), lower-alnum end. Both endpoint constraints match the backend.
+const SLUG_RE = /^[a-z0-9]([a-z0-9-]{2,30})[a-z0-9]$/
+
+function isValidSlug(input) {
+  if (typeof input !== 'string') return false
+  if (input.length < 4 || input.length > 32) return false
+  return SLUG_RE.test(input)
+}
+
+// Human-readable room title. Backend accepts a free-form matchId today; we
+// use the display name only in the local UI, not on the /rooms payload.
+// Length capped at 64 to match the field's tooltip contract.
+function sanitizeRoomName(input) {
+  const s = String(input || '').trim().slice(0, 64)
+  // Strip C0 control chars (matches backend host handle guard).
+  return s.replace(/[\x00-\x1f]/g, '')
+}
+
 module.exports = {
   FLAG_ISO2,
   iso2Flag,
   nameToFlag,
   statusLabel,
   kickoffLine,
-  sanitizeSlug
+  sanitizeSlug,
+  sanitizeSlugSoft,
+  isValidSlug,
+  sanitizeRoomName
 }

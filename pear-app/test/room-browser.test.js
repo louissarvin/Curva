@@ -8,6 +8,9 @@
 const test = require('brittle')
 const {
   sanitizeSlug,
+  sanitizeSlugSoft,
+  isValidSlug,
+  sanitizeRoomName,
   statusLabel,
   kickoffLine,
   nameToFlag,
@@ -81,4 +84,98 @@ test('FLAG_ISO2: has entries for demo teams', (t) => {
   t.is(FLAG_ISO2.italy, 'IT', 'italy present')
   t.is(FLAG_ISO2.indonesia, 'ID', 'indonesia present')
   t.is(FLAG_ISO2.england, 'GB', 'england present')
+})
+
+// -- Wave 17: isValidSlug + sanitizeRoomName ------------------------------
+
+test('isValidSlug: accepts backend-compatible slugs', (t) => {
+  // Matches SLUG_RE in backend/src/utils/curvaValidators.ts:8.
+  t.ok(isValidSlug('wc26-final'), 'canonical demo slug is valid')
+  t.ok(isValidSlug('torino-vs-jakarta'), 'multi-hyphen valid')
+  t.ok(isValidSlug('room1234'), 'no-hyphen alnum valid')
+  t.ok(isValidSlug('abcd'), 'minimum length 4 valid')
+  t.ok(isValidSlug('a'.repeat(32)), 'maximum length 32 valid')
+})
+
+test('isValidSlug: rejects invalid slugs the backend would 400', (t) => {
+  t.absent(isValidSlug(''), 'empty rejected')
+  t.absent(isValidSlug('abc'), 'below min length rejected')
+  t.absent(isValidSlug('a'.repeat(33)), 'above max length rejected')
+  t.absent(isValidSlug('-abcd'), 'leading dash rejected')
+  t.absent(isValidSlug('abcd-'), 'trailing dash rejected')
+  t.absent(isValidSlug('ABCD'), 'uppercase rejected')
+  t.absent(isValidSlug('room!'), 'punctuation rejected')
+  t.absent(isValidSlug('room name'), 'spaces rejected')
+  t.absent(isValidSlug(null), 'null rejected')
+  t.absent(isValidSlug(42), 'non-string rejected')
+})
+
+test('isValidSlug: middle segment length matches backend regex bounds', (t) => {
+  // SLUG_RE requires a 2-30 char middle segment plus start+end alnum, so
+  // total goes 4-32. Rejecting a 3-char slug proves that middle bound.
+  t.absent(isValidSlug('abc'), 'total 3 rejected (middle < 2)')
+  t.ok(isValidSlug('abcd'), 'total 4 accepted (middle == 2)')
+})
+
+test('sanitizeRoomName: strips control chars and trims to 64 chars', (t) => {
+  t.is(sanitizeRoomName('  hello world  '), 'hello world', 'trims whitespace')
+  t.is(sanitizeRoomName('a'.repeat(80)).length, 64, 'caps at 64')
+  t.is(sanitizeRoomName('hello\x00world'), 'helloworld', 'strips null byte')
+  t.is(sanitizeRoomName('room\x1fname'), 'roomname', 'strips ANSI CSI byte')
+  t.is(sanitizeRoomName(null), '', 'null coerces to empty')
+  t.is(sanitizeRoomName(undefined), '', 'undefined coerces to empty')
+})
+
+test('sanitize pipeline: user input -> valid slug', (t) => {
+  // Live-normalising input should feed straight into isValidSlug for the
+  // create-room submit path.
+  const raw = '  WC26 Final!! '
+  const normalised = sanitizeSlug(raw)
+  t.is(normalised, 'wc26-final')
+  t.ok(isValidSlug(normalised), 'normalised slug passes backend rule')
+})
+
+// -- Wave 17 fix: live-input variant preserves in-progress dashes --------
+
+test('sanitizeSlugSoft: preserves trailing dash so user can type wc26-final', (t) => {
+  // Simulates keystroke-by-keystroke live input handling.
+  t.is(sanitizeSlugSoft('w'), 'w')
+  t.is(sanitizeSlugSoft('wc'), 'wc')
+  t.is(sanitizeSlugSoft('wc26'), 'wc26')
+  t.is(sanitizeSlugSoft('wc26-'), 'wc26-', 'trailing dash preserved live')
+  t.is(sanitizeSlugSoft('wc26-f'), 'wc26-f')
+  t.is(sanitizeSlugSoft('wc26-final'), 'wc26-final')
+})
+
+test('sanitizeSlugSoft: preserves leading dash', (t) => {
+  t.is(sanitizeSlugSoft('-abc'), '-abc', 'leading dash preserved (submit rejects)')
+})
+
+test('sanitizeSlugSoft: still filters unsafe chars and lowercases', (t) => {
+  t.is(sanitizeSlugSoft('WC26 Final!!'), 'wc26-final-')
+  t.is(sanitizeSlugSoft('Torino vs Jakarta'), 'torino-vs-jakarta')
+})
+
+test('sanitizeSlugSoft: collapses consecutive dashes', (t) => {
+  t.is(sanitizeSlugSoft('a---b'), 'a-b')
+  t.is(sanitizeSlugSoft('room  name'), 'room-name')
+})
+
+test('live -> submit pipeline: dashes survive typing then trim on submit', (t) => {
+  // User types "wc26-final" one key at a time; live handler never eats the
+  // dash; submit handler runs full sanitizeSlug + isValidSlug.
+  const live = sanitizeSlugSoft('wc26-final')
+  t.is(live, 'wc26-final')
+  const onSubmit = sanitizeSlug(live)
+  t.is(onSubmit, 'wc26-final')
+  t.ok(isValidSlug(onSubmit), 'passes backend rule')
+})
+
+test('live -> submit pipeline: trailing dash gets trimmed by submit', (t) => {
+  // User typed but never finished the word.
+  const live = sanitizeSlugSoft('abc-')
+  t.is(live, 'abc-', 'live preserves the dash for further typing')
+  const onSubmit = sanitizeSlug(live)
+  t.is(onSubmit, 'abc', 'submit trims trailing dash')
+  t.absent(isValidSlug(onSubmit), 'too short after trim -> rejected by backend rule')
 })

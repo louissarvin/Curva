@@ -273,16 +273,40 @@ function runIdentityWizardThenBrowser() {
   }
 }
 
+// Wave 17: pending post-join intent (used by "+ Create a new room" flow).
+// When the lobby fires onJoin with { publish: true }, we stash the intent
+// here so `onRoomReady` can auto-publish the room once the Autobase is
+// spinning. Kept at module scope so a fast room:ready doesn't race the
+// closure over the mountBrowser call.
+let pendingPostJoin = null
+
 function mountBrowser() {
   destroyBrowser()
   browserInstance = safeMount('RoomBrowser', () => mountRoomBrowser({
     container: els.browser,
     curva,
-    onJoin: (slug, host) => {
+    onJoin: (slug, host, opts) => {
+      // Only capture the intent when we're actually driving a fresh room open
+      // (host=true from the "Create a new room" form). Discovery-based joins
+      // never publish because the host owns publication rights.
+      if (host && opts && opts.publish) {
+        pendingPostJoin = {
+          slug,
+          publish: true,
+          displayName: opts.displayName || null
+        }
+      } else if (host && opts && opts.displayName) {
+        // Preserve the display name even without publish so the room header
+        // can render it later if we plumb it there.
+        pendingPostJoin = { slug, publish: false, displayName: opts.displayName }
+      } else {
+        pendingPostJoin = null
+      }
       curva.joinRoom(slug, !!host).catch((err) => {
         logEvent('error', 'joinRoom failed: ' + err.message)
+        pendingPostJoin = null
       })
-      logEvent('info', 'joining room=' + slug + (host ? ' (as host)' : ''))
+      logEvent('info', 'joining room=' + slug + (host ? ' (as host)' : '') + (opts?.publish ? ' publish=directory' : ''))
       setBootStatus('Discovering peers…', 'This takes 5-45s on first launch')
     }
   }), els.browser)
@@ -297,11 +321,18 @@ function destroyBrowser() {
 function mountRoom(payload) {
   destroyRoom()
   const myGeneration = ++mountGeneration
+  // Wave 17 UX: if the host created this room through the "+ Create a new
+  // room" form with a display name, surface it as the room title in
+  // RoomHeader. Falls back to the slug for viewers and legacy joins.
+  const displayName = (pendingPostJoin && pendingPostJoin.slug === payload.slug && pendingPostJoin.displayName)
+    ? pendingPostJoin.displayName
+    : null
   state.currentRoom = {
     slug: payload.slug,
     isHost: payload.isHost,
     handle: payload.handle,
-    hostSmartAddress: payload.hostSmartAddress || null
+    hostSmartAddress: payload.hostSmartAddress || null,
+    displayName
   }
   els.browser.hidden = true
   els.room.hidden = false
@@ -802,6 +833,24 @@ curva.onRoomReady((payload) => {
     logEvent('info', 'wc-reel fallback: keeping local file (P2P link did not arrive in 3s)')
   }, 3000)
   mountRoom(payload)
+
+  // Wave 17: honour the lobby's pending post-join intent. Only host peers
+  // can publish; we still guard on payload.isHost to be safe (the worker is
+  // authoritative on the isHost bit).
+  const intent = pendingPostJoin
+  pendingPostJoin = null
+  if (intent && intent.slug === payload.slug && intent.publish && payload.isHost) {
+    logEvent('info', 'auto-publishing room to STADIUM directory (create-form intent)')
+    curva.publishRoom({}).then((res) => {
+      if (res && res.ok !== false) {
+        logEvent('info', 'room published to directory')
+      } else {
+        logEvent('warn', 'publishRoom failed: ' + (res?.error || 'unknown'))
+      }
+    }).catch((err) => {
+      logEvent('warn', 'publishRoom threw: ' + err.message)
+    })
+  }
 })
 
 curva.onRoomClosed(() => {

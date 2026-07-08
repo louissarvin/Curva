@@ -153,6 +153,7 @@ const cmd = command(
   flag('--no-sandbox', 'start without Chromium sandbox').hide(),
   flag('--room <slug>', 'room slug to auto-join at boot'),
   flag('--is-host', 'mark this peer as the room host'),
+  flag('--no-auto-open', 'boot straight to the lobby; do not auto-open --room'),
   flag('--backend <url>', 'Curva Companion backend base URL'),
   flag('--demo <n>', 'launch N-peer split-screen demo (only n=4 supported)'),
   flag('--clean', 'when combined with --demo, wipe demo store dirs first')
@@ -164,6 +165,10 @@ const pearStore = cmd.flags.storage ? path.resolve(cmd.flags.storage) : null
 const updates = cmd.flags.updates
 const roomSlug = cmd.flags.room || 'demo-room'
 const isHost = !!cmd.flags.isHost
+// Wave 17: opt-in manual lobby. paparam exposes --no-auto-open as
+// `cmd.flags.autoOpen === false`. Default (flag absent) keeps the auto-open
+// behaviour so scripts/demo-4peer.js and older CLI invocations are unchanged.
+const autoOpenRoom = cmd.flags.autoOpen !== false
 const backendUrl = cmd.flags.backend || process.env.CURVA_BACKEND_URL || 'http://localhost:3700'
 
 // Wave 7 Zone C: split-screen 4-peer demo mode.
@@ -203,6 +208,7 @@ ipcMain.on('curva:boot-config', (evt) => {
   evt.returnValue = {
     room: roomSlug,
     isHost,
+    autoOpenRoom,
     backend: backendUrl,
     version,
     // Demo automation button (top-left floating "Run demo" control). Gated
@@ -273,6 +279,33 @@ function getWorker(specifier) {
   const dir = resolveStorageDir()
   const extension = isLinux ? '.AppImage' : isMac ? '.app' : '.msix'
 
+  // Wave 17b: forward allowlisted env vars to the Bare worker.
+  //
+  // Why: Bare workers spawn via bare-sidecar (child_process.spawn without an
+  // `env:` option), which per Node docs should inherit process.env. In
+  // practice under electron-forge our CURVA_* / QVAC_* / DEV_WALLET_* vars
+  // never surface inside the worker — every feature flag reads as false. The
+  // bare-env Proxy over bare-os getEnv reads the process's actual env, so the
+  // gap is somewhere between Electron main and the Bare child's env table.
+  //
+  // Rather than chase a platform-specific env-forwarding bug, we serialize
+  // the allowlist explicitly through Bare.argv. Deterministic, auditable,
+  // works identically dev + packaged.
+  //
+  // Security: values pass through argv, which is visible to `ps` for the
+  // owning user. DEV_WALLET_PASSCODE is already exposed the same way the
+  // user's launch command sets it (shell env is also in `ps eww`). Do NOT
+  // add prefixes here that would forward AWS_* / SSH_* / secrets we don't
+  // control. Curva-only namespaces are safe.
+  const FORWARDED_ENV_PREFIXES = ['CURVA_', 'QVAC_', 'DEV_WALLET_']
+  const forwardedEnv = {}
+  for (const key of Object.keys(process.env)) {
+    if (!FORWARDED_ENV_PREFIXES.some((p) => key.startsWith(p))) continue
+    const val = process.env[key]
+    if (typeof val === 'string' && val.length > 0) forwardedEnv[key] = val
+  }
+  const envJson = JSON.stringify(forwardedEnv)
+
   // Bare.argv layout (indices are load-bearing - workers/main.js reads these positions):
   //   [0] bare bin
   //   [1] script path
@@ -285,6 +318,8 @@ function getWorker(specifier) {
   //   [8] room slug         <- Curva
   //   [9] is-host           <- Curva ('true' or 'false')
   //   [10] backend URL      <- Curva
+  //   [11] auto-open room   <- Curva ('true' or 'false'; default 'true')
+  //   [12] env-json         <- Curva (JSON allowlisted env forwarded from Electron)
   const workerArgs = [
     dir,
     appPath,
@@ -294,7 +329,9 @@ function getWorker(specifier) {
     productName + extension,
     roomSlug,
     String(isHost),
-    backendUrl
+    backendUrl,
+    String(autoOpenRoom),
+    envJson
   ]
 
   console.log(
@@ -304,8 +341,12 @@ function getWorker(specifier) {
     roomSlug,
     'isHost=',
     isHost,
+    'autoOpen=',
+    autoOpenRoom,
     'backend=',
-    backendUrl
+    backendUrl,
+    'forwardedEnvKeys=',
+    Object.keys(forwardedEnv).length
   )
 
   const worker = PearRuntime.run(require.resolve('..' + specifier), workerArgs)

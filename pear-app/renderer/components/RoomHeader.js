@@ -142,7 +142,15 @@ export function mountRoomHeader({ container, curva, roomState, appVersion, backe
   brandMark.addEventListener('click', () => openAboutModal({ curva, appVersion }))
   const brandSlug = document.createElement('span')
   brandSlug.className = 'curva-header__slug'
-  brandSlug.textContent = roomState.slug || 'no-room'
+  // Wave 17 UX: prefer the host-supplied display name over the raw slug when
+  // present. The slug still ships as a tooltip so viewers can copy/paste it
+  // for direct join. When no display name is set (viewers joining, or hosts
+  // who created via the older per-fixture button), fall back to the slug.
+  const displayLabel = (typeof roomState.displayName === 'string' && roomState.displayName.length > 0)
+    ? roomState.displayName
+    : (roomState.slug || 'no-room')
+  brandSlug.textContent = displayLabel
+  brandSlug.title = roomState.slug ? ('slug: ' + roomState.slug) : ''
 
   // -- pear.assets branding pack ---
   // Crest slot. Uses bundled logo as first-paint fallback so the header

@@ -250,7 +250,10 @@ export function mountChat({ container, curva, tier = 'writer' } = {}) {
       const label = document.createElement('span')
       label.className = 'curva-chat__translation-label-inline'
       const from = LANG_LABELS[entry.sourceLang]?.name || entry.sourceLang
-      label.textContent = 'translated from ' + from + ' (on-device, QVAC)'
+      const engineLabel = entry.engine === 'qwen3'
+        ? 'Qwen3 0.6B'
+        : (entry.engine === 'bergamot' ? 'Bergamot NMT' : 'QVAC')
+      label.textContent = 'translated from ' + from + ' (on-device, ' + engineLabel + ')'
       const body = document.createElement('div')
       body.className = 'curva-chat__translation-text'
       body.textContent = entry.translatedText // textContent: XSS-safe
@@ -1231,7 +1234,8 @@ export function mountChat({ container, curva, tier = 'writer' } = {}) {
           `${payload.wall_clock_ms}/${(payload.by_peer || '').slice(0, 8)}`
         translationsByKey.set(key, {
           translatedText: payload.translatedText,
-          sourceLang: payload.sourceLang
+          sourceLang: payload.sourceLang,
+          engine: payload.engine || null
         })
         applyTranslationToRow(key)
       })

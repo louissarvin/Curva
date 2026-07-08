@@ -964,9 +964,13 @@ body {
 }
 
 .curva-header__slug {
-  color: var(--curva-muted);
-  font-family: var(--curva-mono);
-  font-size: 12px;
+  /* Wave 17 v4: base rule matches the overriding !important rule below so
+   * the serif title styling is consistent even if the !important layer is
+   * ever pruned. */
+  color: var(--curva-text);
+  font-family: var(--curva-serif, var(--curva-sans));
+  font-size: 18px;
+  font-weight: 600;
 }
 
 /* .curva-header__meta defined above with flex-wrap */
@@ -1214,6 +1218,146 @@ body {
 .curva-browser__manual-input:focus {
   outline: none;
   border-color: var(--curva-primary-border);
+}
+
+/* -- Wave 17 v3: single-room lobby card --------------------------------- */
+
+.curva-browser__card--room {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px 18px;
+  border: 1px solid var(--curva-border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.02);
+  transition: background 120ms ease-out, border-color 120ms ease-out;
+}
+
+.curva-browser__card--room:hover {
+  background: rgba(255, 255, 255, 0.04);
+  border-color: rgba(255, 255, 255, 0.15);
+}
+
+.curva-browser__room-title {
+  font-family: var(--curva-serif, var(--curva-sans));
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--curva-text);
+  letter-spacing: 0.01em;
+}
+
+.curva-browser__badge--private {
+  color: rgba(180, 180, 180, 0.85);
+  border-color: rgba(180, 180, 180, 0.2);
+  background: rgba(180, 180, 180, 0.06);
+}
+
+.curva-browser__btn--join {
+  align-self: flex-start;
+  min-width: 140px;
+  padding: 10px 22px;
+  font-size: 13px;
+  font-weight: 600;
+  margin-top: 4px;
+}
+
+/* -- Wave 17: Create-new-room form -------------------------------------- */
+
+.curva-browser__create {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 18px;
+  border: 1px solid var(--curva-border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.02);
+  margin-bottom: 20px;
+}
+
+.curva-browser__create-heading {
+  margin: 0;
+  font-family: var(--curva-serif, var(--curva-sans));
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--curva-text);
+  letter-spacing: 0.01em;
+}
+
+.curva-browser__create-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding-top: 4px;
+}
+
+.curva-browser__field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.curva-browser__field span {
+  font-size: 12px;
+  color: var(--curva-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.curva-browser__field--check {
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+}
+
+.curva-browser__field--check span {
+  text-transform: none;
+  color: var(--curva-text);
+  letter-spacing: normal;
+  font-size: 13px;
+}
+
+.curva-browser__check {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--curva-accent);
+}
+
+.curva-browser__input {
+  background: var(--curva-surface-2, #1c1c1c);
+  border: 1px solid var(--curva-web-border);
+  color: var(--curva-text);
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-family: var(--curva-mono);
+  font-size: 13px;
+  transition: border-color 120ms ease-out;
+}
+
+.curva-browser__input:focus {
+  outline: none;
+  border-color: var(--curva-primary-border);
+}
+
+.curva-browser__hint {
+  font-size: 11px;
+  color: var(--curva-muted);
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.curva-browser__error {
+  color: #fca5a5;
+  font-size: 12px;
+  padding: 6px 8px;
+  background: rgba(239, 68, 68, 0.06);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  border-radius: 6px;
+}
+
+.curva-browser__submit-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
 }
 
 /* -- Phase 2: clip gallery ---------------------------------------------- */
@@ -4282,20 +4426,30 @@ button[data-variant="ghost"]:hover {
   opacity: 0.85;
 }
 .curva-header__slug {
-  font-family: var(--curva-mono) !important;
-  color: var(--curva-fg-muted) !important;
-  font-size: 11px !important;
-  padding: 2px 8px !important;
-  background: rgba(255, 255, 255, 0.04) !important;
-  border: 1px solid rgba(255, 255, 255, 0.07) !important;
-  border-radius: 999px !important;
-  letter-spacing: 0.02em !important;
+  /* Wave 17 v4: room title / slug as a first-class element, mirroring the
+   * lobby card title so navigation stays visually consistent. Kept in the
+   * serif Curva stack rather than mono so it reads as a name, not a code. */
+  font-family: var(--curva-serif, var(--curva-sans)) !important;
+  color: var(--curva-text) !important;
+  font-size: 18px !important;
+  font-weight: 600 !important;
+  padding: 0 !important;
+  background: transparent !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  letter-spacing: 0.01em !important;
 }
 
 /* -- Empty states: muted italic, centered, breathing room ----------------- */
-.curva-empty, [data-empty], .curva-feed__empty, .curva-chat__empty,
-.curva-clips__empty, .curva-browser__empty, .curva-tip__empty,
-.curva-predictions__empty {
+/* Wave 17 fix: scope the layout override to :not([hidden]) so the HTML
+ * `hidden` attribute (browser default `[hidden] { display: none }`) actually
+ * takes effect. Before this fix, `display: flex !important` beat
+ * `[hidden] { display: none }` and empty banners rendered above real cards.
+ */
+.curva-empty:not([hidden]), [data-empty]:not([hidden]),
+.curva-feed__empty:not([hidden]), .curva-chat__empty:not([hidden]),
+.curva-clips__empty:not([hidden]), .curva-browser__empty:not([hidden]),
+.curva-tip__empty:not([hidden]), .curva-predictions__empty:not([hidden]) {
   display: flex !important;
   flex-direction: column !important;
   align-items: center !important;
