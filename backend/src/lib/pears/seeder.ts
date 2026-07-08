@@ -84,21 +84,41 @@ class SeederSupervisor {
       CURVA_SEEDER_NOISE_SEED: SEEDER_NOISE_SEED,
     };
 
-    // Why `node` and not `bare`: this defaults to Node so dev environments without
-    // the Bare runtime still boot. If `bare-runtime` is installed and you set
-    // `SEEDER_BARE_ENTRY` to a .mjs script that uses it, this still works because
-    // Node ignores the bare-specific imports (the script is expected to detect
-    // its runtime). In production with `ENABLE_SEEDER=true`, override the spawn
-    // command via SEEDER_BARE_ENTRY pointing to a CLI wrapper if needed.
+    // Runtime selection. The backend itself may be run under Bun (fast dev
+    // loop), but bareSeeder.mjs uses NAPI modules (bare-http1 etc.) that call
+    // libuv functions (`uv_get_osfhandle`) which Bun 1.3.x does not yet
+    // implement (see https://github.com/oven-sh/bun/issues/18546). Every
+    // spawned seeder then panics at boot with `unsupported uv function`,
+    // leaving `GET /relay/info` stuck on `SEEDER_NOT_READY` forever.
+    //
+    // Prefer an explicit interpreter chosen at spawn time:
+    //   1. `SEEDER_NODE_BIN` env override (ops escape hatch)
+    //   2. `node` on PATH (works for every hackathon dev setup)
+    //   3. fall back to `process.execPath` — safe when the backend itself
+    //      is already Node.
+    //
+    // When `SEEDER_BARE_ENTRY` is overridden to point at a Bare CLI wrapper
+    // (production path), operators can set `SEEDER_NODE_BIN=bare` to route
+    // through Bare instead.
+    const explicitBin = (process.env.SEEDER_NODE_BIN || '').trim();
+    let interpreter: string;
+    if (explicitBin.length > 0) {
+      interpreter = explicitBin;
+    } else if (process.execPath.endsWith('/bun') || process.execPath.endsWith('\\bun.exe')) {
+      // Backend runs on Bun; seeder must not inherit that. Use `node` from PATH.
+      interpreter = 'node';
+    } else {
+      interpreter = process.execPath;
+    }
     let child: ChildProcess;
     try {
-      child = spawn(process.execPath, [entryPath], {
+      child = spawn(interpreter, [entryPath], {
         env,
         stdio: ['ignore', 'pipe', 'pipe'],
         detached: false,
       });
     } catch (err) {
-      console.error(`[Seeder] Failed to spawn ${slug}:`, (err as Error)?.message || err);
+      console.error(`[Seeder] Failed to spawn ${slug} via ${interpreter}:`, (err as Error)?.message || err);
       return false;
     }
 

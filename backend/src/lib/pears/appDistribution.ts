@@ -162,16 +162,29 @@ const spawnChild = (): void => {
     CURVA_PEAR_APP_KEY: SNAPSHOT.appKey,
   };
 
+  // Runtime selection (see seeder.ts spawnRoom for the full rationale).
+  // Bun 1.3.x cannot host the bareSeeder NAPI modules; force Node when the
+  // backend is running under Bun so this subprocess boots cleanly. Ops can
+  // override with SEEDER_NODE_BIN.
+  const explicitBin = (process.env.SEEDER_NODE_BIN || '').trim();
+  let interpreter: string;
+  if (explicitBin.length > 0) {
+    interpreter = explicitBin;
+  } else if (process.execPath.endsWith('/bun') || process.execPath.endsWith('\\bun.exe')) {
+    interpreter = 'node';
+  } else {
+    interpreter = process.execPath;
+  }
   let child: ChildProcess;
   try {
-    child = spawn(process.execPath, [entryPath], {
+    child = spawn(interpreter, [entryPath], {
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: false,
     });
   } catch (err) {
     state.lastError = (err as Error)?.message ?? 'spawn failed';
-    console.error('[AppDistribution] spawn failed:', state.lastError);
+    console.error(`[AppDistribution] spawn failed via ${interpreter}:`, state.lastError);
     scheduleRestart();
     return;
   }
