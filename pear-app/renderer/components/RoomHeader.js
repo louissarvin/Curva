@@ -8,6 +8,46 @@
 
 import { mountTipButton } from './TipButton.js'
 
+// -- pear.assets branding pack ---
+// Resolve a crest URL for a given roomState. Prefers the pear.assets branding
+// drive when available; falls back to the bundled `./logo-index.svg`. The
+// branding drive path is exposed by preload as `curva.getBrandingPath()`.
+// See branding-drive/PUBLISH.md for how the drive gets a `path` at runtime.
+const BUNDLED_LOGO_URL = './logo-index.svg'
+// Poll the worker for a branding-drive snapshot every 5s until the path
+// lands. Pear docs describe no fetch-complete event, so a low-frequency pull
+// is the documented pattern. Stops once the path is truthy.
+const BRANDING_POLL_MS = 5_000
+const BRANDING_POLL_MAX_ATTEMPTS = 60 // ~5 minutes cap
+
+export function resolveTeamCode(roomState) {
+  if (!roomState || typeof roomState !== 'object') return null
+  const raw = roomState.homeTeam || roomState.awayTeam || null
+  if (typeof raw === 'string' && raw.length > 0) return raw.toLowerCase().slice(0, 8)
+  // Fall back to splitting the slug: e.g. "wc26-ita-vs-arg" -> "ita".
+  if (typeof roomState.slug === 'string' && roomState.slug.length > 0) {
+    const parts = roomState.slug.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)
+    for (const p of parts) {
+      if (p.length === 3 && /^[a-z]{3}$/.test(p)) return p
+    }
+  }
+  return null
+}
+
+export function brandingCrestUrl(brandingPath, teamCode) {
+  if (typeof brandingPath !== 'string' || brandingPath.length === 0) return null
+  if (typeof teamCode !== 'string' || !/^[a-z0-9-]{1,16}$/.test(teamCode)) return null
+  const base = brandingPath.replace(/\/+$/, '')
+  return 'file://' + base + '/crests/' + teamCode + '.svg'
+}
+
+export function brandingLogoUrl(brandingPath) {
+  if (typeof brandingPath !== 'string' || brandingPath.length === 0) return null
+  const base = brandingPath.replace(/\/+$/, '')
+  return 'file://' + base + '/curva-logo.svg'
+}
+// -- end pear.assets branding pack ---
+
 // Wave 6 T7: poll every 15s (WDK Indexer rate limit is 4 req/10s, so 15s is
 // well within budget). Immediate refresh on tip:confirmed via the existing
 // onTipConfirmed subscription below.
@@ -80,7 +120,7 @@ function formatFiat(currency, amount) {
   }
 }
 
-export function mountRoomHeader({ container, curva, roomState, appVersion } = {}) {
+export function mountRoomHeader({ container, curva, roomState, appVersion, backendUrl = 'http://localhost:3700' } = {}) {
   if (!container) throw new TypeError('container is required')
   if (!curva) throw new TypeError('curva bridge is required')
   if (!roomState) throw new TypeError('roomState is required')
@@ -100,6 +140,59 @@ export function mountRoomHeader({ container, curva, roomState, appVersion } = {}
   const brandSlug = document.createElement('span')
   brandSlug.className = 'curva-header__slug'
   brandSlug.textContent = roomState.slug || 'no-room'
+
+  // -- pear.assets branding pack ---
+  // Crest slot. Uses bundled logo as first-paint fallback so the header
+  // never blocks on the branding drive. Re-renders when the drive lands
+  // (subscription below).
+  const crestImg = document.createElement('img')
+  crestImg.className = 'curva-header__crest'
+  crestImg.alt = ''
+  crestImg.width = 24
+  crestImg.height = 24
+  crestImg.style.verticalAlign = 'middle'
+  crestImg.style.marginRight = '6px'
+  crestImg.src = BUNDLED_LOGO_URL
+
+  function renderCrest() {
+    const brandingPath = (typeof curva?.getBrandingPath === 'function')
+      ? curva.getBrandingPath()
+      : null
+    const teamCode = resolveTeamCode(roomState)
+    const url = brandingCrestUrl(brandingPath, teamCode)
+      || brandingLogoUrl(brandingPath)
+      || BUNDLED_LOGO_URL
+    // Only touch the DOM if the URL actually changed. Avoids network churn
+    // on repeated event fires.
+    if (crestImg.getAttribute('data-resolved') !== url) {
+      crestImg.src = url
+      crestImg.setAttribute('data-resolved', url)
+    }
+  }
+  renderCrest()
+
+  let brandingUnsub = () => {}
+  if (typeof curva?.onBranding === 'function') {
+    try { brandingUnsub = curva.onBranding(() => renderCrest()) } catch { /* noop */ }
+  }
+  // Low-frequency pull loop: keep asking the worker to re-read
+  // `Pear.app.assets.branding.path` until we see a truthy path. Bounded so
+  // an unpublished branding drive doesn't poll forever.
+  let brandingAttempts = 0
+  const brandingPoll = setInterval(() => {
+    brandingAttempts += 1
+    const havePath = (typeof curva?.getBrandingPath === 'function') && curva.getBrandingPath()
+    if (havePath || brandingAttempts >= BRANDING_POLL_MAX_ATTEMPTS) {
+      clearInterval(brandingPoll)
+      return
+    }
+    if (typeof curva?.refreshBranding === 'function') {
+      curva.refreshBranding().catch(() => { /* noop */ })
+    }
+  }, BRANDING_POLL_MS)
+  // -- end pear.assets branding pack ---
+
+  brand.appendChild(crestImg)
   brand.appendChild(brandMark)
   brand.appendChild(brandSlug)
 
@@ -240,7 +333,9 @@ export function mountRoomHeader({ container, curva, roomState, appVersion } = {}
   const tipButton = mountTipButton({
     container: tipContainer,
     curva,
-    hostSmartAddress: roomState.hostSmartAddress || null
+    hostSmartAddress: roomState.hostSmartAddress || null,
+    backendUrl,
+    chainId: roomState.chainId || 11155111
   })
 
   // Wave 14: Attendance chip + modal. Renders "Attendees · N" with a hover
@@ -305,6 +400,50 @@ export function mountRoomHeader({ container, curva, roomState, appVersion } = {}
         if (idx >= 0) attendanceState.passes[idx] = pass
         else attendanceState.passes = [...attendanceState.passes, pass]
         renderAttendanceChip()
+        // Also add a badge via the address map so the chat subscription
+        // path and the attendance list path converge.
+        peerTicketMap.set(pass.peerAddress.toLowerCase(), true)
+      })
+    : () => {}
+
+  // Task 3: per-peer ticket badge map.
+  // Keys are lowercased EVM addresses. Value: true when a pass is confirmed.
+  // Updated from two sources:
+  //   (a) attendance list/issued events above.
+  //   (b) system:attendance-issued chat messages arriving via onChatMessage.
+  // Both sources ultimately reflect the same Hyperbee state; the chat path
+  // gives us live updates without polling the attendance list every second.
+  const peerTicketMap = new Map()
+
+  // Seed the map from any passes already loaded before the chat subscription fires.
+  for (const p of attendanceState.passes) {
+    if (p?.peerAddress) peerTicketMap.set(p.peerAddress.toLowerCase(), true)
+  }
+
+  // Subscribe to chat messages to catch new system:attendance-issued rows that
+  // arrive after mount. We only read the peerAddress field (a checksummed EVM
+  // address); it is not rendered to DOM here — the attendanceChip shows the
+  // count, and openAttendanceModal shows the addresses.
+  const offChatMsgForBadge = typeof curva.onChatMessage === 'function'
+    ? curva.onChatMessage((msg) => {
+        if (msg?.type !== 'system:attendance-issued') return
+        const addr = typeof msg.peerAddress === 'string' ? msg.peerAddress.toLowerCase() : ''
+        if (!addr || addr.length < 10) return
+        if (peerTicketMap.has(addr)) return
+        peerTicketMap.set(addr, true)
+        // Mirror into attendanceState so the modal shows it.
+        const existing = attendanceState.passes.find(
+          (p) => p.peerAddress && p.peerAddress.toLowerCase() === addr
+        )
+        if (!existing) {
+          attendanceState.passes = [...attendanceState.passes, {
+            peerAddress: msg.peerAddress,
+            signature: msg.signature || '',
+            hostAddress: msg.hostAddress || ''
+          }]
+          attendanceState.listArrived = true
+          renderAttendanceChip()
+        }
       })
     : () => {}
 
@@ -535,8 +674,11 @@ export function mountRoomHeader({ container, curva, roomState, appVersion } = {}
     try { offAttConfig() } catch { /* noop */ }
     try { offAttList() } catch { /* noop */ }
     try { offAttIssued() } catch { /* noop */ }
+    try { offChatMsgForBadge() } catch { /* noop */ }
     try { offBlindPeerStatus() } catch { /* noop */ }
     try { offBlindPeerReg() } catch { /* noop */ }
+    try { brandingUnsub() } catch { /* noop */ }
+    try { clearInterval(brandingPoll) } catch { /* noop */ }
     if (tipButton) tipButton.destroy()
     container.textContent = ''
   }
@@ -560,7 +702,11 @@ async function resolveInviteLink(curva, slug) {
       // synthesize here.
       if (typeof link === 'string' && link.length > 0) return resolve(link)
       if (typeof key === 'string' && key.startsWith('pear://')) {
-        return resolve(key + '?room=' + encodeURIComponent(slug))
+        // pear.links + pear.routes native form. The Pear sidecar delivers the
+        // path via Pear.app.route on boot so the renderer auto-joins the room.
+        // Docs: https://docs.pears.com/reference/pear/configuration/
+        const base = key.replace(/\/+$/, '')
+        return resolve(base + '/room/' + encodeURIComponent(slug))
       }
       resolve(fallback)
     }) || (() => {})
@@ -1024,6 +1170,14 @@ function renderAttendanceRow({ curva, pass, slug }) {
   const li = document.createElement('li')
   li.style.cssText = 'display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.06);'
 
+  // Gold ticket SVG badge. Inline SVG is safe here: no user data interpolated.
+  // The icon signals "this peer has a verified attendance pass."
+  const ticketBadge = document.createElement('span')
+  ticketBadge.title = 'Attendance pass issued (EIP-191)'
+  ticketBadge.setAttribute('aria-label', 'ticket')
+  ticketBadge.style.cssText = 'width:14px;height:14px;flex-shrink:0;'
+  ticketBadge.innerHTML = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true"><rect x="1" y="3.5" width="12" height="7" rx="1.5" fill="none" stroke="#d4af37" stroke-width="1.2"/><path d="M9 3.5v7M1 6.5h2M11 6.5h2" stroke="#d4af37" stroke-width="1.2" stroke-linecap="round"/><circle cx="9" cy="7" r="1" fill="#d4af37"/></svg>'
+
   const check = document.createElement('span')
   check.textContent = '✓'
   check.style.cssText = 'color:#4ade80;font-size:12px;width:14px;'
@@ -1055,6 +1209,7 @@ function renderAttendanceRow({ curva, pass, slug }) {
     } catch { /* noop */ }
   })
 
+  li.appendChild(ticketBadge)
   li.appendChild(check)
   li.appendChild(handle)
   li.appendChild(time)
