@@ -22,6 +22,8 @@ import { mountActivityStrip } from './components/ActivityStrip.js'
 import { mountLeaderboard } from './components/Leaderboard.js'
 import { mountPredictionPanel, isPredictionPanelEnabled } from './components/PredictionPanel.js'
 import { mountCommentaryPanel, isCommentaryPanelEnabled } from './components/CommentaryPanel.js'
+import { mountTacticalOverlay } from './components/TacticalOverlay.js'
+import { mountIdentityWizard } from './components/IdentityWizard.js'
 
 const bridge = window.bridge
 const curva = window.curva
@@ -41,7 +43,28 @@ const MAIN_WORKER = '/workers/main.js'
 const boot = bridge.bootConfig() || {}
 const pkg = bridge.pkg() || {}
 
-const roomSlug = boot.room || DEFAULT_ROOM
+// Pear deep-link boot. When Curva is launched via
+//   pear run pear://<KEY>/room/<slug>?invite=<base32url>
+// `Pear.app.route` is `/room/<slug>` and `Pear.app.query` is `invite=...`.
+// Docs: https://docs.pears.com/reference/pear/api/
+//
+// We prefer the pear:// route over the Electron curva:// fallback because the
+// sidecar delivers it synchronously at boot, before any UI mount.
+function readPearDeepLink() {
+  const p = (typeof globalThis.Pear === 'object' && globalThis.Pear) || null
+  const app = p && p.app
+  if (!app || typeof app.route !== 'string') return null
+  // route is unmapped, per docs (before pear.routes rewrites are applied).
+  const m = app.route.match(/^\/room\/([A-Za-z0-9_-]+)\/?$/)
+  if (!m) return null
+  const slug = decodeURIComponent(m[1])
+  const query = new URLSearchParams(app.query || '')
+  const invite = query.get('invite') || null
+  return { slug, invite }
+}
+const pearLink = readPearDeepLink()
+
+const roomSlug = pearLink?.slug || boot.room || DEFAULT_ROOM
 const isHost = !!boot.isHost
 const backend = boot.backend || BACKEND_URL
 const appVersion = boot.version || pkg.version || '0.0.0'
@@ -50,6 +73,17 @@ const appVersion = boot.version || pkg.version || '0.0.0'
 // bootConfig) enables the diagnostics footer + a few extra devtools helpers.
 const urlParams = new URLSearchParams(window.location.search)
 const diagMode = urlParams.get('diag') === '1' || boot.diag === true
+
+// Tactical drawing overlay feature flag. Off by default.
+// Enable via: `?tactical=1` in dev URL or `CURVA_TACTICAL_ENABLED: true` in bootConfig.
+const TACTICAL_ENABLED = !!boot.CURVA_TACTICAL_ENABLED || urlParams.get('tactical') === '1'
+
+// Cup Final live-match minute overlay. On by default (safe/harmless: hides
+// itself when no matchId is bound or when no pulse arrives). Explicit `false`
+// in bootConfig OR `?live-minute=0` in dev URL disables.
+const LIVE_MINUTE_OVERLAY_ENABLED =
+  boot.CURVA_LIVE_MINUTE_OVERLAY_ENABLED !== false &&
+  urlParams.get('live-minute') !== '0'
 
 // -- boot splash handling --------------------------------------------------
 const bootEl = document.querySelector('[data-boot]')
@@ -161,6 +195,62 @@ let predictionPanelHost = null
 // AND here so a stale flag can never leak DOM into a locked-down build.
 let commentaryPanel = null
 let commentaryPanelHost = null
+// C2: TacticalOverlay. Only mounted when TACTICAL_ENABLED.
+let tacticalOverlay = null
+
+// Tier 4 R2: IdentityWizard gate.
+// Mount the wizard over the whole UI before the room browser is shown.
+// The wizard resolves synchronously (skipped) when the keet identity feature
+// is absent (curva.identity.generateNew not exposed), so this adds zero latency
+// to non-identity builds.
+let identityWizardHost = null
+let identityWizardInstance = null
+
+function runIdentityWizardThenBrowser() {
+  if (identityWizardHost) {
+    try { identityWizardHost.remove() } catch { /* noop */ }
+    identityWizardHost = null
+  }
+
+  // Feature probe: if curva.identity.generateNew is not a function, the
+  // IdentityWizard itself will call onComplete({skipped:true}) immediately.
+  identityWizardHost = document.createElement('div')
+  identityWizardHost.className = 'curva-identity-wizard-host'
+  document.body.appendChild(identityWizardHost)
+
+  identityWizardInstance = safeMount('IdentityWizard', () => mountIdentityWizard({
+    container: identityWizardHost,
+    curva,
+    onComplete: (result) => {
+      // Destroy and remove the wizard host before proceeding.
+      if (identityWizardInstance) {
+        try { identityWizardInstance.destroy() } catch { /* noop */ }
+        identityWizardInstance = null
+      }
+      if (identityWizardHost) {
+        try { identityWizardHost.remove() } catch { /* noop */ }
+        identityWizardHost = null
+      }
+      if (result?.skipped) {
+        logEvent('info', 'identity wizard: skipped (flag off or identity exists)')
+      } else if (result?.restored) {
+        logEvent('info', 'identity wizard: identity restored')
+      } else {
+        logEvent('info', 'identity wizard: identity created')
+      }
+      mountBrowser()
+    }
+  }), identityWizardHost)
+
+  // Safety: if safeMount returns null (component threw), fall through to browser.
+  if (!identityWizardInstance) {
+    if (identityWizardHost) {
+      try { identityWizardHost.remove() } catch { /* noop */ }
+      identityWizardHost = null
+    }
+    mountBrowser()
+  }
+}
 
 function mountBrowser() {
   destroyBrowser()
@@ -198,7 +288,8 @@ function mountRoom(payload) {
     container: els.roomHeader,
     curva,
     roomState: state.currentRoom,
-    appVersion
+    appVersion,
+    backendUrl: backend
   }), els.roomHeader)
 
   curva.initWallet().catch((err) => {
@@ -209,8 +300,26 @@ function mountRoom(payload) {
     container: els.video,
     curva,
     initialSource: '../assets/sample-clip.mp4',
-    isHost: !!state.currentRoom?.isHost
+    isHost: !!state.currentRoom?.isHost,
+    matchId: state.currentRoom?.matchId || null,
+    liveMinuteOverlayEnabled: LIVE_MINUTE_OVERLAY_ENABLED
   }), els.video)
+
+  // C2: TacticalOverlay. Mounted on the video wrap so it sits over the video
+  // element. Only activated when TACTICAL_ENABLED flag is set. The feature flag
+  // avoids any canvas/ResizeObserver overhead in production builds.
+  if (TACTICAL_ENABLED && videoPlayer && videoPlayer.wrap && videoPlayer.video) {
+    tacticalOverlay = safeMount('TacticalOverlay', () => mountTacticalOverlay({
+      container: videoPlayer.wrap,
+      videoEl: videoPlayer.video,
+      curva,
+      isHost: !!state.currentRoom?.isHost
+    }), null)
+    if (videoPlayer.attachTacticalOverlay && tacticalOverlay) {
+      videoPlayer.attachTacticalOverlay(tacticalOverlay)
+    }
+    logEvent('info', 'tactical overlay mounted (isHost=' + (state.currentRoom?.isHost ? 'yes' : 'no') + ')')
+  }
 
   chat = safeMount('Chat', () => mountChat({
     container: els.chat,
@@ -310,6 +419,7 @@ function mountRoom(payload) {
 }
 
 function destroyRoom() {
+  if (tacticalOverlay) { try { tacticalOverlay.destroy() } catch { /* noop */ } tacticalOverlay = null }
   if (commentaryPanel) { try { commentaryPanel.destroy() } catch { /* noop */ } commentaryPanel = null }
   if (commentaryPanelHost) { try { commentaryPanelHost.remove() } catch { /* noop */ } commentaryPanelHost = null }
   if (predictionPanel) { try { predictionPanel.destroy() } catch { /* noop */ } predictionPanel = null }
@@ -373,6 +483,29 @@ curva.onDeepLinkJoin?.(({ slug }) => {
     logEvent('error', 'deep-link joinRoom failed: ' + err.message)
   })
 })
+
+// pear.links auto-join. When Curva boots via
+//   pear run pear://<KEY>/room/<slug>?invite=<base32url>
+// the Pear sidecar populates `Pear.app.route` synchronously (see
+// readPearDeepLink above). We wait for the worker ready signal so
+// writerInvitation can verify the token, then auto-join.
+if (pearLink) {
+  logEvent('info', 'pear.link boot: slug=' + pearLink.slug +
+    ' invite=' + (pearLink.invite ? 'yes' : 'no'))
+  const autoJoin = () => {
+    curva.joinRoom(pearLink.slug, false, { invite: pearLink.invite }).catch((err) => {
+      logEvent('error', 'pear.link joinRoom failed: ' + err.message)
+    })
+  }
+  if (typeof curva.onWorkerReady === 'function') {
+    curva.onWorkerReady(autoJoin)
+  } else {
+    // Worker readiness bridge not yet exposed. Fall back to a small delay so
+    // the worker has time to hydrate the writerInvitation module. If joinRoom
+    // fires before the worker is ready, it will surface a clear error.
+    setTimeout(autoJoin, 750)
+  }
+}
 
 // T5: OTA update toast. Bottom-right, non-intrusive. Two phases:
 //   - `update:available` -> "Curva vX.Y.Z is downloading"
@@ -492,9 +625,10 @@ function handleWorkerEvent(msg) {
         els.topbarPubkey.textContent = 'pubkey: ' + short(payload.pubkey) + ' · handle: ' + payload.handle
       }
       logEvent('ready', `worker ready. pubkey=${short(payload.pubkey)}`)
-      // Boot done — hide the splash and reveal the browser.
+      // Boot done — hide the splash, run the IdentityWizard (if the keet
+      // identity feature is available), then reveal the browser.
       hideBootSplash()
-      mountBrowser()
+      runIdentityWizardThenBrowser()
       break
     case 'peer:connected':
       state.peerCount = payload.count
@@ -628,6 +762,76 @@ bridge.startWorker(MAIN_WORKER).catch((err) => {
 })
 
 logEvent('info', `booting curva v${appVersion} in room=${roomSlug} role=${isHost ? 'host' : 'peer'} backend=${backend}`)
+
+// -- Demo automation floating button (dev-only) ---------------------------
+// One-button pitch driver for the July 15 Cup Final demo. Gated on
+// `boot.CURVA_DEMO_AUTOMATION_ENABLED` OR `?demo=1`. Renders a small floating
+// button top-left. On click, calls `curva.demoTimeline.start()` and flips the
+// label to a stop control while the timeline is running. Auto-hides when the
+// timeline reports state:'finished'. All backend-sourced text is set via
+// textContent (never innerHTML) to keep the XSS surface at zero.
+const DEMO_AUTOMATION_ENABLED = !!boot.CURVA_DEMO_AUTOMATION_ENABLED
+  || urlParams.get('demo') === '1'
+if (DEMO_AUTOMATION_ENABLED && curva && curva.demoTimeline) {
+  mountDemoAutomationButton()
+}
+function mountDemoAutomationButton() {
+  const wrap = document.createElement('div')
+  wrap.setAttribute('data-demo-automation', '')
+  wrap.style.cssText = [
+    'position:fixed', 'top:12px', 'left:12px', 'z-index:9999',
+    'display:flex', 'flex-direction:column', 'gap:4px',
+    'font-family:system-ui,-apple-system,sans-serif',
+    'font-size:12px', 'user-select:none', 'pointer-events:auto'
+  ].join(';')
+  const btn = document.createElement('button')
+  btn.type = 'button'
+  btn.textContent = 'Run demo'
+  btn.style.cssText = [
+    'height:24px', 'padding:0 10px', 'border:0', 'border-radius:4px',
+    'background:#B0001A', 'color:#fff', 'font-weight:600', 'cursor:pointer',
+    'box-shadow:0 1px 3px rgba(0,0,0,0.3)'
+  ].join(';')
+  const status = document.createElement('div')
+  status.textContent = ''
+  status.style.cssText = [
+    'padding:2px 6px', 'background:rgba(0,0,0,0.6)', 'color:#fff',
+    'border-radius:3px', 'min-height:14px'
+  ].join(';')
+  wrap.appendChild(btn)
+  wrap.appendChild(status)
+  document.body.appendChild(wrap)
+
+  let running = false
+  function renderTick(s) {
+    // s is trusted (comes from our own worker) but we still stick to
+    // textContent to keep the invariant "no innerHTML for backend data".
+    if (!s) { status.textContent = ''; return }
+    const secs = Math.floor((s.elapsedMs || 0) / 1000)
+    status.textContent = 'elapsed: ' + secs + 's / step: ' + (s.currentStep || 0) + ' of ' + (s.totalSteps || 0)
+    running = s.state === 'running'
+    btn.textContent = running ? 'Stop demo' : 'Run demo'
+    if (s.state === 'finished') {
+      // Auto-hide after a short beat so the presenter sees the completion.
+      setTimeout(() => {
+        try { wrap.remove() } catch { /* noop */ }
+      }, 3000)
+    }
+  }
+  btn.addEventListener('click', async () => {
+    try {
+      if (running) {
+        await curva.demoTimeline.stop()
+      } else {
+        await curva.demoTimeline.start()
+      }
+    } catch (err) {
+      status.textContent = 'demo error: ' + (err && err.message ? String(err.message).slice(0, 60) : 'unknown')
+    }
+  })
+  try { curva.onDemoTimelineTick(renderTick) } catch { /* noop */ }
+  try { curva.onDemoTimelineStatus(renderTick) } catch { /* noop */ }
+}
 
 function showCrashOverlay(code) {
   const overlay = document.createElement('div')
