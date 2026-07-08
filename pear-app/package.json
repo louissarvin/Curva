@@ -39,7 +39,7 @@
     "pear:stage": "pear stage dev .",
     "pear:release": "pear release dev .",
     "pear:seed": "pear seed dev .",
-    "postinstall": "node scripts/postinstall-noble-engines-fix.js && node scripts/postinstall-bare-node-shims.js"
+    "postinstall": "node scripts/postinstall-noble-engines-fix.js && node scripts/postinstall-bare-node-shims.js && node scripts/postinstall-tinyld-engines-fix.js"
   },
   "dependencies": {
     "@qvac/sdk": "^0.14.0",
