@@ -24,10 +24,27 @@ const forgeArgs = [
 ]
 if (clean) forgeArgs.push('--clean')
 
+// Demo-time feature flags. Everything Curva ships is gated behind a per-feature
+// env flag so production installs stay opt-in. The 4-peer demo path forces them
+// all on so the judges see every pillar detonate without touching env files.
+// Callers can still override by exporting the flag before running the script.
+const demoFlags = {
+  CURVA_QVAC_COMMENTATOR_ENABLED: 'true',
+  CURVA_QVAC_STT_ENABLED: 'true',
+  CURVA_PREDICTIONS_ENABLED: 'true',
+  CURVA_ATTENDANCE_ENABLED: 'true',
+  CURVA_BLIND_PEERING_ENABLED: 'true',
+  CURVA_DELEGATED_INFERENCE_ENABLED: 'true'
+}
+const demoEnv = { ...process.env }
+for (const [k, v] of Object.entries(demoFlags)) {
+  if (!demoEnv[k]) demoEnv[k] = v
+}
+
 const child = spawn('npx', forgeArgs, {
   stdio: 'inherit',
   cwd: path.resolve(__dirname, '..'),
-  env: { ...process.env }
+  env: demoEnv
 })
 
 child.on('exit', (code) => process.exit(code ?? 0))
