@@ -404,12 +404,28 @@ function renderMatchCard(match, rooms, onJoin, liveCount) {
   actions.appendChild(createBtn)
 
   for (const r of rooms.slice(0, 3)) {
+    const roomRow = document.createElement('span')
+    roomRow.className = 'curva-browser__room-row'
+
     const b = document.createElement('button')
     b.type = 'button'
     b.className = 'curva-browser__btn'
     b.textContent = 'Join ' + (r.slug || '(unnamed)')
     b.addEventListener('click', () => onJoin(String(r.slug), false))
-    actions.appendChild(b)
+    roomRow.appendChild(b)
+
+    // Tier 4: STADIUM badge for public spectator rooms.
+    // textContent only — visibility field from backend is controlled data
+    // but we still guard it through the exact-match check below.
+    if (r.visibility === 'public') {
+      const badge = document.createElement('span')
+      badge.className = 'curva-browser__badge curva-browser__badge--stadium'
+      badge.textContent = 'STADIUM'
+      badge.title = 'Public spectator room. Anyone can watch; invited peers can chat.'
+      roomRow.appendChild(badge)
+    }
+
+    actions.appendChild(roomRow)
   }
 
   li.appendChild(head)
