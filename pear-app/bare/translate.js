@@ -687,7 +687,13 @@ function checkRateLimit (store, remoteKey, perMin) {
 
 async function downloadAndVerify ({ url, destPath, expectedDigest, expectedSize, fetchImpl, fsUse, onProgress }) {
   if (!fetchImpl) throw withCode('FETCH_UNAVAILABLE', 'fetch is not available in this runtime')
-  const resp = await fetchImpl(url)
+  // Follow HTTP redirects. The backend model mirror route can 302 to a
+  // Google Cloud Storage URL when MODEL_MIRROR_ENABLED=false or when a
+  // Bergamot entry has contentDigest=null. bare-fetch defaults to
+  // `manual` on some builds, which stalls the download loop below on an
+  // empty body. `redirect: 'follow'` matches browser fetch and Node
+  // undici semantics, so both mirrored and origin URLs work.
+  const resp = await fetchImpl(url, { redirect: 'follow' })
   if (!resp || !resp.ok) {
     throw withCode('DOWNLOAD_HTTP_ERROR', 'HTTP ' + (resp?.status || 'unknown'))
   }
