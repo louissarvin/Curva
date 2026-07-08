@@ -230,6 +230,21 @@ swarm.on('connection', (conn, info) => {
   try { replicateStream = store.replicate(conn) } catch (err) {
     console.error('[Curva] store.replicate failed:', err?.message)
   }
+  // Autobase writer core attachment. `store.replicate(conn)` above only
+  // attaches cores with `active: true`; Autobase opens writer cores with
+  // `active: false`, so without an explicit `base.replicate(conn)` the
+  // writer cores never attach to this connection's muxer and chat blocks
+  // authored on either side never cross. Piggybacks on the same noise
+  // stream — idempotent when the room is opened later (openRoomFor also
+  // runs this loop for the current room state).
+  if (room) {
+    try { if (room.chat?.getBase?.()?.replicate) room.chat.getBase().replicate(conn) } catch (err) {
+      log('warn', 'chat autobase attach on connect failed', { message: err && err.message })
+    }
+    try { if (room.playhead?.getBase?.()?.replicate) room.playhead.getBase().replicate(conn) } catch (err) {
+      log('warn', 'playhead autobase attach on connect failed', { message: err && err.message })
+    }
+  }
   // Tier 3: tactical drawing channel rides the same corestore-replicate
   // Protomux. `room.attachTacticalToStream` grabs the existing muxer via
   // Hypercore.getProtocolMuxer(stream) and adds `curva/tactical/1` alongside
@@ -411,6 +426,7 @@ async function getPeerIdentity() {
 let roomDiscovery = null
 let room = null                 // { slug, isHost, myPubkey, playhead, chat, close }
 let roomUnsubs = []             // cleanup fns for playhead/chat listeners
+let localWriterActiveSessions = [] // retained hypercore sessions that keep local writer cores replicable
 // Guard against re-entrant room reopens triggered by `room:hello` frames
 // arriving on multiple concurrent connections. Non-null while a reopen is in
 // flight; the awaiter clears it in a finally.
@@ -854,6 +870,21 @@ async function openRoomFor(slug, isHost, { chatBootstrap = null, playheadBootstr
   if (room) {
     log('warn', 'openRoomFor called while room exists; closing prior room first')
     await closeCurrentRoom()
+  }
+  // Join the Hyperswarm topic FIRST so the peer is discoverable + can discover
+  // others on this room's topic. Without this, `--no-auto-open` boots (lobby
+  // then click-Join flow) never announce the room topic on the DHT, and the
+  // two peers never find each other even when both open the same Autobase.
+  // Idempotent: hyperswarm de-duplicates `join(topic)` calls on the same
+  // discovery instance; a repeat join here is a no-op. Best-effort — a DHT
+  // announce failure should not block room open (the swarm keeps retrying
+  // in the background).
+  try {
+    if (!roomDiscovery || roomDiscovery.destroyed) {
+      await joinRoom(slug)
+    }
+  } catch (err) {
+    log('warn', 'joinRoom during openRoomFor failed', { message: err && err.message })
   }
   const identity = identityCache || (await getPeerIdentity())
   identityCache = identity
@@ -1412,6 +1443,73 @@ async function openRoomFor(slug, isHost, { chatBootstrap = null, playheadBootstr
     })()
   }, 500)
 
+  // Force every Autobase writer core to become replicable. Autobase opens
+  // its writer cores with `active: false` (autobase/index.js:_makeWriterCore),
+  // and `_shouldReplicate` in corestore/index.js:475 gates on
+  // `core.replicator.downloading && core.opened && this.active`. An
+  // active:false-only core has `replicator.downloading === false`, so
+  // `store.replicate(conn)` from the module-level `swarm.on('connection')`
+  // never attaches it to the muxer. The remote side likewise never
+  // discovers our writer core's discovery key, so replication deadlocks
+  // and chat blocks stay stuck on the local corestore forever.
+  //
+  // Opening an active:true session on the same core key promotes the
+  // aggregate `replicator.downloading` to true. Any subsequent replicate()
+  // call (including the one on the module-level connection handler) will
+  // now attach the writer core to the muxer, and Autobase's wakeup
+  // protocol pushes new blocks through it.
+  //
+  // Additionally call `base.replicate(conn)` for every existing muxer to
+  // wake the wakeup channel on those streams so the newly-active writer
+  // gets its addWriter block replicated immediately, without waiting for
+  // the next connection.
+  try {
+    const chatBase = room.chat?.getBase?.()
+    const phBase = room.playhead?.getBase?.()
+    // Close any active sessions from a prior openRoomFor call (the reopens
+    // that fire on wallet:ready and after room:hello). Sessions hold the
+    // core open and pin the active count above zero; leaking them across
+    // reopens keeps stale writer keys downloadable and can crash on close.
+    while (localWriterActiveSessions.length > 0) {
+      const s = localWriterActiveSessions.pop()
+      try { await s.close() } catch { /* best-effort */ }
+    }
+    if (chatBase?.local && typeof chatBase.local.session === 'function') {
+      try {
+        const s = chatBase.local.session({ active: true })
+        await s.ready?.()
+        localWriterActiveSessions.push(s)
+      } catch (err) {
+        log('warn', 'chat local active session failed', { message: err && err.message })
+      }
+    }
+    if (phBase?.local && typeof phBase.local.session === 'function') {
+      try {
+        const s = phBase.local.session({ active: true })
+        await s.ready?.()
+        localWriterActiveSessions.push(s)
+      } catch (err) {
+        log('warn', 'playhead local active session failed', { message: err && err.message })
+      }
+    }
+    if (swarm && (chatBase || phBase)) {
+      for (const conn of swarm.connections) {
+        try { if (chatBase?.replicate) chatBase.replicate(conn) } catch (err) {
+          log('warn', 'chatBase.replicate failed', { message: err && err.message })
+        }
+        try { if (phBase?.replicate) phBase.replicate(conn) } catch (err) {
+          log('warn', 'phBase.replicate failed', { message: err && err.message })
+        }
+      }
+      log('info', 'autobase writer cores attached to muxers', {
+        conns: swarm.connections.size ?? 0,
+        chatWriterKey: chatBase?.local?.key ? chatBase.local.key.toString('hex').slice(0, 8) : null
+      })
+    }
+  } catch (err) {
+    log('warn', 'autobase replicate wiring failed', { message: err && err.message })
+  }
+
   emit('room:ready', {
     slug,
     isHost,
@@ -1520,6 +1618,40 @@ async function tryDiscoverHostAddress() {
       ownerAddress: owner
     })
     log('info', 'tip:host-discovered via backend directory', { smart, owner })
+    // Same-laptop demo helper: the directory also carries the host's Autobase
+    // base keys when the host has published them (see PUT /rooms/:slug/bases).
+    // Re-open the room with the correct bootstrap so the viewer's chat and
+    // playhead Autobases point at the host's cores. Once the seeder subprocess
+    // replicates the cores in both directions, chat sync works without a
+    // direct swarm socket between the two peers.
+    const targetChat = typeof rec?.chatBaseKey === 'string' && /^[0-9a-f]{64}$/.test(rec.chatBaseKey)
+      ? rec.chatBaseKey.toLowerCase()
+      : null
+    const targetPh = typeof rec?.playheadBaseKey === 'string' && /^[0-9a-f]{64}$/.test(rec.playheadBaseKey)
+      ? rec.playheadBaseKey.toLowerCase()
+      : null
+    if (targetChat && targetPh && room && !room.isHost && !roomBootstrapReopenInFlight) {
+      const chatBase = room.chat.getBase?.()
+      const phBase = room.playhead.getBase?.()
+      const curChat = chatBase?.key ? b4a.toString(chatBase.key, 'hex') : null
+      const curPh = phBase?.key ? b4a.toString(phBase.key, 'hex') : null
+      if (curChat !== targetChat || curPh !== targetPh) {
+        roomBootstrapReopenInFlight = (async () => {
+          const slug = room.slug
+          log('info', 'reopening room with host bootstrap via backend directory', {
+            chat: targetChat.slice(0, 8),
+            playhead: targetPh.slice(0, 8)
+          })
+          await openRoomFor(slug, false, {
+            chatBootstrap: targetChat,
+            playheadBootstrap: targetPh
+          })
+        })()
+          .catch((err) => log('warn', 'directory-driven bootstrap reopen failed', { message: err.message }))
+          .finally(() => { roomBootstrapReopenInFlight = null })
+        return
+      }
+    }
     if (isFirst && walletReady && room && !room.isHost && !room.tip) {
       const slug = room.slug
       setTimeout(() => {
@@ -1734,6 +1866,47 @@ async function initWallet(payload) {
           log('info', 'rebroadcast room:hello with wallet after wallet:ready', {
             connCount: swarm.connections.size ?? '?'
           })
+        }
+        // Same-laptop demo helper: also publish the base keys to the backend
+        // directory so viewers who never form a direct swarm socket to the
+        // host can still bootstrap the correct Autobase. Non-authoritative,
+        // best-effort; the P2P `room:hello` path stays the primary and the
+        // authoritative source of truth. Retries with backoff because
+        // wallet:ready often fires before the host has clicked "Publish to
+        // directory", so the DB row does not yet exist and PUT returns 404.
+        if (chatKeyHex && phKeyHex && config.backendUrl && room.slug) {
+          const url = config.backendUrl.replace(/\/$/, '') + '/rooms/' + encodeURIComponent(room.slug) + '/bases'
+          const body = JSON.stringify({ chatBaseKey: chatKeyHex, playheadBaseKey: phKeyHex })
+          ;(async () => {
+            const maxAttempts = 20
+            for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+              try {
+                const res = await fetch(url, {
+                  method: 'PUT',
+                  headers: { 'Content-Type': 'application/json', Connection: 'close' },
+                  body
+                })
+                if (res && res.ok) {
+                  log('info', 'published base keys to backend directory', {
+                    chat: chatKeyHex.slice(0, 8),
+                    playhead: phKeyHex.slice(0, 8),
+                    attempts: attempt
+                  })
+                  return
+                }
+                if (res && res.status === 404) {
+                  await new Promise((r) => setTimeout(r, 3000))
+                  continue
+                }
+                log('warn', 'publish base keys failed', { status: res?.status, attempt })
+                return
+              } catch (err) {
+                log('warn', 'publish base keys errored', { message: err?.message, attempt })
+                await new Promise((r) => setTimeout(r, 3000))
+              }
+            }
+            log('warn', 'publish base keys gave up after retries', { attempts: maxAttempts })
+          })()
         }
       } catch (err) {
         log('warn', 'rebroadcast hello failed', { message: err.message })
@@ -2327,6 +2500,25 @@ async function closeCurrentRoom() {
           regions: info.regions,
           forced: forceRelayEnv
         })
+        // Explicit relay peer join. `relayThrough` only names the pubkey; it
+        // does not make hyperswarm establish or maintain the actual TCP/UDX
+        // socket to that peer. Without an active connection to the relay,
+        // relayed hole-punches have no upstream to hop through and the peer
+        // silently degrades to direct-only. `swarm.joinPeer(publicKey)` opens
+        // a persistent client-only connection that hyperswarm will re-use for
+        // every relayed connection request.
+        //
+        // Only join when we actually plan to route through the relay
+        // (forceRelayEnv=true) so peers on healthy networks don't pin an
+        // unnecessary socket to the backend on every boot.
+        if (relayKeyBuf && forceRelayEnv) {
+          try {
+            swarm.joinPeer(relayKeyBuf)
+            log('info', 'joined relay peer', { pubkey: info.pubkey.slice(0, 12) + '...' })
+          } catch (err) {
+            log('warn', 'joinPeer(relay) failed', { message: err && err.message })
+          }
+        }
         emit('relay:info', {
           pubkey: info.pubkey,
           regions: info.regions,
