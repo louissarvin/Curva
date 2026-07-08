@@ -476,6 +476,14 @@ async function openRoom(store, opts) {
   }
 
   const writerRoster = await loadWriterRoster()
+  // Active-true corestore sessions on remote writer cores that we promoted
+  // via `chatBase.append({addWriter: peerKey})`. Autobase opens the peer
+  // writer core internally with `active: false`, which prevents the core
+  // from attaching to any live Hyperswarm muxer and stalls chat sync.
+  // Keeping an active session open flips the aggregate downloading flag
+  // and lets Corestore attach the core to every muxer. Sessions are closed
+  // in the room close path together with the other cores.
+  const _remoteWriterSessions = []
 
   // Rehydrate the reader-tier denylist from persisted state so a rebooting host
   // resumes rejecting reader-tier appends without waiting for the peer to
@@ -639,6 +647,30 @@ async function openRoom(store, opts) {
         : phWriterHex
       await chatBase.append({ addWriter: chatWriterKeyHex, indexer: true })
       await phBase.append({ addWriter: phWriterKeyHex, indexer: true })
+      // Same-host Autobase multi-writer fix. When the host appends
+      // { addWriter: peerKey }, Autobase internally opens the peer's writer
+      // core via `store.get({ key, active: false })` (see
+      // node_modules/autobase/index.js:_makeWriterCore). Corestore's
+      // `_shouldReplicate` gate rejects `active: false` cores, so the peer
+      // core sits open but never attaches to any live Hyperswarm muxer, and
+      // the peer's chat blocks never sync to the host. Symmetric fix to the
+      // one on the peer's own local writer core: open an active:true session
+      // on the same key so the aggregate replicator.downloading flips to
+      // true, `ondownloading` in corestore/index.js:728 fires and
+      // `streamTracker.attachAll(core)` attaches this remote core to every
+      // live muxer. The session is retained on the room object so it is
+      // closed at room teardown together with the other cores.
+      try {
+        const chatKeyBuf = Buffer.from(chatWriterKeyHex, 'hex')
+        const phKeyBuf = Buffer.from(phWriterKeyHex, 'hex')
+        const chatActiveSession = roomStore.get({ key: chatKeyBuf, active: true })
+        const phActiveSession = roomStore.get({ key: phKeyBuf, active: true })
+        await chatActiveSession.ready()
+        await phActiveSession.ready()
+        _remoteWriterSessions.push(chatActiveSession, phActiveSession)
+      } catch (err) {
+        console.log('[Curva][Room] active session on remote writer failed:', err?.message)
+      }
     } catch (err) {
       return { ok: false, reason: 'addWriter-failed:' + (err?.message || 'unknown') }
     }
@@ -1053,6 +1085,11 @@ async function openRoom(store, opts) {
       }
     }
     try { if (tip) tip.close() } catch (err) { errs.push(err) }
+    // Close any active:true sessions we opened on promoted-writer cores.
+    for (const s of _remoteWriterSessions) {
+      try { await s.close() } catch (err) { errs.push(err) }
+    }
+    _remoteWriterSessions.length = 0
     try { await playhead.close() } catch (err) { errs.push(err) }
     try { await chat.close() } catch (err) { errs.push(err) }
     try { await clips.close() } catch (err) { errs.push(err) }
