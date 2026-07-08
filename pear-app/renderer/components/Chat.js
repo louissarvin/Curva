@@ -184,9 +184,16 @@ export function mountChat({ container, curva, tier = 'writer' } = {}) {
     // matchTimeMs is 0 here; VideoPlayer emits its own; the chat send just
     // records what the sender's local video was at. Renderer app.js can wire
     // in a real match_time_ms if it wants to (Phase 2 polish).
-    // Phase 3.5: attach the sender's source language so peers can translate.
-    // If the user hasn't picked a language, we omit it (peers fall back to 'en').
-    curva.sendChat(text, 0, userLang || undefined).catch((err) => {
+    // Phase 3.5: DO NOT tag the message with userLang. userLang is what the
+    // reader wants translations rendered IN, not what the sender is typing.
+    // Passing it as source_lang made every message the user typed after
+    // clicking "READ AS: IT" get labelled `source_lang: 'it'` — Bergamot
+    // then tried IT->x on plain English text and produced garbage
+    // ("what's your name" -> "hello" and similar). Omitting the field
+    // means peers fall back to the 'en' default, which matches the
+    // reality that most demo chat is typed in English. A future write-in
+    // language picker can populate source_lang explicitly.
+    curva.sendChat(text, 0).catch((err) => {
       console.warn('[curva] sendChat failed:', err?.message)
     })
   })
