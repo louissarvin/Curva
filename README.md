@@ -289,44 +289,86 @@ For the "host creates room, viewer joins from the directory" story you see in th
 
 Prerequisites: backend running on `http://localhost:3700` (see above), `blind-peer-cli` running locally (`npm i -g blind-peer-cli && blind-peer --storage ./.blind-peer-storage --max-storage 4096`), and clean storage dirs.
 
-**Shell 1 — Peer A (host).** Auto-joins `wc26-final`, publishes to the STADIUM directory:
+Both storage paths below use the `-fresh` suffix so the wallets survive a restart within the same demo session (the same smart addresses stay funded). Delete the folder if you want a clean slate; new wallets get generated and you re-run `bun run fund:peers` (see below).
+
+**Shell 1 — Peer A (host).** `--no-auto-open` keeps the app on the lobby so the host can pick a slug and click Create:
 
 ```bash
+cd pear-app && \
 DEV_WALLET_PASSCODE=curva-peer-a-pw \
 CURVA_DEMO_MODE=true \
 CURVA_QVAC_COMMENTATOR_ENABLED=true CURVA_QVAC_STT_ENABLED=true CURVA_QVAC_TTS_ENABLED=true \
+CURVA_QVAC_LLM_TRANSLATE_ENABLED=true \
 CURVA_PREDICTIONS_ENABLED=true CURVA_ATTENDANCE_ENABLED=true \
-CURVA_BLIND_PEERING_ENABLED=true CURVA_DELEGATED_INFERENCE_ENABLED=true \
+CURVA_DELEGATED_INFERENCE_ENABLED=true \
 CURVA_TACTICAL_ENABLED=true CURVA_DEMO_HUD_ENABLED=true \
-CURVA_BLIND_PEER_KEY=<your blind-peer public key> \
-cd pear-app && npx electron-forge start -- --no-updates \
-  --storage /tmp/curva-peer-a \
-  --room wc26-final --is-host \
+npx electron-forge start -- --no-updates \
+  --storage /tmp/curva-peer-a-fresh \
+  --no-auto-open \
   --backend http://localhost:3700
 ```
 
-**Shell 2 — Peer B (viewer).** Same env, but no `--room` flag so it lands on the lobby with the STADIUM directory:
+**Shell 2 — Peer B (viewer).** Same launch, same lobby-first behaviour:
 
 ```bash
+cd pear-app && \
 DEV_WALLET_PASSCODE=curva-peer-b-pw \
 CURVA_DEMO_MODE=true \
 CURVA_QVAC_COMMENTATOR_ENABLED=true CURVA_QVAC_STT_ENABLED=true CURVA_QVAC_TTS_ENABLED=true \
+CURVA_QVAC_LLM_TRANSLATE_ENABLED=true \
 CURVA_PREDICTIONS_ENABLED=true CURVA_ATTENDANCE_ENABLED=true \
-CURVA_BLIND_PEERING_ENABLED=true CURVA_DELEGATED_INFERENCE_ENABLED=true \
+CURVA_DELEGATED_INFERENCE_ENABLED=true \
 CURVA_TACTICAL_ENABLED=true CURVA_DEMO_HUD_ENABLED=true \
-CURVA_BLIND_PEER_KEY=<your blind-peer public key> \
-cd pear-app && npx electron-forge start -- --no-updates \
-  --storage /tmp/curva-peer-b \
+npx electron-forge start -- --no-updates \
+  --storage /tmp/curva-peer-b-fresh \
+  --no-auto-open \
   --backend http://localhost:3700
 ```
 
 Then on stage:
 
-1. On **Peer A**: click **Publish to directory**. Wait for the success toast.
-2. On **Peer B**: the lobby refreshes. `wc26-final` appears with a STADIUM badge. Click **Join**.
+1. On **Peer A**: click **+ Create a new room**. Type a slug (e.g. `wc26-final`), keep the STADIUM publish toggle on, click **Create room and enter as host**. The app opens the Autobase, mounts the room view, and publishes to the directory in one flow.
+2. On **Peer B**: the lobby refreshes automatically. `wc26-final` appears with a STADIUM badge. Click **Join**.
 3. Both peers now share the room. Send chat messages, play the video, or trigger a real gasless USDT tip via the tip form under the video.
 
-To fund fresh wallets for a real UI-driven tip, mint 100 USDT to both peers' smart address AND owner EOA (four addresses total; grep the boot log for `smartAddress` / `ownerAddress`, then use `cast send 0x6F51... "mint(address,uint256)" <addr> 100000000` against the working RPC `https://sepolia.drpc.org`).
+Drop `--no-auto-open` (and add `--room <slug> --is-host` on Peer A) to fall back to the older automated boot path used by `scripts/demo-4peer.js`.
+
+#### Fund the peer wallets for a real UI-driven tip
+
+Each Curva peer generates a fresh WDK wallet on first boot. The wallet exposes two addresses per peer:
+
+- `ownerAddress` — the ECDSA-signing EOA. **This is what EIP-3009 debits.** Every `transferWithAuthorization` the tip form signs uses the owner EOA as `from`, because smart accounts can't sign ECDSA.
+- `smartAddress` — the ERC-4337 smart account. This is only the **destination** when the peer receives a tip; it never spends via EIP-3009.
+
+So to send a tip you must fund the **owner** EOA. Funding only the smart account will make the token contract revert with `ERC20InsufficientBalance` on the sponsor's `estimateGas`, and the UI will show "Failed, retry".
+
+1. Boot both peers with the commands above and wait for the lines in each worker log that print:
+
+   ```
+   [Curva] INFO wallet ready { smartAddress: '0x...', ownerAddress: '0x...' }
+   ```
+
+   Copy **both** the `smartAddress` and the `ownerAddress` for each peer. Four addresses total.
+
+2. From the `backend/` folder (sponsor key is loaded from `backend/.env`), fund all four addresses in one shot. The receiving side works from the smart address, so funding both is the belt-and-braces move for a demo:
+
+   ```bash
+   cd backend
+   bun run fund:peers -- \
+     <peerAownerAddress> <peerAsmartAddress> \
+     <peerBownerAddress> <peerBsmartAddress> \
+     --amount 100
+   ```
+
+   The script uses `RELAY_SPONSOR_PK` from `backend/.env`, resolves the token from `SEPOLIA_USDT_ADDRESS`, and sends the requested amount from the sponsor EOA to each address. It prints the tx hash and Sepolia Etherscan link for every transfer.
+
+   If you only care about the send path, funding the two `ownerAddress` values is enough. If you only care about the receive path, funding the two `smartAddress` values is enough. Fund all four to demo both directions.
+
+3. Now trigger a tip in the UI: on Peer B, open the room, click the tip button under the video, enter `1 USDT`, sign in the WDK modal. The sponsor pays gas, Peer A's smart address receives the USDT, and the receipt card renders live.
+
+If a transfer looks stuck, verify the sponsor still has ETH for gas with `bun run treasury:setup` and top it up from any Sepolia faucet. The `fund:peers` script batches nothing (single JSON-RPC calls only), so it works on `https://ethereum-sepolia-rpc.publicnode.com` and other free public endpoints.
+
+**Host-address discovery on the same laptop.** Two Hyperswarm processes on one machine often fail to hole-punch each other and never emit a `swarm connection` event (`peerCount: 0` on `GET /rooms/:slug`). The room's tip form on the viewer relies on the host's smart address, which normally rides a `room:hello` frame between connected peers. When the connection never lands, the worker falls back to the backend directory: `tryDiscoverHostAddress()` polls `GET /rooms/:slug` every 3 s (up to 60 s) and emits `tip:host-discovered` as soon as the record returns a `hostSmartAddress`. Look for the log line `tip:host-discovered via backend directory { smart: '0x...' }` on the viewer worker within a few seconds of joining — that is what unblocks the tip form.
 
 ### Web
 
