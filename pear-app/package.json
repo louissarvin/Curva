@@ -25,13 +25,7 @@
       "/bare",
       "/workers",
       "/assets"
-    ],
-    "assets": {
-      "branding": {
-        "link": "pear://0.22823.hcg8oftrk7hps1z4x9pprf4jhk7mitohjort6csfpjwjjo3ynomy",
-        "name": "Curva branding pack (Curva Nord Jakarta and Curva Sud Torino crests, WC26 team crests)"
-      }
-    }
+    ]
   },
   "scripts": {
     "start": "electron-forge start -- --no-updates",
