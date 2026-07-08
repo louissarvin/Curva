@@ -43,3 +43,4 @@ Thumbs.db
 secrets/
 *.seed
 *.mnemonic
+.smoke-bergamot/
