@@ -76,6 +76,70 @@ function writeMain(cmd, payload) {
   )
 }
 
+// Correlated request/response over the worker IPC stream. The worker emits
+// events with a `requestId` field that echoes the id we sent; we match on
+// that to resolve the pending promise. This is what makes translate:text
+// actually return the translated string to the caller instead of the raw
+// pipe.write boolean that ipcMain.handle otherwise resolves with.
+//
+// Every entry has a 30 s watchdog so a hung worker cannot pin memory
+// forever. Timed-out entries reject with a REQUEST_TIMEOUT error.
+const pendingRequests = new Map()
+const REQUEST_TIMEOUT_MS = 30_000
+function installMainWorkerAckDispatcher() {
+  const wrap = (_evt, data) => {
+    let msg
+    try {
+      const buf = Buffer.from(data.buffer, data.byteOffset, data.byteLength)
+      msg = JSON.parse(decoder.decode(buf))
+    } catch {
+      return
+    }
+    if (!msg || typeof msg !== 'object') return
+    const reqId = msg?.payload?.requestId
+    if (typeof reqId !== 'string') return
+    const entry = pendingRequests.get(reqId)
+    if (!entry) return
+    pendingRequests.delete(reqId)
+    if (entry.timer) clearTimeout(entry.timer)
+    if (msg.event === 'error' && msg.payload?.originalRequestId === reqId) {
+      entry.reject(new Error(msg.payload?.message || 'worker error'))
+    } else {
+      entry.resolve(msg.payload)
+    }
+  }
+  ipcRenderer.on('pear:worker:ipc:' + MAIN_WORKER, wrap)
+}
+installMainWorkerAckDispatcher()
+
+function writeMainAwait(cmd, payload) {
+  const id = makeId()
+  const message = { id, cmd, payload: payload || {} }
+  const p = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      if (pendingRequests.has(id)) {
+        pendingRequests.delete(id)
+        const err = new Error(`worker request timed out: ${cmd}`)
+        err.code = 'REQUEST_TIMEOUT'
+        reject(err)
+      }
+    }, REQUEST_TIMEOUT_MS)
+    pendingRequests.set(id, { resolve, reject, timer })
+  })
+  // Fire and forget the invoke; we resolve via the correlated event.
+  ipcRenderer.invoke(
+    'pear:worker:writeIPC:' + MAIN_WORKER,
+    Buffer.from(JSON.stringify(message), 'utf8')
+  ).catch((err) => {
+    const entry = pendingRequests.get(id)
+    if (!entry) return
+    pendingRequests.delete(id)
+    if (entry.timer) clearTimeout(entry.timer)
+    entry.reject(err)
+  })
+  return p
+}
+
 // Register a filtered subscription against the worker IPC stream. Returns an
 // unsubscribe function.
 function onEvent(eventName, callback) {
@@ -568,7 +632,19 @@ contextBridge.exposeInMainWorld('curva', {
     if (typeof text !== 'string' || text.length === 0) throw new RangeError('text required')
     if (text.length > 2000) throw new RangeError('text too long for translation')
     if (typeof from !== 'string' || typeof to !== 'string') throw new TypeError('from/to required')
-    return writeMain('translate:text', { text, from: from.toLowerCase(), to: to.toLowerCase() })
+    // Use the correlated ack dispatcher so we resolve with the actual
+    // translated string. writeMain would resolve with `pipe.write`'s bool.
+    return writeMainAwait('translate:text', {
+      text,
+      from: from.toLowerCase(),
+      to: to.toLowerCase()
+    }).then((payload) => {
+      // Worker emits `translate:text { translated, requestId }`. Return just
+      // the string so callers (Chat.js bulk translate) don't need to peel
+      // the envelope.
+      if (payload && typeof payload.translated === 'string') return payload.translated
+      return ''
+    })
   },
   getTranslationStatus() { return writeMain('translate:status', {}) },
   // Fix Wave C T4: shallow snapshot for the About integrity badge.
