@@ -68,10 +68,18 @@ export function mountCommentaryPanel({ container, curva, roomState } = {}) {
   const chip = document.createElement('span')
   chip.className = 'curva-commentary__chip'
   chip.textContent = 'off'
+  // Wave 14: STT live badge. Hidden until at least one `system:caption`
+  // message flows through the chat bridge.
+  const sttBadge = document.createElement('span')
+  sttBadge.className = 'curva-commentary__stt-badge'
+  sttBadge.textContent = 'STT live'
+  sttBadge.hidden = true
+  sttBadge.setAttribute('aria-live', 'polite')
   header.appendChild(flag)
   header.appendChild(title)
   header.appendChild(pulse)
   header.appendChild(chip)
+  header.appendChild(sttBadge)
   container.appendChild(header)
 
   // Body: last-line preview + controls.
@@ -232,6 +240,131 @@ export function mountCommentaryPanel({ container, curva, roomState } = {}) {
     state.streaming = false
     pulse.classList.remove('curva-commentary__pulse--active')
   }))
+
+  // Wave 14: `system:caption` renderer. The chat bridge fans every reduced
+  // message through onChatMessage; we filter for STT captions and render a
+  // two-line block (source-language on top, viewer-locale translation below).
+  // Old blocks are trimmed to at most 4 so the panel does not grow forever.
+  const captionMax = 4
+  const captionBlocks = []
+  const myLocaleRaw = (roomState && roomState.locale)
+    || (typeof navigator !== 'undefined' && navigator.language)
+    || 'en'
+  const myLocale = String(myLocaleRaw).slice(0, 2).toLowerCase()
+  if (typeof curva.onChatMessage === 'function') {
+    const offCap = curva.onChatMessage((msg) => {
+      if (!msg || msg.type !== 'system:caption') return
+      const rawText = typeof msg.text === 'string' ? msg.text : ''
+      if (rawText.length === 0) return
+      const captionWrap = document.createElement('div')
+      captionWrap.className = 'curva-commentary__caption'
+      const src = document.createElement('div')
+      src.className = 'curva-commentary__caption-source'
+      // textContent, not innerHTML. STT text is untrusted.
+      src.textContent = rawText
+      captionWrap.appendChild(src)
+      const localized = document.createElement('div')
+      localized.className = 'curva-commentary__caption-localized'
+      localized.textContent = rawText // interim; may be replaced by translation
+      captionWrap.appendChild(localized)
+      body.appendChild(captionWrap)
+      captionBlocks.push(captionWrap)
+      while (captionBlocks.length > captionMax) {
+        const drop = captionBlocks.shift()
+        try { drop.remove() } catch { /* noop */ }
+      }
+      // Show the STT live badge once we have real captions flowing.
+      sttBadge.hidden = false
+
+      // Translate to the viewer's locale via the existing translate bridge.
+      const captionLang = typeof msg.lang === 'string' && msg.lang.length > 0
+        ? msg.lang.slice(0, 2).toLowerCase()
+        : 'en'
+      if (myLocale && captionLang && captionLang !== myLocale && typeof curva.translateText === 'function') {
+        curva.translateText({ text: rawText, from: captionLang, to: myLocale })
+          .then((res) => {
+            const out = typeof res === 'string' ? res : (res && typeof res.text === 'string' ? res.text : '')
+            if (out && !state.destroyed) localized.textContent = out
+          })
+          .catch(() => { /* keep source text as the fallback */ })
+      }
+    })
+    offs.push(offCap)
+  }
+
+  // Tier 4: Supertonic TTS audio playback.
+  // Feature-gated on curva.onAnnouncerAudio presence. One audio at a time;
+  // back-to-back goal events preempt the previous clip rather than stacking.
+  // Queue depth capped at 1 pending so a rapid burst is shed without delay.
+  // autoplay policy: Chromium unblocks the origin once the guest has clicked
+  // (Join flow). The rejection is caught and swallowed to keep the pipeline clean.
+  if (typeof curva.onAnnouncerAudio === 'function') {
+    let currentAudio = null
+    let pendingAudio = null  // at most one queued clip behind the current
+
+    // TTS badge: gold pill that fades after 3s.
+    const ttsBadge = document.createElement('div')
+    ttsBadge.className = 'curva-commentary__tts-badge'
+    ttsBadge.hidden = true
+    header.appendChild(ttsBadge)
+
+    function playAudio(wavBase64, lang) {
+      try {
+        // Interrupt any in-flight clip.
+        if (currentAudio) {
+          currentAudio.pause()
+          currentAudio.src = ''
+          currentAudio = null
+        }
+        pendingAudio = null
+
+        // Construct data URL. wavBase64 comes from Bare via IPC (Buffer.toString('base64'));
+        // it is a binary blob, not user-generated prose, so no further sanitization
+        // is required beyond the safe data-URI prefix. Never inserted into innerHTML.
+        const src = 'data:audio/wav;base64,' + String(wavBase64 || '')
+        const audio = new Audio(src)
+        audio.volume = 0.9
+        currentAudio = audio
+
+        const p = audio.play()
+        if (p && typeof p.catch === 'function') p.catch(() => { /* autoplay policy; swallow */ })
+
+        audio.addEventListener('ended', () => {
+          if (currentAudio === audio) {
+            currentAudio = null
+            // Play next queued clip if any.
+            if (pendingAudio) {
+              const { b64, l } = pendingAudio
+              pendingAudio = null
+              playAudio(b64, l)
+            }
+          }
+        })
+
+        // Show gold TTS badge with 3s auto-fade.
+        const safeLang = String(lang || 'en').slice(0, 5).replace(/[^a-z]/gi, '')
+        ttsBadge.hidden = false
+        ttsBadge.textContent = 'GOOL (' + safeLang + ')'
+        ttsBadge.classList.remove('curva-commentary__tts-badge--fade')
+        // Force reflow so the animation restarts on back-to-back goals.
+        void ttsBadge.offsetWidth
+        ttsBadge.classList.add('curva-commentary__tts-badge--fade')
+      } catch (err) {
+        console.warn('[announcer] playback failed:', err?.message)
+      }
+    }
+
+    const offTts = curva.onAnnouncerAudio(({ wavBase64, lang, matchId: _mid }) => {
+      if (!wavBase64) return
+      if (currentAudio && !currentAudio.ended && !currentAudio.paused) {
+        // Already playing — queue at most one pending clip; shed any earlier queued.
+        pendingAudio = { b64: wavBase64, l: lang }
+        return
+      }
+      playAudio(wavBase64, lang)
+    })
+    offs.push(offTts)
+  }
 
   // Kick off: fetch status so the panel reflects reality on mount.
   curva.commentator.getStatus().catch(() => { /* worker emits status */ })
