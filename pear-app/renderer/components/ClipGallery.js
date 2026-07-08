@@ -108,10 +108,17 @@ export function mountClipGallery({ container, curva, videoPlayer } = {}) {
     if (modalVideo.src?.startsWith('blob:')) {
       try { URL.revokeObjectURL(modalVideo.src) } catch { /* noop */ }
     }
+    // For HTTP blob-server URLs: just remove src, the browser stops the request.
     modalVideo.removeAttribute('src')
   }
   modalClose.addEventListener('click', closeModal)
   modalBackdrop.addEventListener('click', closeModal)
+
+  // Close on ESC key. Listener is on the document and cleaned up in destroy().
+  function onKeyDown(ev) {
+    if (ev.key === 'Escape' && !modal.hidden) closeModal()
+  }
+  document.addEventListener('keydown', onKeyDown)
 
   // -- state -----------------------------------------------------------------
 
@@ -173,7 +180,50 @@ export function mountClipGallery({ container, curva, videoPlayer } = {}) {
   async function playClip(clip) {
     modal.hidden = false
     modalMeta.textContent = `loading clip from ${shortPeer(clip.by_peer)}...`
-    // Request via IPC. The worker emits clip:data with base64 bytes.
+
+    // Preferred path: blob-server HTTP URL. Native byte-range seek, no IPC memory pressure.
+    // Falls back to the legacy base64-over-IPC path when the blob server is unavailable.
+    if (typeof curva.getClipLink === 'function') {
+      let linkUnsubscribe = null
+      let linkReject = null
+      const linkPromise = new Promise((resolve, reject) => {
+        linkReject = reject
+        linkUnsubscribe = curva.onClipLink((payload) => {
+          if (linkUnsubscribe) { linkUnsubscribe(); linkUnsubscribe = null }
+          if (payload && payload.error) reject(new Error(payload.error))
+          else resolve(payload)
+        })
+      })
+      const abortTimer = setTimeout(() => {
+        if (linkUnsubscribe) { linkUnsubscribe(); linkUnsubscribe = null }
+        if (linkReject) { linkReject(new Error('blob-server link timed out')); linkReject = null }
+      }, 8000)
+
+      curva.getClipLink(clip.driveKey, clip.path).catch(() => {})
+
+      linkPromise.then(({ url }) => {
+        clearTimeout(abortTimer)
+        if (modal.hidden) return
+        // Validate URL scheme before assigning to video.src.
+        // Only http://127.0.0.1:* is expected from the blob server.
+        if (typeof url !== 'string' || !/^http:\/\/127\.0\.0\.1(:\d+)?\//.test(url)) {
+          modalMeta.textContent = 'invalid blob-server URL'
+          return
+        }
+        modalVideo.src = url
+        modalMeta.textContent = `driveKey ${clip.driveKey.slice(0, 8)}...`
+      }).catch((err) => {
+        clearTimeout(abortTimer)
+        // Fall through to legacy IPC path.
+        modalMeta.textContent = 'blob-server unavailable, falling back...'
+        curva.getClip(clip.driveKey, clip.path, clip.by_peer).catch((e) => {
+          modalMeta.textContent = 'failed to load: ' + (e?.message || 'unknown')
+        })
+      })
+      return
+    }
+
+    // Legacy fallback: full buffer over IPC.
     curva.getClip(clip.driveKey, clip.path, clip.by_peer).catch((err) => {
       modalMeta.textContent = 'failed to load: ' + (err?.message || 'unknown')
     })
@@ -296,6 +346,7 @@ export function mountClipGallery({ container, curva, videoPlayer } = {}) {
   })
 
   function destroy() {
+    document.removeEventListener('keydown', onKeyDown)
     offClipAdded()
     offClipList()
     offClipData()
