@@ -46,6 +46,15 @@ function createBackendClient(baseUrl, { lang = 'en', timeoutMs = DEFAULT_TIMEOUT
     const headers = {
       'Accept': 'application/json',
       'Accept-Language': lang,
+      // bare-http1 defaults to HTTP keep-alive and pools sockets in the
+      // globalAgent. Fastify-on-Bun aggressively closes idle keep-alive
+      // sockets, so the pooled socket goes stale between calls and the next
+      // request fails with `CONNECTION_LOST: Socket hung up` before the
+      // response headers arrive. Explicit `Connection: close` opts every
+      // request into a fresh TCP socket and matches how curl behaves. Cost
+      // is 1-2 ms per request on localhost; the previous BACKEND_UNREACHABLE
+      // was ~10-30s of retries + user-facing failure.
+      'Connection': 'close',
       ...(init.headers || {})
     }
     if (init.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json'
