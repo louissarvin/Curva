@@ -72,7 +72,24 @@ function _tryRequire (bareId, nodeId) {
 }
 const path = _tryRequire('bare-path', 'path')
 const fs = _tryRequire('bare-fs', 'fs')
+const zlib = _tryRequire('bare-zlib', 'zlib')
 const b4a = require('b4a')
+
+// Mozilla Firefox Translations ships every Bergamot artefact as `<file>.gz`.
+// The @qvac/sdk nmtcpp plugin does NOT auto-inflate: server/bare/plugins/
+// nmtcpp-translation/plugin.js only decompresses .tar.gz archives (via
+// server/utils/archive.js), not raw single-file .bin.gz / .spm.gz. We inflate
+// here before handing the on-disk path to loadModel. Detection is by the 1f 8b
+// gzip magic so non-gzipped mirrors keep working.
+function maybeGunzip (bytes) {
+  if (!bytes || bytes.length < 2) return bytes
+  if (bytes[0] !== 0x1f || bytes[1] !== 0x8b) return bytes
+  if (!zlib || typeof zlib.gunzipSync !== 'function') {
+    throw withCode('GUNZIP_UNAVAILABLE', 'bare-zlib gunzipSync unavailable')
+  }
+  const raw = zlib.gunzipSync(b4a.isBuffer(bytes) ? bytes : b4a.from(bytes))
+  return raw instanceof Uint8Array ? raw : new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength)
+}
 
 const DEFAULT_TIMEOUT_MS = 30_000
 
@@ -206,9 +223,15 @@ async function createTranslator (opts = {}) {
     }
 
     // 3. Resolve models: check disk cache, download if missing, verify digest.
-    //    We must resolve BOTH the primary and any pivot model referenced by a
-    //    pair so the SDK can wire modelConfig.pivotModel at loadModel time.
+    //    Bergamot pairs also need a sentencepiece vocab file (`vocab.<pair>.spm`).
+    //    The SDK's nmtcpp plugin throws ModelLoadFailedError at
+    //    server/bare/plugins/nmtcpp-translation/resolve-vocab.js:55 when the
+    //    vocab can't be resolved and the modelSrc is a plain file path (no
+    //    pear:// / registry:// auto-derivation). We download the vocab as a
+    //    sibling file `<modelId>.vocab.spm` and thread its absolute path
+    //    through to wrapSdkEngine below.
     const modelPathById = new Map() // modelId -> local absolute path
+    const vocabPathById = new Map() // modelId -> local absolute vocab path (or null)
     const uniqueModelIds = Array.from(new Set(
       pairs.flatMap((p) => [p.modelId, p.pivotModelId].filter(Boolean))
     ))
@@ -266,6 +289,44 @@ async function createTranslator (opts = {}) {
       }
 
       modelPathById.set(modelId, modelPath)
+
+      // -- Bergamot vocab -----------------------------------------------
+      // If the catalog carries a vocabUrl for this model, mirror the
+      // model-file resolution above: check disk cache, download+gunzip if
+      // missing. Shared vocab file (Mozilla uses a single sentencepiece
+      // model per pair for both source and destination).
+      if (entry?.vocabUrl) {
+        const vocabPath = modelPath + '.vocab.spm'
+        let needsVocab = true
+        if (fsUse.existsSync(vocabPath)) needsVocab = false
+        if (needsVocab) {
+          onProgress({ phase: 'download-vocab', modelId })
+          try {
+            await downloadAndVerify({
+              url: entry.vocabUrl,
+              destPath: vocabPath,
+              expectedDigest: null, // no per-vocab digest pinned yet
+              expectedSize: null,
+              fetchImpl: doFetch,
+              fsUse,
+              onProgress: (bytes, total) => {
+                onProgress({
+                  phase: 'download-vocab',
+                  modelId,
+                  downloaded: bytes,
+                  total,
+                  percent: total > 0 ? Math.round((bytes / total) * 100) : 0
+                })
+              }
+            })
+          } catch (err) {
+            onError({ code: err.code || 'VOCAB_DOWNLOAD_FAILED', message: `${modelId} vocab: ${err.message}` })
+            // Fall through — Bergamot load will error and we'll skip the pair.
+            continue
+          }
+        }
+        vocabPathById.set(modelId, vocabPath)
+      }
     }
 
     // 4. Load into engine (per language pair). Pivot pairs pass the pivot
@@ -275,9 +336,11 @@ async function createTranslator (opts = {}) {
     for (const pair of pairs) {
       const modelPath = modelPathById.get(pair.modelId)
       if (!modelPath) continue // download failed; onError already fired
+      const vocabPath = vocabPathById.get(pair.modelId) || null
       const loadOpts = {
         modelId: pair.modelId,
         modelPath,
+        vocabPath, // shared spm vocab; wrapSdkEngine wires as srcVocabSrc + dstVocabSrc
         sourceLang: pair.from,
         targetLang: pair.to
       }
@@ -291,6 +354,7 @@ async function createTranslator (opts = {}) {
           continue
         }
         loadOpts.pivotModelPath = pivotPath
+        loadOpts.pivotVocabPath = vocabPathById.get(pair.pivotModelId) || null
         loadOpts.pivotSourceLang = pair.via || 'en'
         loadOpts.pivotTargetLang = pair.to
       }
@@ -605,8 +669,21 @@ function wrapSdkEngine (sdk) {
         from: opts.sourceLang,
         to: opts.targetLang
       }
+      // The SDK's nmtcpp plugin requires srcVocabSrc + dstVocabSrc when
+      // modelSrc is a plain file path (resolve-vocab.js:14,22,55). Mozilla
+      // ships a single shared sentencepiece vocab per pair, so both fields
+      // point at the same file.
+      if (opts.vocabPath) {
+        modelConfig.srcVocabSrc = opts.vocabPath
+        modelConfig.dstVocabSrc = opts.vocabPath
+      }
       if (opts.pivotModelPath) {
-        modelConfig.pivotModel = { modelSrc: opts.pivotModelPath }
+        const pivot = { modelSrc: opts.pivotModelPath }
+        if (opts.pivotVocabPath) {
+          pivot.srcVocabSrc = opts.pivotVocabPath
+          pivot.dstVocabSrc = opts.pivotVocabPath
+        }
+        modelConfig.pivotModel = pivot
       }
       const id = await sdk.loadModel({
         modelSrc: opts.modelPath,
@@ -723,7 +800,13 @@ async function downloadAndVerify ({ url, destPath, expectedDigest, expectedSize,
     onProgress?.(received, total || received)
   }
 
-  const full = concat(chunks)
+  const compressed = concat(chunks)
+  // Mozilla ships every Bergamot file gzipped (`.bin.gz`, `.spm.gz`). Inflate
+  // before writing to disk so the SDK's nmtcpp plugin can consume raw intgemm
+  // /  sentencepiece bytes directly. digest matches the inflated payload since
+  // qvac-models.json.notes.upstreamUncompressedHash is the uncompressed sha256
+  // (matches Mozilla's manifest `uncompressedHash`).
+  const full = maybeGunzip(compressed)
   if (expectedDigest) {
     const actualHex = sha256Hex(full)
     // F12 stores digest as either `sha256:HEX` or bare hex.
