@@ -34,6 +34,13 @@ export interface QvacModel {
   /** `sha256:<hex>` (lowercase) or null when integrity is not yet pinned. */
   contentDigest: string | null;
   downloadUrl: string;
+  /**
+   * Bergamot pairs ship a separate sentencepiece vocab. Optional here so
+   * non-Bergamot models (whisper, tts, llm) can omit it. When present,
+   * pear-app/bare/translate.js downloads it alongside the model and wires it
+   * into modelConfig.srcVocabSrc / dstVocabSrc per @qvac/sdk plugin.d.ts.
+   */
+  vocabUrl?: string | null;
   mirrorUrl: string | null;
   license: string;
   notes: string;
@@ -132,6 +139,14 @@ const parseModel = (raw: unknown, index: number): QvacModel => {
   if (!isString(r.status) || !KNOWN_STATUSES.has(r.status as QvacModelStatus)) {
     throw new Error(`qvac-models.json[${index}]: status invalid`);
   }
+  // Optional vocabUrl (Bergamot pairs). Accept string, null, or undefined.
+  if (
+    r.vocabUrl !== undefined &&
+    r.vocabUrl !== null &&
+    !isString(r.vocabUrl)
+  ) {
+    throw new Error(`qvac-models.json[${index}]: vocabUrl must be string, null, or omitted`);
+  }
   return {
     id: r.id,
     name: r.name,
@@ -143,6 +158,7 @@ const parseModel = (raw: unknown, index: number): QvacModel => {
     targetLangs: [...r.targetLangs],
     contentDigest: r.contentDigest ? (r.contentDigest as string).toLowerCase() : null,
     downloadUrl: r.downloadUrl,
+    vocabUrl: (r.vocabUrl as string | undefined) ?? null,
     mirrorUrl: r.mirrorUrl as string | null,
     license: r.license,
     notes: r.notes,
