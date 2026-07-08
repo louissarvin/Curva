@@ -1988,29 +1988,51 @@ class TipNotReadyError extends Error {
 // false and chat continues in original-only mode.
 
 async function ensureTranslator(targetLang) {
-  if (translator) return translator
-  if (translatorInitPromise) return translatorInitPromise
+  if (translator) {
+    log('info', 'translator already loaded (reuse)', { targetLang })
+    return translator
+  }
+  if (translatorInitPromise) {
+    log('info', 'translator init already in flight', { targetLang })
+    return translatorInitPromise
+  }
 
   // Use the backend URL from the currently open room, or fall back to
   // constructing a fresh client. F12 doesn't need a room.
   const backendClient = room?.backend || createBackendClient(config.backendUrl, { lang: 'en' })
   const storageDir = config.dir
+  log('info', 'translator init begin', {
+    targetLang,
+    storageDir,
+    backendUrl: backendClient?.baseUrl || null
+  })
 
   translatorInitPromise = createTranslator({
     storageDir,
     backendClient,
     timeoutMs: 30_000,
-    onProgress: (ev) => emit('translate:progress', ev),
-    onError: (err) => emit('translate:error', err)
+    onProgress: (ev) => {
+      log('info', 'translator progress', ev)
+      emit('translate:progress', ev)
+    },
+    onError: (err) => {
+      log('warn', 'translator progress error', { message: err?.message, code: err?.code })
+      emit('translate:error', err)
+    }
   })
     .then((inst) => {
       translator = inst
       const st = inst.status()
       if (st.ready) {
         translationEnabled = true
+        log('info', 'translator ready', { loaded: st.loaded, targetLang })
         emit('translate:ready', { loaded: st.loaded, targetLang })
       } else {
         translationEnabled = false
+        log('warn', 'translator loaded but not ready', {
+          disabledReason: st.disabledReason,
+          loaded: st.loaded
+        })
         emit('translate:disabled', { reason: st.disabledReason || 'no models loaded' })
       }
       return inst
@@ -2018,7 +2040,7 @@ async function ensureTranslator(targetLang) {
     .catch((err) => {
       translationEnabled = false
       emit('translate:disabled', { reason: err?.message || 'init failed' })
-      log('warn', 'translator init failed', { message: err?.message })
+      log('warn', 'translator init failed', { message: err?.message, code: err?.code, stack: err?.stack?.slice(0, 400) })
       return null
     })
     .finally(() => {
@@ -3216,6 +3238,7 @@ async function dispatchCommand(msg) {
       // -- Phase 3.5: QVAC translation -----------------------------------
       case 'translate:init': {
         const targetLang = String(payload?.targetLang || 'en').toLowerCase()
+        log('info', 'ipc translate:init', { targetLang })
         if (!['en', 'it', 'id'].includes(targetLang)) {
           throw new RangeError('targetLang must be en|it|id')
         }
