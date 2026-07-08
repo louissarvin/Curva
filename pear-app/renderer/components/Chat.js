@@ -24,7 +24,7 @@ const LANG_LABELS = {
   id: { flag: 'ID', name: 'Bahasa' }
 }
 
-export function mountChat({ container, curva } = {}) {
+export function mountChat({ container, curva, tier = 'writer' } = {}) {
   if (!container) throw new TypeError('container is required')
   if (!curva) throw new TypeError('curva bridge is required')
 
@@ -131,11 +131,22 @@ export function mountChat({ container, curva } = {}) {
   form.appendChild(charCount)
   form.appendChild(sendBtn)
 
+  // Tier 4: reader-tier gate. Keep the form in the DOM (hidden) so a host
+  // upgrade can reveal it without a re-mount. The note is textContent-only.
+  if (tier === 'reader') {
+    form.hidden = true
+  }
+  const readerNote = document.createElement('div')
+  readerNote.className = 'curva-chat__reader-note'
+  readerNote.hidden = tier !== 'reader'
+  readerNote.textContent = 'Spectator view. Chat is invite-only.'
+
   container.appendChild(header)
   container.appendChild(translationBar)
   container.appendChild(translationStatus)
   container.appendChild(list)
   container.appendChild(form)
+  container.appendChild(readerNote)
 
   // -- track state ----------------------------------------------------------
 
@@ -302,6 +313,24 @@ export function mountChat({ container, curva } = {}) {
       return
     }
 
+    // Tier 4: system:tip-batch — one UserOp, N Transfer events.
+    // Success pill: "<handle> tipped N hosts (X USDT total) · tx <link>".
+    // textContent everywhere — all peer/backend data is untrusted.
+    if (msg?.type === 'system:tip-batch') {
+      const li = renderSystemTipBatch(msg, key)
+      list.appendChild(li)
+      rowsByKey.set(key, li)
+      msgCount++
+      count.textContent = msgCount + ' msg' + (msgCount === 1 ? '' : 's')
+      while (list.children.length > 300) {
+        const first = list.firstChild
+        if (first?.dataset?.key) rowsByKey.delete(first.dataset.key)
+        list.removeChild(first)
+      }
+      if (autoScroll) list.scrollTop = list.scrollHeight
+      return
+    }
+
     // Wave 11: prediction-pool lifecycle rows. Three system messages, each
     // rendered as a distinct pill: neutral (open), emphasized (result), green
     // (payout). All fields are textContent — pool addresses and tx hashes are
@@ -336,6 +365,41 @@ export function mountChat({ container, curva } = {}) {
     }
     if (msg?.type === 'system:pool-payout') {
       const li = renderSystemPoolPayout(msg, key)
+      list.appendChild(li)
+      rowsByKey.set(key, li)
+      msgCount++
+      count.textContent = msgCount + ' msg' + (msgCount === 1 ? '' : 's')
+      while (list.children.length > 300) {
+        const first = list.firstChild
+        if (first?.dataset?.key) rowsByKey.delete(first.dataset.key)
+        list.removeChild(first)
+      }
+      if (autoScroll) list.scrollTop = list.scrollHeight
+      return
+    }
+
+    // Tier 4 R2: system:bot-query renders as a gold-border pill showing the
+    // peer's prompt. textContent only — prompt is peer-supplied and untrusted.
+    if (msg?.type === 'system:bot-query') {
+      const li = renderSystemBotQuery(msg, key)
+      list.appendChild(li)
+      rowsByKey.set(key, li)
+      msgCount++
+      count.textContent = msgCount + ' msg' + (msgCount === 1 ? '' : 's')
+      while (list.children.length > 300) {
+        const first = list.firstChild
+        if (first?.dataset?.key) rowsByKey.delete(first.dataset.key)
+        list.removeChild(first)
+      }
+      if (autoScroll) list.scrollTop = list.scrollHeight
+      return
+    }
+
+    // Tier 4 R2: system:bot-reply renders as a mint-border pill with the LLM
+    // response and tool-call badges. textContent only. Tool names validated
+    // against /^[a-z_]+$/ before rendering. (CWE-79 guard.)
+    if (msg?.type === 'system:bot-reply') {
+      const li = renderSystemBotReply(msg, key)
       list.appendChild(li)
       rowsByKey.set(key, li)
       msgCount++
@@ -388,6 +452,72 @@ export function mountChat({ container, curva } = {}) {
       return
     }
 
+    // D2 prediction stake: gold pill "@handle staked N USDT on SIDE".
+    // txHash validated against strict hex pattern before the link is built.
+    if (msg?.type === 'system:prediction-stake') {
+      const li = renderSystemPredictionStake(msg, key)
+      list.appendChild(li)
+      rowsByKey.set(key, li)
+      msgCount++
+      count.textContent = msgCount + ' msg' + (msgCount === 1 ? '' : 's')
+      while (list.children.length > 300) {
+        const first = list.firstChild
+        if (first?.dataset?.key) rowsByKey.delete(first.dataset.key)
+        list.removeChild(first)
+      }
+      if (autoScroll) list.scrollTop = list.scrollHeight
+      return
+    }
+
+    // D2 prediction settle: green pill for winners, italic muted for losers.
+    if (msg?.type === 'system:prediction-settle') {
+      const li = renderSystemPredictionSettle(msg, key)
+      list.appendChild(li)
+      rowsByKey.set(key, li)
+      msgCount++
+      count.textContent = msgCount + ' msg' + (msgCount === 1 ? '' : 's')
+      while (list.children.length > 300) {
+        const first = list.firstChild
+        if (first?.dataset?.key) rowsByKey.delete(first.dataset.key)
+        list.removeChild(first)
+      }
+      if (autoScroll) list.scrollTop = list.scrollHeight
+      return
+    }
+
+    // F3 goal pill: gold left-border row with minute, scorer, and score.
+    if (msg?.type === 'system:goal') {
+      const li = renderSystemGoal(msg, key)
+      list.appendChild(li)
+      rowsByKey.set(key, li)
+      msgCount++
+      count.textContent = msgCount + ' msg' + (msgCount === 1 ? '' : 's')
+      while (list.children.length > 300) {
+        const first = list.firstChild
+        if (first?.dataset?.key) rowsByKey.delete(first.dataset.key)
+        list.removeChild(first)
+      }
+      if (autoScroll) list.scrollTop = list.scrollHeight
+      return
+    }
+
+    // Tier 4: system:reader-joined renders as a subtle grey info pill.
+    // textContent only — handle is peer-supplied and untrusted.
+    if (msg?.type === 'system:reader-joined') {
+      const li = renderSystemReaderJoined(msg, key)
+      list.appendChild(li)
+      rowsByKey.set(key, li)
+      msgCount++
+      count.textContent = msgCount + ' msg' + (msgCount === 1 ? '' : 's')
+      while (list.children.length > 300) {
+        const first = list.firstChild
+        if (first?.dataset?.key) rowsByKey.delete(first.dataset.key)
+        list.removeChild(first)
+      }
+      if (autoScroll) list.scrollTop = list.scrollHeight
+      return
+    }
+
     // Wave 6 T4: system:tip-congrats rendered as a small-caps gold-tinted
     // banner. No explorer link (the paired system:tip already carries one).
     // The translated variant lands via applyTranslationToRow if the viewer
@@ -421,12 +551,18 @@ export function mountChat({ container, curva } = {}) {
     timeEl.className = 'curva-chat__time'
     timeEl.textContent = formatMatchTime(msg.match_time_ms)
     meta.appendChild(handleEl)
+    meta.appendChild(renderIdentityBadge(msg))
     meta.appendChild(timeEl)
 
     const bodyEl = document.createElement('div')
     bodyEl.className = 'curva-chat__body'
     // textContent, NEVER innerHTML. Peer-supplied text is untrusted.
     bodyEl.textContent = msg.text || ''
+
+    // Dim body if identity proof is present but verification failed.
+    if (msg.identity_verified === false) {
+      li.classList.add('curva-chat__msg--identity-mismatch')
+    }
 
     li.appendChild(meta)
     li.appendChild(bodyEl)
@@ -474,6 +610,7 @@ export function mountChat({ container, curva } = {}) {
     label.textContent = ' tipped ' + amt + ' USDT to host'
 
     body.appendChild(from)
+    body.appendChild(renderIdentityBadge(msg))
     body.appendChild(label)
 
     // Explorer link. Only render if URL is present, https, and openExternal
@@ -645,7 +782,130 @@ export function mountChat({ container, curva } = {}) {
 
     li.appendChild(marker)
     li.appendChild(body)
+    li.appendChild(renderIdentityBadge(msg))
     li.appendChild(attribution)
+    return li
+  }
+
+  // D2: `system:prediction-stake` renderer.
+  // Gold pill. txHash is validated against /^0x[0-9a-fA-F]{64}$/ before being
+  // used to construct a Sepolia URL opened via curva.openExternal (allowlisted
+  // on the preload side). textContent everywhere — peerHandle is untrusted.
+  function renderSystemPredictionStake(msg, key) {
+    const li = document.createElement('li')
+    li.className = 'curva-chat__msg curva-chat__msg--system curva-chat__msg--stake'
+    li.dataset.key = key
+
+    const marker = document.createElement('span')
+    marker.className = 'curva-chat__stake-marker'
+    marker.textContent = '◈'
+
+    const body = document.createElement('div')
+    body.className = 'curva-chat__stake-body'
+
+    const amt = formatAmountBaseUnits(msg.stakeAtomic)
+    const handle = (typeof msg.peerHandle === 'string' && msg.peerHandle.length > 0)
+      ? msg.peerHandle : 'peer'
+    const winner = ['HOME', 'AWAY', 'DRAW'].includes(msg.winner) ? msg.winner : '?'
+    body.textContent = handle + ' staked ' + amt + ' USDT on ' + winner
+
+    if (typeof msg.txHash === 'string' && /^0x[0-9a-fA-F]{64}$/.test(msg.txHash)) {
+      const link = document.createElement('a')
+      link.className = 'curva-chat__stake-link'
+      link.href = '#'
+      link.textContent = 'tx'
+      // Capture txHash in closure; validated above.
+      const safeTx = msg.txHash
+      link.addEventListener('click', (e) => {
+        e.preventDefault()
+        if (typeof curva.openExternal === 'function') {
+          curva.openExternal('https://sepolia.etherscan.io/tx/' + safeTx).catch(() => { /* noop */ })
+        }
+      })
+      body.appendChild(link)
+    }
+
+    li.appendChild(marker)
+    li.appendChild(body)
+    return li
+  }
+
+  // D2: `system:prediction-settle` renderer.
+  // Winners get a green pill with payout amount and Sepolia tx link.
+  // Losers get an italic muted message: "Unlucky, next match?"
+  function renderSystemPredictionSettle(msg, key) {
+    const won = msg.outcome === 'won'
+    const li = document.createElement('li')
+    li.className = 'curva-chat__msg curva-chat__msg--system ' +
+      (won ? 'curva-chat__msg--settle-won' : 'curva-chat__msg--settle-lost')
+    li.dataset.key = key
+
+    const marker = document.createElement('span')
+    marker.className = 'curva-chat__settle-marker'
+    marker.textContent = won ? '✦' : '◇'
+
+    const body = document.createElement('div')
+    body.className = 'curva-chat__settle-body ' +
+      (won ? 'curva-chat__settle-body--won' : 'curva-chat__settle-body--lost')
+
+    if (won) {
+      const amt = formatAmountBaseUnits(msg.payoutAmountAtomic || msg.amountAtomic)
+      body.textContent = 'won ' + amt + ' USDT'
+      if (typeof msg.txHash === 'string' && /^0x[0-9a-fA-F]{64}$/.test(msg.txHash)) {
+        const link = document.createElement('a')
+        link.className = 'curva-chat__settle-link'
+        link.href = '#'
+        link.textContent = 'tx'
+        const safeTx = msg.txHash
+        link.addEventListener('click', (e) => {
+          e.preventDefault()
+          if (typeof curva.openExternal === 'function') {
+            curva.openExternal('https://sepolia.etherscan.io/tx/' + safeTx).catch(() => { /* noop */ })
+          }
+        })
+        body.appendChild(link)
+      }
+    } else {
+      body.textContent = 'Unlucky, next match?'
+    }
+
+    li.appendChild(marker)
+    li.appendChild(body)
+    return li
+  }
+
+  // F3: `system:goal` renderer.
+  // Gold left-border pill: "34' MESSI · 1-0 ARG"
+  // All strings are textContent — scorer, matchId, and team names are
+  // host-authored but still treated as untrusted display text (defense
+  // in depth; the host-only gate in bare/chat.js is the primary guard).
+  function renderSystemGoal(msg, key) {
+    const li = document.createElement('li')
+    li.className = 'curva-chat__msg curva-chat__msg--system curva-chat__msg--goal-pill'
+    li.dataset.key = key
+
+    const minuteEl = document.createElement('span')
+    minuteEl.className = 'curva-chat__goal-minute'
+    const min = Number.isFinite(msg.minute) ? String(Math.floor(msg.minute)) : '?'
+    minuteEl.textContent = min + "'"
+
+    const bodyEl = document.createElement('span')
+    bodyEl.className = 'curva-chat__goal-body'
+
+    const scorer = (typeof msg.scorer === 'string' && msg.scorer.length > 0)
+      ? msg.scorer.toUpperCase().slice(0, 20) : 'GOAL'
+    bodyEl.textContent = scorer
+
+    const scoreEl = document.createElement('span')
+    scoreEl.className = 'curva-chat__goal-score'
+    const home = Number.isInteger(msg.homeScore) ? msg.homeScore : '?'
+    const away = Number.isInteger(msg.awayScore) ? msg.awayScore : '?'
+    scoreEl.textContent = ' · ' + home + '-' + away
+
+    bodyEl.appendChild(scoreEl)
+
+    li.appendChild(minuteEl)
+    li.appendChild(bodyEl)
     return li
   }
 
@@ -663,6 +923,206 @@ export function mountChat({ container, curva } = {}) {
     // textContent: text is originally in English but STILL untrusted (a
     // malicious peer could craft this shape). Never innerHTML.
     body.textContent = msg.text || ''
+
+    li.appendChild(marker)
+    li.appendChild(body)
+    return li
+  }
+
+  // Tier 4: `system:reader-joined` renderer.
+  // Subtle grey pill: "spectator @<handle> joined as spectator".
+  // textContent only — handle is peer-supplied (untrusted).
+  function renderSystemReaderJoined(msg, key) {
+    const li = document.createElement('li')
+    li.className = 'curva-chat__msg curva-chat__msg--system curva-chat__msg--reader-joined'
+    li.dataset.key = key
+
+    const body = document.createElement('div')
+    body.className = 'curva-chat__reader-joined-body'
+    const handle = (typeof msg.handle === 'string' && msg.handle.length > 0)
+      ? msg.handle : short(msg.by_peer)
+    body.textContent = 'spectator @' + handle + ' joined'
+
+    li.appendChild(body)
+    return li
+  }
+
+  // Tier 4: `system:tip-batch` renderer.
+  // Lightning pill: "<handle> tipped N hosts (X USDT total) · tx <link>"
+  // textContent only. Explorer URL validated before use. (CWE-79 guard.)
+  function renderSystemTipBatch(msg, key) {
+    const li = document.createElement('li')
+    li.className = 'curva-chat__msg curva-chat__msg--system curva-chat__msg--tip curva-chat__msg--tip-batch'
+    li.dataset.key = key
+
+    const marker = document.createElement('span')
+    marker.className = 'curva-chat__tip-marker'
+    marker.textContent = 'B'
+
+    const body = document.createElement('div')
+    body.className = 'curva-chat__tip-body'
+
+    const from = document.createElement('span')
+    from.className = 'curva-chat__handle'
+    from.textContent = (typeof msg.from_handle === 'string' && msg.from_handle.length > 0)
+      ? msg.from_handle : short(msg.by_peer)
+
+    const count = Array.isArray(msg.recipients) ? msg.recipients.length : '?'
+    const totalUsdt = typeof msg.total_base === 'string' && /^[0-9]+$/.test(msg.total_base)
+      ? (Number(BigInt(msg.total_base)) / 1_000_000).toFixed(2)
+      : '?'
+
+    const label = document.createElement('span')
+    label.className = 'curva-chat__tip-label'
+    label.textContent = ' tipped ' + count + ' host' + (count === 1 ? '' : 's') +
+      ' (' + totalUsdt + ' USDT total)'
+
+    body.appendChild(from)
+    body.appendChild(label)
+
+    if (typeof msg.explorer_url === 'string' && /^https:\/\//.test(msg.explorer_url)) {
+      const link = document.createElement('a')
+      link.className = 'curva-chat__tip-link'
+      link.href = '#'
+      link.textContent = 'view tx'
+      link.addEventListener('click', (e) => {
+        e.preventDefault()
+        if (typeof curva.openExternal === 'function') {
+          curva.openExternal(msg.explorer_url).catch(() => { /* noop */ })
+        }
+      })
+      body.appendChild(link)
+    }
+
+    li.appendChild(marker)
+    li.appendChild(body)
+    return li
+  }
+
+  // Tier 4 R2: identity verification badge.
+  //
+  // The bare side resolves `identity_verified` to one of:
+  //   true   (identity_proof present and verified against roster identity_pub)
+  //   false  (identity_proof present but verification failed)
+  //   null   (no identity_proof = legacy message)
+  //
+  // We trust the boolean from the worker; the renderer does NOT re-verify.
+  // Badge is shown for msg, system:tip, system:attendance-issued.
+  //
+  // Inline SVGs are hardcoded strings (not peer data); no XSS risk.
+  // The tooltip text uses handle which IS peer data, but it lands in
+  // data-tip (a data attribute) which is safe — never innerHTML.
+  function renderIdentityBadge(msg) {
+    const verified = msg?.identity_verified  // true | false | null | undefined
+    const handle = typeof msg?.handle === 'string' && msg.handle.length > 0
+      ? msg.handle : short(msg?.by_peer)
+
+    const badge = document.createElement('span')
+    badge.className = 'curva-chat__identity-badge'
+
+    if (verified === true) {
+      badge.classList.add('curva-chat__identity-badge--verified')
+      // data-tip: attribute, safe with textContent-equivalent assignment
+      badge.dataset.tip = 'verified · @' + handle
+      // Inline SVG checkmark (hardcoded, not peer data).
+      badge.innerHTML = '<svg viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M2 6l3 3 5-5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+    } else if (verified === false) {
+      badge.classList.add('curva-chat__identity-badge--mismatch')
+      badge.dataset.tip = 'signature mismatch'
+      badge.innerHTML = '<svg viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M3 3l6 6M9 3l-6 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>'
+    } else {
+      // null or undefined = legacy / no identity proof
+      badge.classList.add('curva-chat__identity-badge--unverified')
+      badge.dataset.tip = 'unverified · legacy'
+      badge.innerHTML = '<svg viewBox="0 0 12 12" fill="none" aria-hidden="true"><circle cx="6" cy="6" r="4.5" stroke="currentColor" stroke-width="1.2"/><text x="6" y="9" text-anchor="middle" font-size="7" fill="currentColor" font-family="monospace">?</text></svg>'
+    }
+
+    return badge
+  }
+
+  // Tier 4 R2: `system:bot-query` renderer.
+  // Gold-border pill. "🤖 @<handle> asked: <prompt>" (max 200 chars display).
+  // textContent only — prompt is peer-supplied and untrusted.
+  function renderSystemBotQuery(msg, key) {
+    const li = document.createElement('li')
+    li.className = 'curva-chat__msg curva-chat__msg--system curva-chat__msg--bot-query'
+    li.dataset.key = key
+
+    const marker = document.createElement('span')
+    marker.className = 'curva-chat__bot-marker'
+    marker.textContent = '\u{1F916}' // robot face emoji
+
+    const body = document.createElement('div')
+    body.className = 'curva-chat__bot-body'
+
+    const prefix = document.createElement('div')
+    prefix.className = 'curva-chat__bot-prompt-prefix'
+    const handle = (typeof msg.byPeer === 'string' && msg.byPeer.length > 0)
+      ? msg.byPeer.slice(0, 24) : 'peer'
+    prefix.textContent = '@' + handle + ' asked:'
+
+    const text = document.createElement('div')
+    text.className = 'curva-chat__bot-text'
+    // Cap at 200 chars for display; full text lives in the message.
+    const prompt = typeof msg.text === 'string' ? msg.text.slice(0, 200) : ''
+    text.textContent = prompt + (typeof msg.text === 'string' && msg.text.length > 200 ? '…' : '')
+
+    body.appendChild(prefix)
+    body.appendChild(text)
+    li.appendChild(marker)
+    li.appendChild(body)
+    return li
+  }
+
+  // Tier 4 R2: `system:bot-reply` renderer.
+  // Mint-border pill. "🤖 curva-bot: <text>" with tool-call badges below.
+  // textContent only. Tool names validated against /^[a-z_]+$/ before
+  // rendering; any name that does not match is shown as "(unknown)".
+  // (CWE-79 defense in depth; the bare side validates too.)
+  const TOOL_NAME_SAFE = /^[a-z_]+$/
+  function renderSystemBotReply(msg, key) {
+    const li = document.createElement('li')
+    li.className = 'curva-chat__msg curva-chat__msg--system curva-chat__msg--bot-reply'
+    li.dataset.key = key
+
+    const marker = document.createElement('span')
+    marker.className = 'curva-chat__bot-marker'
+    marker.textContent = '\u{1F916}'
+
+    const body = document.createElement('div')
+    body.className = 'curva-chat__bot-body'
+
+    const attribution = document.createElement('div')
+    attribution.className = 'curva-chat__bot-attribution'
+    attribution.textContent = 'curva-bot · on-device AI'
+
+    const text = document.createElement('div')
+    text.className = 'curva-chat__bot-text'
+    text.textContent = typeof msg.text === 'string' ? msg.text : ''
+
+    body.appendChild(attribution)
+    body.appendChild(text)
+
+    // Tool-call badges.
+    if (Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
+      const badgeRow = document.createElement('div')
+      badgeRow.className = 'curva-chat__bot-tool-badges'
+
+      for (const tc of msg.tool_calls) {
+        if (!tc || typeof tc !== 'object') continue
+        const rawName = typeof tc.name === 'string' ? tc.name : ''
+        // Validate tool name against allowlist pattern before rendering.
+        const safeName = TOOL_NAME_SAFE.test(rawName) ? rawName : '(unknown)'
+        const failed = tc.ok === false
+
+        const chip = document.createElement('span')
+        chip.className = 'curva-chat__bot-tool-badge' +
+          (failed ? ' curva-chat__bot-tool-badge--failed' : '')
+        chip.textContent = 'via curva-mcp: ' + safeName + (failed ? ' (failed)' : '')
+        badgeRow.appendChild(chip)
+      }
+      body.appendChild(badgeRow)
+    }
 
     li.appendChild(marker)
     li.appendChild(body)
