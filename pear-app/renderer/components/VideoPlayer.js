@@ -21,7 +21,20 @@ const DEBOUNCE_MS = 33 // ~30 fps ceiling on outbound emits
 // video is actively playing.
 const ANCHOR_INTERVAL_MS = 10_000
 
-export function mountVideoPlayer({ container, curva, initialSource, isHost = false } = {}) {
+// Cup Final: floating minute badge. Auto-hides after 3 missed heartbeats
+// (backend pulse cadence is 15s so 45s is the stale threshold). Anything
+// longer risks the badge lying during a backend outage.
+const MINUTE_STALE_MS = 45_000
+const MINUTE_STALE_CHECK_MS = 46_000
+
+export function mountVideoPlayer({
+  container,
+  curva,
+  initialSource,
+  isHost = false,
+  matchId = null,
+  liveMinuteOverlayEnabled = true
+} = {}) {
   if (!container) throw new TypeError('container is required')
   if (!curva) throw new TypeError('curva bridge is required')
 
@@ -37,6 +50,18 @@ export function mountVideoPlayer({ container, curva, initialSource, isHost = fal
   video.preload = 'metadata'
   video.playsInline = true
   wrap.appendChild(video)
+
+  // -- Live match minute overlay --------------------------------------------
+  // Floating badge, top-right of the video wrap. Populated by the enriched
+  // `match.pulse` frames the backend emits every 15s during a live fixture.
+  // Auto-hides when: the room has no matchId, the flag is off, the status is
+  // unknown/null, or no update has arrived for MINUTE_STALE_MS.
+  const minuteBadge = document.createElement('div')
+  minuteBadge.className = 'curva-video__minute'
+  minuteBadge.setAttribute('aria-live', 'polite')
+  minuteBadge.setAttribute('aria-label', 'match minute')
+  minuteBadge.hidden = true
+  wrap.appendChild(minuteBadge)
 
   const controls = document.createElement('div')
   controls.className = 'curva-video__controls'
@@ -145,6 +170,30 @@ export function mountVideoPlayer({ container, curva, initialSource, isHost = fal
 
   const offInbound = curva.onPlayheadUpdate((state) => applyState(state))
 
+  // -- tactical freeze/unfreeze integration ----------------------------------
+  // VideoPlayer handles the video-layer concerns (pause + dim) on freeze.
+  // The canvas drawing layer is handled by TacticalOverlay mounted on wrap.
+  // We keep a dim element here that is distinct from TacticalOverlay's dim so
+  // each layer owns its own DOM.
+
+  const offTacticalFreeze = typeof curva.onTacticalFreeze === 'function'
+    ? curva.onTacticalFreeze((frame) => {
+        const targetSec = (Number(frame && frame.videoTsMs) || 0) / 1000
+        if (Number.isFinite(targetSec) && targetSec > 0) {
+          if (Math.abs(video.currentTime - targetSec) > 0.05) {
+            suppress(() => { video.currentTime = targetSec })
+          }
+        }
+        if (!video.paused) suppress(() => { video.pause() })
+      })
+    : () => {}
+
+  const offTacticalUnfreeze = typeof curva.onTacticalUnfreeze === 'function'
+    ? curva.onTacticalUnfreeze(() => {
+        // Host re-emits a play via the normal playhead path. Nothing needed here.
+      })
+    : () => {}
+
   // -- outbound: user gestures -> setPlayhead --------------------------------
 
   let lastEmit = 0
@@ -179,14 +228,85 @@ export function mountVideoPlayer({ container, curva, initialSource, isHost = fal
     }, ANCHOR_INTERVAL_MS)
   }
 
+  // Host-only dev freeze button. Visible only when CURVA_TACTICAL_ENABLED is
+  // truthy (checked by the caller after mounting TacticalOverlay). The button
+  // is exposed via the returned handle; app.js or RoomHeader wires it up.
+  let tacticalOverlay = null
+
+  function attachTacticalOverlay(overlay) {
+    tacticalOverlay = overlay
+  }
+
+  // -- Live minute overlay state machine ------------------------------------
+  // Rules (see memory/impl_live_minute_overlay.md, docs verified 2026-07-06):
+  //   IN_PLAY / LIVE, min 45 or 90, injuryTime > 0   -> "45+3'"
+  //   IN_PLAY / LIVE, any other minute                -> "34'"
+  //   PAUSED                                          -> "HT"
+  //   EXTRA_TIME                                      -> "105' ET"
+  //   PENALTY_SHOOTOUT                                -> "PSO"
+  //   FINISHED / AWARDED                              -> "FT"
+  //   any other status / null minute                  -> hidden
+  function formatMinute(p) {
+    if (!p || typeof p !== 'object') return ''
+    const s = p.status
+    if (s === 'PAUSED') return 'HT'
+    if (s === 'FINISHED' || s === 'AWARDED') return 'FT'
+    if (s === 'PENALTY_SHOOTOUT') return 'PSO'
+    if (s !== 'IN_PLAY' && s !== 'LIVE' && s !== 'EXTRA_TIME') return ''
+    const min = Number.isFinite(p.minute) ? p.minute : null
+    if (min === null) return ''
+    const injury = Number.isFinite(p.injuryTime) && p.injuryTime > 0 ? p.injuryTime : null
+    const etTag = s === 'EXTRA_TIME' ? ' ET' : ''
+    // injuryTime is a half-end marker in football-data v4, not a running count.
+    // Only append at the boundary minutes to avoid rendering "44+3'" nonsense.
+    if (injury && (min === 45 || min === 90 || min === 105 || min === 120)) {
+      return `${min}+${injury}'${etTag}`
+    }
+    return `${min}'${etTag}`
+  }
+
+  let minuteLastAt = 0
+  let minuteStaleTimer = null
+  function hideMinute() {
+    minuteBadge.hidden = true
+    minuteBadge.textContent = ''
+  }
+  function applyMinutePulse(p) {
+    // Guard: only render when the room is tied to a real match. Backend keys
+    // pulses by matchId; a foreign matchId is an obvious drop.
+    if (!matchId || !p || typeof p !== 'object') return
+    if (typeof p.matchId === 'string' && p.matchId !== matchId) return
+    const text = formatMinute(p)
+    if (!text) {
+      hideMinute()
+      return
+    }
+    minuteBadge.textContent = text
+    minuteBadge.hidden = false
+    minuteLastAt = Date.now()
+    if (minuteStaleTimer) clearTimeout(minuteStaleTimer)
+    minuteStaleTimer = setTimeout(() => {
+      if (Date.now() - minuteLastAt >= MINUTE_STALE_MS) hideMinute()
+    }, MINUTE_STALE_CHECK_MS)
+  }
+
+  const overlayActive = !!(liveMinuteOverlayEnabled && matchId && typeof curva.onMatchMinute === 'function')
+  const offMinute = overlayActive
+    ? curva.onMatchMinute((p) => applyMinutePulse(p))
+    : () => {}
+
   function destroy() {
     if (anchorTimer) { clearInterval(anchorTimer); anchorTimer = null }
+    if (minuteStaleTimer) { clearTimeout(minuteStaleTimer); minuteStaleTimer = null }
     offInbound()
+    offTacticalFreeze()
+    offTacticalUnfreeze()
+    try { offMinute() } catch { /* noop */ }
     try { video.pause() } catch { /* noop */ }
     container.textContent = ''
   }
 
-  return { destroy, video, setSource }
+  return { destroy, video, setSource, wrap, attachTacticalOverlay }
 }
 
 function short(hex) {
