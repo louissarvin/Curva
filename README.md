@@ -16,26 +16,24 @@ Built for the **Tether Developers Cup 2026** by **Team Indonesia**. Track: **Pea
 
 ## Try it in 60 seconds
 
-If you already have the Pear runtime installed:
+The full Curva app is **published on the Pear DHT** at:
 
-```bash
-# Unversioned (auto-updates)
-pear run pear://hcg8oftrk7hps1z4x9pprf4jhk7mitohjort6csfpjwjjo3ynomy
-
-# Versioned (pinned to today's release)
-pear run pear://0.22823.hcg8oftrk7hps1z4x9pprf4jhk7mitohjort6csfpjwjjo3ynomy
+```
+pear://hcg8oftrk7hps1z4x9pprf4jhk7mitohjort6csfpjwjjo3ynomy
 ```
 
-No install? Grab the runtime first:
+You can verify the release is real without installing anything:
 
 ```bash
 npm install -g pear
-pear run pear://hcg8oftrk7hps1z4x9pprf4jhk7mitohjort6csfpjwjjo3ynomy
+pear info pear://hcg8oftrk7hps1z4x9pprf4jhk7mitohjort6csfpjwjjo3ynomy
 ```
 
-That is the entire onboarding. The app self-boots against the live Autobase, joins the room topic on Hyperswarm, and registers with our blind peer so rooms survive host disconnect.
+Expected output includes `name: curva`, `release: 23135`, and the Hypercore + Hyperblobs byte lengths.
 
-No Pear runtime? Judges can still verify the WDK + Pears integration by hitting the Companion backend directly:
+**How to actually run the two peers for the demo:** the Bare P2P worker (Hyperswarm, Autobase, Hyperdrive, blind-peering, wallet, QVAC) is fully Pear-native and lives at `pear-app/workers/main.js`. The Electron shell that renders the UI is still on the npm `electron` binary, which is what `electron-forge start` boots. Port to `pear-electron` for one-liner `pear run` boot is a post-hackathon task. See the "Two independent peers on one laptop" section below for the working demo commands.
+
+Judges can also verify the WDK + Pears integration entirely from the Companion backend, no client needed:
 
 ```bash
 # In one terminal, boot the Companion (Bun + Postgres required)
@@ -69,11 +67,13 @@ Thirteen Pears building blocks. Two real WDK settlement paths. Three on-device A
 ### Pear app is live
 
 ```
-Versioned:   pear://0.22823.hcg8oftrk7hps1z4x9pprf4jhk7mitohjort6csfpjwjjo3ynomy
 Unversioned: pear://hcg8oftrk7hps1z4x9pprf4jhk7mitohjort6csfpjwjjo3ynomy
+Versioned:   pear://23135.hcg8oftrk7hps1z4x9pprf4jhk7mitohjort6csfpjwjjo3ynomy
+Release:     23135
+Discovery:   e8af62ec1ac7733cdc7f2d3e0e26d563e76a5364f6ed7b882c24c23d69211ee8
 ```
 
-Copy either link into a terminal after `pear run` and the client boots. The unversioned key follows OTA. The versioned key pins today's release.
+Verify from any machine with `pear info pear://hcg8oftrk7hps1z4x9pprf4jhk7mitohjort6csfpjwjjo3ynomy`. The client Bare worker (`workers/main.js`) is Pear-native today; the Electron shell that hosts it is still on npm `electron` (booted via `electron-forge start` in the two-peer demo below). Port to `pear-electron` for direct `pear run` boot is queued for the post-hackathon iteration.
 
 ### 13 primitives exercised at runtime
 
@@ -253,7 +253,7 @@ Each subproject ships its own README and ARCHITECTURE.md targeted at a different
 | npm | 10+ | Pear app deps |
 | Bun | 1.0+ | Backend Companion |
 | PostgreSQL | 16 | Match catalog, room directory |
-| Pear CLI | latest | `pear run pear://...` |
+| Pear CLI | latest | `pear info pear://...` to verify DHT release |
 
 ### Backend Companion
 
@@ -275,11 +275,58 @@ npm install
 npm run demo:4peer       # four windows on one laptop for judges
 ```
 
-Or open the live app directly:
+Verify the release is on the Pear DHT:
 
 ```bash
-pear run pear://hcg8oftrk7hps1z4x9pprf4jhk7mitohjort6csfpjwjjo3ynomy
+pear info pear://hcg8oftrk7hps1z4x9pprf4jhk7mitohjort6csfpjwjjo3ynomy
 ```
+
+That returns the app name (`curva`), the release length, and the Hypercore + Hyperblobs byte counts. Booting the app directly via `pear run` requires the Electron shell to be ported to `pear-electron`, which is a post-hackathon item; the two-peer demo below uses `electron-forge start` to give each window its own `--storage` and `--room` flags.
+
+### Two independent peers on one laptop (host + viewer demo)
+
+For the "host creates room, viewer joins from the directory" story you see in the pitch video. Two shell windows, side by side. Each peer runs a separate Bare worker, has its own wallet, its own identity, and discovers the other over Hyperswarm.
+
+Prerequisites: backend running on `http://localhost:3700` (see above), `blind-peer-cli` running locally (`npm i -g blind-peer-cli && blind-peer --storage ./.blind-peer-storage --max-storage 4096`), and clean storage dirs.
+
+**Shell 1 — Peer A (host).** Auto-joins `wc26-final`, publishes to the STADIUM directory:
+
+```bash
+DEV_WALLET_PASSCODE=curva-peer-a-pw \
+CURVA_DEMO_MODE=true \
+CURVA_QVAC_COMMENTATOR_ENABLED=true CURVA_QVAC_STT_ENABLED=true CURVA_QVAC_TTS_ENABLED=true \
+CURVA_PREDICTIONS_ENABLED=true CURVA_ATTENDANCE_ENABLED=true \
+CURVA_BLIND_PEERING_ENABLED=true CURVA_DELEGATED_INFERENCE_ENABLED=true \
+CURVA_TACTICAL_ENABLED=true CURVA_DEMO_HUD_ENABLED=true \
+CURVA_BLIND_PEER_KEY=<your blind-peer public key> \
+cd pear-app && npx electron-forge start -- --no-updates \
+  --storage /tmp/curva-peer-a \
+  --room wc26-final --is-host \
+  --backend http://localhost:3700
+```
+
+**Shell 2 — Peer B (viewer).** Same env, but no `--room` flag so it lands on the lobby with the STADIUM directory:
+
+```bash
+DEV_WALLET_PASSCODE=curva-peer-b-pw \
+CURVA_DEMO_MODE=true \
+CURVA_QVAC_COMMENTATOR_ENABLED=true CURVA_QVAC_STT_ENABLED=true CURVA_QVAC_TTS_ENABLED=true \
+CURVA_PREDICTIONS_ENABLED=true CURVA_ATTENDANCE_ENABLED=true \
+CURVA_BLIND_PEERING_ENABLED=true CURVA_DELEGATED_INFERENCE_ENABLED=true \
+CURVA_TACTICAL_ENABLED=true CURVA_DEMO_HUD_ENABLED=true \
+CURVA_BLIND_PEER_KEY=<your blind-peer public key> \
+cd pear-app && npx electron-forge start -- --no-updates \
+  --storage /tmp/curva-peer-b \
+  --backend http://localhost:3700
+```
+
+Then on stage:
+
+1. On **Peer A**: click **Publish to directory**. Wait for the success toast.
+2. On **Peer B**: the lobby refreshes. `wc26-final` appears with a STADIUM badge. Click **Join**.
+3. Both peers now share the room. Send chat messages, play the video, or trigger a real gasless USDT tip via the tip form under the video.
+
+To fund fresh wallets for a real UI-driven tip, mint 100 USDT to both peers' smart address AND owner EOA (four addresses total; grep the boot log for `smartAddress` / `ownerAddress`, then use `cast send 0x6F51... "mint(address,uint256)" <addr> 100000000` against the working RPC `https://sepolia.drpc.org`).
 
 ### Web
 
@@ -299,7 +346,9 @@ Honest checklist. Everything below is verifiable tonight.
 
 | Item | Status | Evidence |
 |------|:---:|----------|
-| Pear app published to Pear DHT | Verified | `pear run pear://hcg8oft...` boots the client |
+| Pear app published to Pear DHT | Verified | `pear info pear://hcg8oft...` returns `name: curva, release: 23135` |
+| Pear-native Bare P2P worker | Verified | `pear-app/workers/main.js` runs all P2P (Hyperswarm, Autobase, Hyperdrive, blind-peering) under Bare shims (`bare-fs`, `bare-crypto`, `bare-http1`) |
+| Direct `pear run pear://...` boot | Staged | Electron shell still on npm `electron`; port to `pear-electron` window API is post-hackathon |
 | 13 Pears primitives active at runtime | Verified | `GET /pears/status` enumerates each with runtime state |
 | Autobase Pattern B multi-writer | Verified | Chat + playhead both use `base.addWriter` after ed25519 invitation |
 | Blind peering | Verified | Blind peer key `nm5j8618...kt1fy`, chat + playhead both register |
