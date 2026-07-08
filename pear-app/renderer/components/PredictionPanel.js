@@ -71,7 +71,9 @@ export function mountPredictionPanel({ container, curva, roomState, appVersion }
     mySmartAddress: null,   // filled by wallet:ready event
     myOwnerAddress: null,
     pollTimer: null,
-    destroyed: false
+    countdownTimer: null,   // 1 Hz ticker for the open countdown chip
+    destroyed: false,
+    displayedTotalAtomic: 0n  // tracks the last tweened-to value
   }
 
   // ------------------------------------------------------------
@@ -474,6 +476,70 @@ export function mountPredictionPanel({ container, curva, roomState, appVersion }
     body.appendChild(list)
   }
 
+  // Entry chips row: small pills above the entries list for camera legibility.
+  // Shows cumulative stake per team in "ARG 2u" / "ITA 1u" compact form.
+  // "u" stands for units (1 USDT per unit in demo config).
+  function renderEntryChips(pool) {
+    const preds = Array.isArray(pool.predictions) ? pool.predictions : []
+    if (preds.length === 0) return
+
+    const chips = document.createElement('div')
+    chips.className = 'curva-predictions__chips'
+
+    // Accumulate stake per winner side.
+    const sideMap = new Map()
+    for (const p of preds) {
+      const side = ['HOME', 'AWAY', 'DRAW'].includes(p.winner) ? p.winner : 'OTHER'
+      let atoms = 0n
+      try { atoms = BigInt(p.stakeAtomic || '0') } catch { atoms = 0n }
+      sideMap.set(side, (sideMap.get(side) || 0n) + atoms)
+    }
+
+    const sideLabel = { HOME: 'HOME', AWAY: 'AWAY', DRAW: 'DRAW' }
+    for (const [side, total] of sideMap.entries()) {
+      const chip = document.createElement('span')
+      chip.className = 'curva-predictions__chip-entry'
+      const units = fmtUsdt(total.toString())
+      chip.textContent = (sideLabel[side] || side) + ' ' + units + 'u'
+      chips.appendChild(chip)
+    }
+
+    body.appendChild(chips)
+  }
+
+  // Winner / loser banner for the peer's own settled outcome.
+  // Peer-only: host does not have a personal prediction row.
+  function renderSettleBanner(myPred) {
+    if (!myPred) return
+    const won = myPred.status === 'won'
+    const banner = document.createElement('div')
+    banner.className = 'curva-predictions__banner ' +
+      (won ? 'curva-predictions__banner--won' : 'curva-predictions__banner--lost')
+
+    if (won) {
+      const amt = fmtUsdt(myPred.payoutAmountAtomic || '0')
+      banner.textContent = 'You won ' + amt + ' USDT'
+      if (typeof myPred.payoutTxHash === 'string' && /^0x[0-9a-fA-F]{64}$/.test(myPred.payoutTxHash)) {
+        const link = document.createElement('a')
+        link.className = 'curva-predictions__banner-link'
+        link.href = '#'
+        link.textContent = 'view tx'
+        const safeTx = myPred.payoutTxHash
+        link.addEventListener('click', (e) => {
+          e.preventDefault()
+          if (typeof curva.openExternal === 'function') {
+            curva.openExternal('https://sepolia.etherscan.io/tx/' + safeTx).catch(() => { /* noop */ })
+          }
+        })
+        banner.appendChild(link)
+      }
+    } else {
+      banner.textContent = 'Unlucky, try next match'
+    }
+
+    body.appendChild(banner)
+  }
+
   function renderResult(pool) {
     if (!pool.resultWinner) return
     const res = document.createElement('div')
@@ -511,20 +577,27 @@ export function mountPredictionPanel({ container, curva, roomState, appVersion }
     }
     const pool = state.pool
     const status = pool.status || 'unknown'
-    if (status === 'open') setChip('open · ' + fmtCountdown(pool.deadlineMs), 'open')
-    else if (status === 'locked') setChip('awaiting settlement', 'locked')
-    else if (status === 'settled') setChip('settled', 'settled')
-    else if (status === 'refunded') setChip('refunded', 'settled')
-    else setChip(status, null)
+    if (status === 'open') {
+      setChip('open · ' + fmtCountdown(pool.deadlineMs), 'open')
+      startCountdownTicker()
+    } else {
+      stopCountdownTicker()
+      if (status === 'locked') setChip('awaiting settlement', 'locked')
+      else if (status === 'settled') setChip('settled', 'settled')
+      else if (status === 'refunded') setChip('refunded', 'settled')
+      else setChip(status, null)
+    }
 
     renderPoolMeta(pool)
+    // Tween the staked line from the previously displayed value to the new
+    // total. Runs after renderPoolMeta so the .curva-predictions__staked
+    // element is in the DOM.
+    tweenStakedLine(pool)
+    renderEntryChips(pool)
     renderResult(pool)
     renderEntriesList(pool)
 
     if (isHost) {
-      if (status === 'open') {
-        // Show a small "close early" note (deadline countdown suffices for now).
-      }
       if (status === 'locked' || (status === 'open' && Number(pool.deadlineMs) <= Date.now())) {
         renderHostResultForm(pool)
       }
@@ -543,11 +616,10 @@ export function mountPredictionPanel({ container, curva, roomState, appVersion }
           ? ` ${alreadyPredicted.homeGoals}-${alreadyPredicted.awayGoals}` : ''
         you.textContent = `Your pick: ${alreadyPredicted.winner}${scorePart} · ${fmtUsdt(alreadyPredicted.stakeAtomic)} USDT`
         body.appendChild(you)
-        if (status === 'settled' && alreadyPredicted.status === 'won') {
-          const wonMsg = document.createElement('div')
-          wonMsg.className = 'curva-predictions__you-won'
-          wonMsg.textContent = `You won ${fmtUsdt(alreadyPredicted.payoutAmountAtomic)} USDT!`
-          body.appendChild(wonMsg)
+        if (status === 'settled') {
+          // Show the winner/loser banner. Replaces the old you-won div with a
+          // richer banner that includes a tx link for winners.
+          renderSettleBanner(alreadyPredicted)
         }
       }
     }
@@ -605,6 +677,65 @@ export function mountPredictionPanel({ container, curva, roomState, appVersion }
     }
   }
 
+  // 1 Hz countdown chip ticker. Only repaint the chip text on each tick
+  // so we do not thrash the full render. Fires at 500ms so the eye sees
+  // a smooth 1 Hz decrement.
+  function startCountdownTicker() {
+    stopCountdownTicker()
+    state.countdownTimer = setInterval(() => {
+      const pool = state.pool
+      if (!pool || pool.status !== 'open') return
+      setChip('open · ' + fmtCountdown(pool.deadlineMs), 'open')
+    }, 500)
+  }
+  function stopCountdownTicker() {
+    if (state.countdownTimer) {
+      clearInterval(state.countdownTimer)
+      state.countdownTimer = null
+    }
+  }
+
+  // Animated pool-total tween. Runs a rAF loop from the last-displayed value
+  // to the new target over 600ms. Safe against BigInt subtraction when
+  // target < start (pool refund edge case: just snap).
+  function tweenStakedLine(pool) {
+    const target = BigInt(pool.totalStakedAtomic || '0')
+    const start = state.displayedTotalAtomic
+    if (target === start) return
+    const startMs = performance.now()
+    const durMs = 600
+
+    // Find the staked element if it exists in the current DOM.
+    const stakedEl = body.querySelector('.curva-predictions__staked')
+    if (!stakedEl) {
+      state.displayedTotalAtomic = target
+      return
+    }
+
+    // Highlight the line during tween.
+    stakedEl.classList.add('curva-predictions__staked--bump')
+    setTimeout(() => stakedEl.classList.remove('curva-predictions__staked--bump'), 700)
+
+    function frame(now) {
+      if (state.destroyed) return
+      const el = body.querySelector('.curva-predictions__staked')
+      if (!el) { state.displayedTotalAtomic = target; return }
+      const t = Math.min(1, (now - startMs) / durMs)
+      const diff = target - start
+      const cur = diff >= 0n
+        ? start + BigInt(Math.floor(Number(diff) * t))
+        : start - BigInt(Math.floor(Number(-diff) * t))
+      el.textContent = 'Total staked: ' + fmtUsdt(cur.toString()) + ' USDT'
+      if (t < 1) {
+        requestAnimationFrame(frame)
+      } else {
+        state.displayedTotalAtomic = target
+        el.textContent = 'Total staked: ' + fmtUsdt(target.toString()) + ' USDT'
+      }
+    }
+    requestAnimationFrame(frame)
+  }
+
   const subs = []
   subs.push(curva.predictions.onConfig((cfg) => {
     state.enabled = !!cfg.enabled
@@ -616,6 +747,8 @@ export function mountPredictionPanel({ container, curva, roomState, appVersion }
     }
     refreshStatus({ force: true })
     startPolling()
+    // Countdown ticker starts here; render() will also call startCountdownTicker
+    // if the pool is open. Starting early here is a no-op if no pool is open yet.
   }))
 
   subs.push(curva.predictions.onStatus((snap) => {
@@ -690,6 +823,7 @@ export function mountPredictionPanel({ container, curva, roomState, appVersion }
   function destroy() {
     state.destroyed = true
     stopPolling()
+    stopCountdownTicker()
     for (const off of subs) {
       try { off() } catch { /* noop */ }
     }
