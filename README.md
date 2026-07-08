@@ -287,7 +287,9 @@ That returns the app name (`curva`), the release length, and the Hypercore + Hyp
 
 For the "host creates room, viewer joins from the directory" story you see in the pitch video. Two shell windows, side by side. Each peer runs a separate Bare worker, has its own wallet, its own identity, and discovers the other over Hyperswarm.
 
-Prerequisites: backend running on `http://localhost:3700` (see above), `blind-peer-cli` running locally (`npm i -g blind-peer-cli && blind-peer --storage ./.blind-peer-storage --max-storage 4096`), and clean storage dirs.
+Prerequisites: backend running on `http://localhost:3700` with `ENABLE_SEEDER=true`, `MODEL_MIRROR_ENABLED=true`, and `SEEDER_MAX_ROOMS=50` (or higher) in `backend/.env`, and clean storage dirs.
+
+**Same-laptop demo note.** Two Hyperswarm processes on one machine usually cannot hole-punch each other over the public DHT, so the peers never form a direct connection and chat + writer promotion stall. `CURVA_FORCE_RELAY=1` routes both peers through the backend seeder subprocess (`GET /relay/info` exposes its Noise pubkey), which relays every hop over Hyperswarm's built-in `relayThrough`. The seeder must be a real Hyperswarm peer — that requires `bun add hyperswarm corestore hypercore-crypto b4a` in `backend/` and spawning the seeder subprocess via `node` (both already handled by the backend when the deps are installed).
 
 Both storage paths below use the `-fresh` suffix so the wallets survive a restart within the same demo session (the same smart addresses stay funded). Delete the folder if you want a clean slate; new wallets get generated and you re-run `bun run fund:peers` (see below).
 
@@ -297,6 +299,7 @@ Both storage paths below use the `-fresh` suffix so the wallets survive a restar
 cd pear-app && \
 DEV_WALLET_PASSCODE=curva-peer-a-pw \
 CURVA_DEMO_MODE=true \
+CURVA_FORCE_RELAY=1 \
 CURVA_QVAC_COMMENTATOR_ENABLED=true CURVA_QVAC_STT_ENABLED=true CURVA_QVAC_TTS_ENABLED=true \
 CURVA_QVAC_LLM_TRANSLATE_ENABLED=true \
 CURVA_PREDICTIONS_ENABLED=true CURVA_ATTENDANCE_ENABLED=true \
@@ -314,6 +317,7 @@ npx electron-forge start -- --no-updates \
 cd pear-app && \
 DEV_WALLET_PASSCODE=curva-peer-b-pw \
 CURVA_DEMO_MODE=true \
+CURVA_FORCE_RELAY=1 \
 CURVA_QVAC_COMMENTATOR_ENABLED=true CURVA_QVAC_STT_ENABLED=true CURVA_QVAC_TTS_ENABLED=true \
 CURVA_QVAC_LLM_TRANSLATE_ENABLED=true \
 CURVA_PREDICTIONS_ENABLED=true CURVA_ATTENDANCE_ENABLED=true \
@@ -324,6 +328,29 @@ npx electron-forge start -- --no-updates \
   --no-auto-open \
   --backend http://localhost:3700
 ```
+
+**Log signals that confirm chat sync is wired.** Peer A after Publish to directory:
+
+```
+[Curva] INFO joined relay peer { pubkey: '...' }
+[Curva] INFO joining swarm topic { slug: '<slug>', ... }
+[Curva] INFO autobase writer cores attached to muxers { conns: 1, chatWriterKey: '<8>' }
+[Curva] INFO published base keys to backend directory { chat: '<8>', playhead: '<8>', attempts: <n> }
+[Curva] INFO writer promoted (Pattern B) { peer: '<8>', bases: [ 'chat', 'playhead' ] }
+```
+
+Peer B after clicking Join:
+
+```
+[Curva] INFO joined relay peer { pubkey: '...' }
+[Curva] INFO joining swarm topic { slug: '<slug>', ... }
+[Curva] INFO swarm connection { peer: '<peerA-swarm-key>', relayed: true }
+[Curva] INFO tip:host-discovered via hello frame { smart: '0x...' }
+[Curva] INFO reopening room with host bootstrap { chat: '<8>', playhead: '<8>' }
+[Curva] INFO promoted to indexer by host { bases: [ 'chat', 'playhead' ] }
+```
+
+Type a chat message on either peer and both should see `AUTOCHAT observed` with `local: true` on the sender and `local: false` on the receiver.
 
 Then on stage:
 
