@@ -235,9 +235,54 @@ async function createTranslator (opts = {}) {
     const uniqueModelIds = Array.from(new Set(
       pairs.flatMap((p) => [p.modelId, p.pivotModelId].filter(Boolean))
     ))
+    // Canonical Bergamot filename derivation. The @qvac/translation-nmtcpp
+    // native addon detects the Bergamot backend by matching the model
+    // filename against `/^model\.([a-z]+)\.intgemm\.alphas\.bin$/` and looking
+    // for a colocated `vocab.<pair>.spm`. Files named `bergamot-en-it` are
+    // treated as unknown and the addon defaults to the GGML backend, which
+    // then rejects the file as "Invalid file magic number".
+    //
+    // We stash each pair in its own subdirectory under qvac-models/ using
+    // Mozilla's canonical filenames so both filename detection and the
+    // plugin's `deriveColocatedBergamotVocabPaths` succeed.
+    function canonicalBergamotPaths(mId) {
+      const m = String(mId).match(/^bergamot-([a-z]{2})-([a-z]{2})$/i)
+      if (!m) return null
+      const pair = (m[1] + m[2]).toLowerCase()
+      const dir = path.join(modelDir, mId)
+      return {
+        dir,
+        modelPath: path.join(dir, `model.${pair}.intgemm.alphas.bin`),
+        vocabPath: path.join(dir, `vocab.${pair}.spm`)
+      }
+    }
     for (const modelId of uniqueModelIds) {
       const entry = catalogModels.find((m) => m && m.id === modelId)
-      const modelPath = path.join(modelDir, modelId)
+      const canonical = canonicalBergamotPaths(modelId)
+      const modelPath = canonical?.modelPath || path.join(modelDir, modelId)
+      if (canonical) {
+        // The legacy flat cache had `<modelDir>/<modelId>` as a FILE at the
+        // exact same path that we now want as a DIRECTORY. Blow away the old
+        // flat files (model + vocab) BEFORE mkdirSync so it can create the
+        // directory. We accept the re-download cost — 25 MB per pair — as
+        // the price of the one-shot cache-shape migration.
+        const legacyFlatModel = path.join(modelDir, modelId)
+        const legacyFlatVocab = legacyFlatModel + '.vocab.spm'
+        try {
+          const st = fsUse.statSync?.(legacyFlatModel)
+          if (st && st.isFile()) fsUse.unlinkSync(legacyFlatModel)
+        } catch { /* not present or already a directory */ }
+        try {
+          const st = fsUse.statSync?.(legacyFlatVocab)
+          if (st && st.isFile()) fsUse.unlinkSync(legacyFlatVocab)
+        } catch { /* not present */ }
+        try { fsUse.mkdirSync(canonical.dir, { recursive: true }) } catch (err) {
+          if (err.code !== 'EEXIST') {
+            onError({ code: 'MKDIR_FAILED', message: `${modelId}: ${err.message}` })
+            continue
+          }
+        }
+      }
 
       let needsDownload = true
       if (fsUse.existsSync(modelPath)) {
@@ -264,26 +309,43 @@ async function createTranslator (opts = {}) {
           continue
         }
         onProgress({ phase: 'download', modelId })
-        try {
-          await downloadAndVerify({
-            url,
-            destPath: modelPath,
-            expectedDigest: entry?.contentDigest || null,
-            expectedSize: entry?.size || null,
-            fetchImpl: doFetch,
-            fsUse,
-            onProgress: (bytes, total) => {
-              onProgress({
-                phase: 'download',
-                modelId,
-                downloaded: bytes,
-                total,
-                percent: total > 0 ? Math.round((bytes / total) * 100) : 0
-              })
-            }
-          })
-        } catch (err) {
-          onError({ code: err.code || 'DOWNLOAD_FAILED', message: `${modelId}: ${err.message}` })
+        // Retry once on transient bare-fetch failures. Common in bursty
+        // Google-Storage 302 redirects during app boot (e.g. bergamot-it-en
+        // regularly hits NETWORK_ERROR on cold start while its siblings
+        // succeed); a single 1s backoff clears it reliably.
+        let dlErr = null
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          try {
+            await downloadAndVerify({
+              url,
+              destPath: modelPath,
+              expectedDigest: entry?.contentDigest || null,
+              expectedSize: entry?.size || null,
+              fetchImpl: doFetch,
+              fsUse,
+              onProgress: (bytes, total) => {
+                onProgress({
+                  phase: 'download',
+                  modelId,
+                  downloaded: bytes,
+                  total,
+                  percent: total > 0 ? Math.round((bytes / total) * 100) : 0,
+                  attempt
+                })
+              }
+            })
+            dlErr = null
+            break
+          } catch (err) {
+            dlErr = err
+            const transient = err?.code === 'NETWORK_ERROR' || err?.code === 'DOWNLOAD_HTTP_ERROR'
+            if (!transient || attempt === 3) break
+            onProgress({ phase: 'download-retry', modelId, attempt, message: err.message })
+            await new Promise((r) => setTimeout(r, attempt * 1000))
+          }
+        }
+        if (dlErr) {
+          onError({ code: dlErr.code || 'DOWNLOAD_FAILED', message: `${modelId}: ${dlErr.message}` })
           continue
         }
       }
@@ -296,7 +358,7 @@ async function createTranslator (opts = {}) {
       // missing. Shared vocab file (Mozilla uses a single sentencepiece
       // model per pair for both source and destination).
       if (entry?.vocabUrl) {
-        const vocabPath = modelPath + '.vocab.spm'
+        const vocabPath = canonical?.vocabPath || (modelPath + '.vocab.spm')
         let needsVocab = true
         if (fsUse.existsSync(vocabPath)) needsVocab = false
         if (needsVocab) {
@@ -360,9 +422,42 @@ async function createTranslator (opts = {}) {
       }
       try {
         onProgress({ phase: 'load', modelId: pair.modelId, from: pair.from, to: pair.to })
+        // Log the resolved paths so a downstream FS check catches missing
+        // or empty files before we blame the SDK.
+        try {
+          const st = fsUse?.statSync?.(loadOpts.modelPath)
+          const stV = loadOpts.vocabPath ? fsUse?.statSync?.(loadOpts.vocabPath) : null
+          console.log('[Curva][Translate] load prep', {
+            modelId: pair.modelId,
+            modelPath: loadOpts.modelPath,
+            modelBytes: st?.size ?? null,
+            vocabPath: loadOpts.vocabPath,
+            vocabBytes: stV?.size ?? null,
+            pivotModelPath: loadOpts.pivotModelPath || null,
+            pivotVocabPath: loadOpts.pivotVocabPath || null,
+            from: pair.from,
+            to: pair.to
+          })
+        } catch (fsErr) {
+          console.warn('[Curva][Translate] load prep stat failed:', fsErr?.message)
+        }
         await engine.loadModel(loadOpts)
         loadedPairs.add(pair.from + '>' + pair.to)
       } catch (err) {
+        console.warn(
+          '[Curva][Translate] SDK loadModel threw',
+          JSON.stringify({
+            modelId: pair.modelId,
+            from: pair.from,
+            to: pair.to,
+            errMessage: err?.message || String(err),
+            errCode: err?.code || null,
+            errName: err?.name || null,
+            causeMessage: err?.cause?.message || null,
+            causeCode: err?.cause?.code || null,
+            stack: err?.stack?.slice(0, 600) || null
+          })
+        )
         onError({ code: 'LOAD_FAILED', message: `${pair.modelId} ${pair.from}->${pair.to}: ${err.message}` })
       }
     }
@@ -641,13 +736,67 @@ async function resolveEngine (engineFactory) {
   // No private-shape probing. If the import fails we return null and the
   // caller flips into `translationDisabled`.
   try {
-    const mod = await import('@qvac/sdk').catch(() => null)
-    if (!mod) return null
-    if (typeof mod.loadModel !== 'function' || typeof mod.translate !== 'function') {
+    let importErr = null
+    const mod = await import('@qvac/sdk').catch((err) => { importErr = err; return null })
+    if (!mod) {
+      console.warn('[Curva][Translate] @qvac/sdk import failed:', importErr?.message || importErr, importErr?.code || '', importErr?.stack?.slice(0, 400) || '')
       return null
     }
+    if (typeof mod.loadModel !== 'function' || typeof mod.translate !== 'function') {
+      console.warn('[Curva][Translate] @qvac/sdk import ok but missing required exports', {
+        hasLoadModel: typeof mod.loadModel === 'function',
+        hasTranslate: typeof mod.translate === 'function',
+        keys: Object.keys(mod).slice(0, 20)
+      })
+      return null
+    }
+    // Bare plugin registration. Verified by the SDK's runtime error:
+    //   "No plugins registered in the worker. On Bare, register the plugins
+    //    you need with plugins([...]) before the first SDK call"
+    // The nmtcpp translation plugin lives under a dedicated subpath export
+    // (see @qvac/sdk/package.json exports). Register it once at engine
+    // resolve time; the SDK caches the registration so subsequent loadModel
+    // calls hit the fast path.
+    try {
+      const nmtPluginMod = await import('@qvac/sdk/nmtcpp-translation/plugin').catch((err) => {
+        console.warn('[Curva][Translate] @qvac/sdk/nmtcpp-translation/plugin import failed:', err?.message || err)
+        return null
+      })
+      const nmtPlugin = nmtPluginMod?.nmtPlugin || nmtPluginMod?.default || nmtPluginMod
+      if (nmtPlugin && typeof mod.plugins === 'function') {
+        mod.plugins([nmtPlugin])
+        console.log('[Curva][Translate] registered nmtcpp translation plugin with @qvac/sdk')
+      } else if (typeof mod.plugins !== 'function') {
+        console.warn('[Curva][Translate] @qvac/sdk exposes no plugins(...) registrar; SDK may reject loadModel')
+      } else {
+        console.warn('[Curva][Translate] nmtcpp plugin module has no nmtPlugin export', {
+          keys: nmtPluginMod ? Object.keys(nmtPluginMod).slice(0, 10) : null
+        })
+      }
+    } catch (err) {
+      console.warn('[Curva][Translate] plugin registration threw:', err?.message || err)
+    }
+    // Subscribe to the SDK's internal server log stream so Marian/addon
+    // errors surface in our worker log instead of getting swallowed by the
+    // opaque "Failed to load model" RPC envelope. Idempotent — the SDK is
+    // documented as safe to subscribe once at boot.
+    try {
+      if (typeof mod.subscribeServerLogs === 'function') {
+        mod.subscribeServerLogs((log) => {
+          try {
+            const level = String(log?.level || 'info').toLowerCase()
+            const stream = level === 'error' || level === 'warn' ? console.warn : console.log
+            stream('[Curva][QVAC:' + (log?.id || 'sdk') + ':' + (log?.namespace || '?') + '] ' + (log?.message || ''))
+          } catch { /* logging is best-effort */ }
+        })
+        console.log('[Curva][Translate] subscribed to @qvac/sdk server logs')
+      }
+    } catch (err) {
+      console.warn('[Curva][Translate] subscribeServerLogs threw:', err?.message || err)
+    }
     return wrapSdkEngine(mod)
-  } catch {
+  } catch (err) {
+    console.warn('[Curva][Translate] resolveEngine threw:', err?.message || err, err?.stack?.slice(0, 400) || '')
     return null
   }
 }
@@ -665,6 +814,11 @@ function wrapSdkEngine (sdk) {
   return {
     async loadModel (opts) {
       const modelConfig = {
+        // The @qvac/sdk nmtcpp plugin uses `nmtConfigBaseSchema` (not the
+        // transformed `nmtConfigSchema`), so the `mode: "full"` default that
+        // the transform normally applies is skipped. Pass it explicitly here
+        // to match the schema's post-transform shape.
+        mode: 'full',
         engine: 'Bergamot',
         from: opts.sourceLang,
         to: opts.targetLang
@@ -960,9 +1114,36 @@ async function loadSdkLlm ({ modelSrc, onProgress, sdkImpl, modelConfig } = {}) 
   if (modelSrc === undefined || modelSrc === null) {
     throw new TypeError('modelSrc required')
   }
-  const sdk = sdkImpl || await import('@qvac/sdk').catch(() => null)
-  if (!sdk || typeof sdk.loadModel !== 'function' || typeof sdk.completion !== 'function') {
+  let importErr = null
+  const sdk = sdkImpl || await import('@qvac/sdk').catch((err) => { importErr = err; return null })
+  if (!sdk) {
+    console.warn('[Curva][LlmLoader] @qvac/sdk import failed:', importErr?.message || importErr, importErr?.code || '', importErr?.stack?.slice(0, 400) || '')
     return null
+  }
+  if (typeof sdk.loadModel !== 'function' || typeof sdk.completion !== 'function') {
+    console.warn('[Curva][LlmLoader] @qvac/sdk imported but missing exports', {
+      hasLoadModel: typeof sdk.loadModel === 'function',
+      hasCompletion: typeof sdk.completion === 'function',
+      keys: Object.keys(sdk).slice(0, 20)
+    })
+    return null
+  }
+  // Bare plugin registration for LLM inference. `plugins(...)` is idempotent
+  // in @qvac/sdk (registerPlugins de-dupes by plugin key), so it's safe to
+  // call from every loadSdkLlm entry point without coordination with the
+  // NMT engine registration above.
+  try {
+    const llmPluginMod = await import('@qvac/sdk/llamacpp-completion/plugin').catch((err) => {
+      console.warn('[Curva][LlmLoader] llamacpp-completion plugin import failed:', err?.message || err)
+      return null
+    })
+    const llmPlugin = llmPluginMod?.llmPlugin || llmPluginMod?.default || llmPluginMod
+    if (llmPlugin && typeof sdk.plugins === 'function') {
+      sdk.plugins([llmPlugin])
+      console.log('[Curva][LlmLoader] registered llamacpp-completion plugin with @qvac/sdk')
+    }
+  } catch (err) {
+    console.warn('[Curva][LlmLoader] plugin registration threw:', err?.message || err)
   }
   // Wave 13B: `modelConfig` passthrough is required so callers (roomBot) can
   // request `tools: true` at loadModel() time — Qwen3 chat template needs the
