@@ -16,7 +16,20 @@
 // Accept-Language: value is set at construction so backend F9 can return
 // Italian labels for the demo.
 
-const DEFAULT_TIMEOUT_MS = 8_000
+// Default request timeout for backend calls. The EIP-3009 facilitator endpoint
+// does a Prisma reservation + Sepolia RPC nonce lookup + on-chain submit
+// synchronously; on free-tier Sepolia RPCs (drpc.org, publicnode) that can
+// slip past 8s. 30s is generous but still safely below the Fastify keep-alive
+// idle timeout. Callers can override via the constructor arg.
+//
+// Bare-fetch behaviour note: when an AbortController fires abort() during
+// fetch, bare-fetch v3 does NOT reject with `err.name === 'AbortError'`.
+// Instead the underlying socket closes, which triggers `CONNECTION_LOST` and
+// surfaces as `NETWORK_ERROR: Network error`. This masks a real timeout as a
+// generic BACKEND_UNREACHABLE. Keeping the timeout large means the abort
+// almost never fires for legitimate on-chain paths; if it does, `err.cause`
+// carries the true reason for ops to inspect.
+const DEFAULT_TIMEOUT_MS = 30_000
 
 function createBackendClient(baseUrl, { lang = 'en', timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
   if (typeof baseUrl !== 'string' || baseUrl.length === 0) {
@@ -56,11 +69,35 @@ function createBackendClient(baseUrl, { lang = 'en', timeoutMs = DEFAULT_TIMEOUT
       })
     } catch (err) {
       if (timeoutHandle) clearTimeout(timeoutHandle)
+      // Bare-fetch wraps the underlying error in FetchError.cause; surface it
+      // so BACKEND_UNREACHABLE responses don't hide the actual TCP/HTTP reason
+      // (CONNECTION_LOST, timeout, refused, TLS, etc). ops greps for
+      // "backend request failed" to find the real cause.
+      const causeMsg = err?.cause?.message || err?.cause?.code || null
+      const isAbort = err?.name === 'AbortError' || controller?.signal?.aborted === true
+      const combined = causeMsg
+        ? `${err?.message || 'network error'} (cause: ${causeMsg})`
+        : err?.message || 'network error'
+      try {
+        console.warn(
+          '[Curva][BackendClient] request failed',
+          JSON.stringify({
+            url,
+            method: init.method || 'GET',
+            errName: err?.name || null,
+            errMessage: err?.message || null,
+            errCode: err?.code || null,
+            causeMessage: err?.cause?.message || null,
+            causeCode: err?.cause?.code || null,
+            aborted: isAbort
+          })
+        )
+      } catch { /* logging is best-effort */ }
       return {
         ok: false,
         error: {
-          code: err?.name === 'AbortError' ? 'BACKEND_TIMEOUT' : 'BACKEND_UNREACHABLE',
-          message: err?.message || 'network error'
+          code: isAbort ? 'BACKEND_TIMEOUT' : 'BACKEND_UNREACHABLE',
+          message: combined
         }
       }
     }
