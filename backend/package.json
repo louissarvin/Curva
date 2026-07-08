@@ -17,7 +17,8 @@
     "prewarm:models": "bun scripts/prewarm-models.ts",
     "verify:qvac-models": "bun scripts/verify-qvac-models.ts",
     "preflight": "bun scripts/preflight.ts",
-    "treasury:setup": "bun scripts/setup-treasury.ts"
+    "treasury:setup": "bun scripts/setup-treasury.ts",
+    "fund:peers": "bun scripts/fund-peers.ts"
   },
   "keywords": [],
   "author": "",
