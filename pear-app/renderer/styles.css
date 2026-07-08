@@ -43,6 +43,29 @@
   --sp-5: 20px;
   --sp-6: 24px;
   --sp-8: 32px;
+
+  /* Tier 4 R2: keet-identity badge tokens */
+  --curva-identity-verified-color: #4ade80;
+  --curva-identity-verified-bg: rgba(74, 222, 128, 0.08);
+  --curva-identity-verified-border: rgba(74, 222, 128, 0.3);
+  --curva-identity-unverified-color: #8a8a8a;
+  --curva-identity-mismatch-color: #ef4444;
+  --curva-identity-mismatch-bg: rgba(239, 68, 68, 0.08);
+  --curva-identity-mismatch-border: rgba(239, 68, 68, 0.3);
+
+  /* Tier 4 R2: bot pill border tokens */
+  --curva-bot-query-border: rgba(212, 175, 55, 0.5);   /* gold */
+  --curva-bot-reply-border: rgba(124, 227, 193, 0.5);  /* mint = --curva-mint */
+
+  /* Tier 4 R2: mnemonic word grid pill background */
+  --curva-mnemonic-word-bg: rgba(255, 255, 255, 0.05);
+
+  /* Cup Final: live-match minute overlay pill. Torino red at 0.9 alpha keeps
+     the badge readable against varied broadcast video frames without going
+     opaque enough to obscure the underlying pixels. */
+  --curva-live-minute-bg: rgba(200, 16, 46, 0.9);
+  --curva-live-minute-color: #ffffff;
+  --curva-live-minute-border: #c8102e;
 }
 
 * {
@@ -332,12 +355,40 @@ body {
   overflow: hidden;
   aspect-ratio: 16 / 9;
   width: 100%;
+  /* Positioned so absolutely-anchored children (minute badge, TacticalOverlay)
+     have a stable containing block. */
+  position: relative;
 }
 
 .curva-video__el {
   width: 100%;
   height: 100%;
   display: block;
+}
+
+/* Cup Final: floating minute badge. Sits above the <video> but below the
+   TacticalOverlay canvas (z-index 4 there) so a presenter freeze still draws
+   on top. Pointer-events:none so it never eats a click on the video. */
+.curva-video__minute {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 3;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--curva-live-minute-bg);
+  color: var(--curva-live-minute-color);
+  border: 1px solid var(--curva-live-minute-border);
+  font-family: var(--curva-mono);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0.02em;
+  pointer-events: none;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
+}
+.curva-video__minute[hidden] {
+  display: none;
 }
 
 .curva-video__controls {
@@ -743,6 +794,21 @@ body {
 
 .curva-app__brand {
   display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 12px;
+}
+
+.curva-app__brand-logo {
+  width: 44px;
+  height: 44px;
+  object-fit: contain;
+  display: block;
+  filter: drop-shadow(0 2px 6px rgba(200, 16, 46, 0.28));
+}
+
+.curva-app__brand-text {
+  display: flex;
   flex-direction: column;
 }
 
@@ -751,7 +817,7 @@ body {
   color: var(--curva-accent);
   font-weight: 700;
   letter-spacing: 0.04em;
-  font-size: 24px;
+  font-size: 26px;
 }
 
 .curva-app__brand-tag {
@@ -1853,14 +1919,24 @@ body {
 }
 
 .curva-boot__mark {
-  width: 120px;
-  height: 120px;
-  animation: curva-spin 3s linear infinite;
+  width: 220px;
+  height: 220px;
+  animation: curva-pulse 2.4s ease-in-out infinite;
 }
 
-.curva-boot__mark svg {
+.curva-boot__mark svg,
+.curva-boot__mark img,
+.curva-boot__logo {
   width: 100%;
   height: 100%;
+  object-fit: contain;
+  display: block;
+  filter: drop-shadow(0 4px 24px rgba(200, 16, 46, 0.35));
+}
+
+@keyframes curva-pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.04); opacity: 0.92; }
 }
 
 .curva-boot__title {
@@ -2487,6 +2563,234 @@ body {
   background: #a8102a;
 }
 
+/* -- Chat: system:attendance-issued pill --------------------------------- */
+.curva-chat__msg--attendance {
+  background: rgba(212, 175, 55, 0.05);
+  border-left: 2px solid var(--curva-accent-gold);
+  padding-left: 14px;
+}
+
+.curva-chat__attendance-marker {
+  margin-right: 6px;
+  font-size: 13px;
+}
+
+.curva-chat__attendance-body {
+  font-size: 12px;
+  color: var(--curva-text);
+  display: inline;
+}
+
+.curva-chat__attendance-attribution {
+  font-size: 10px;
+  color: var(--curva-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-top: 2px;
+}
+
+/* -- Chat: system:prediction-stake pill --------------------------------- */
+.curva-chat__msg--stake {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(212, 175, 55, 0.05);
+  border-left: 2px solid var(--curva-accent-gold);
+  padding-left: 14px;
+}
+
+.curva-chat__stake-marker {
+  color: var(--curva-accent-gold);
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.curva-chat__stake-body {
+  font-size: 12px;
+  color: var(--curva-text);
+  font-family: var(--curva-sans);
+}
+
+.curva-chat__stake-link {
+  color: var(--curva-accent-gold);
+  text-decoration: none;
+  margin-left: 4px;
+  font-size: 11px;
+  font-family: var(--curva-mono);
+}
+
+.curva-chat__stake-link:hover {
+  text-decoration: underline;
+}
+
+/* -- Chat: system:prediction-settle pill --------------------------------- */
+.curva-chat__msg--settle-won {
+  background: rgba(74, 222, 128, 0.06);
+  border-left: 2px solid var(--curva-good);
+  padding-left: 14px;
+}
+
+.curva-chat__msg--settle-lost {
+  background: rgba(239, 68, 68, 0.05);
+  border-left: 2px solid rgba(239, 68, 68, 0.4);
+  padding-left: 14px;
+}
+
+.curva-chat__settle-marker {
+  font-size: 12px;
+  margin-right: 6px;
+}
+
+.curva-chat__settle-body {
+  font-size: 12px;
+  color: var(--curva-text);
+  font-family: var(--curva-sans);
+}
+
+.curva-chat__settle-body--won {
+  color: var(--curva-good);
+  font-weight: 600;
+}
+
+.curva-chat__settle-body--lost {
+  color: var(--curva-muted);
+  font-style: italic;
+}
+
+.curva-chat__settle-link {
+  color: var(--curva-accent-gold);
+  text-decoration: none;
+  margin-left: 4px;
+  font-size: 11px;
+  font-family: var(--curva-mono);
+}
+
+.curva-chat__settle-link:hover {
+  text-decoration: underline;
+}
+
+/* -- Chat: system:goal pill ---------------------------------------------- */
+.curva-chat__msg--goal-pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(212, 175, 55, 0.08);
+  border-left: 3px solid var(--curva-accent-gold);
+  padding-left: 13px;
+}
+
+.curva-chat__goal-minute {
+  font-family: var(--curva-mono);
+  font-size: 11px;
+  color: var(--curva-accent-gold);
+  font-weight: 700;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.curva-chat__goal-body {
+  font-size: 13px;
+  color: var(--curva-text);
+  font-weight: 600;
+  font-family: var(--curva-sans);
+}
+
+.curva-chat__goal-score {
+  font-family: var(--curva-mono);
+  color: var(--curva-accent-gold);
+  font-weight: 700;
+}
+
+/* -- PredictionPanel: countdown chip animation --------------------------- */
+@keyframes curva-countdown-pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.7; }
+}
+
+.curva-predictions__chip--open {
+  animation: curva-countdown-pulse 2s ease-in-out infinite;
+}
+
+/* -- PredictionPanel: entry chips row ------------------------------------ */
+.curva-predictions__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 0;
+}
+
+.curva-predictions__chip-entry {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: rgba(200, 16, 46, 0.08);
+  border: 1px solid var(--curva-primary-border);
+  font-size: 11px;
+  font-family: var(--curva-mono);
+  color: var(--curva-secondary);
+  white-space: nowrap;
+}
+
+/* -- PredictionPanel: winner / loser banner ------------------------------ */
+.curva-predictions__banner {
+  padding: 12px 14px;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 700;
+  font-family: var(--curva-display);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.curva-predictions__banner--won {
+  background: rgba(74, 222, 128, 0.10);
+  border: 1px solid rgba(74, 222, 128, 0.28);
+  color: var(--curva-good);
+}
+
+.curva-predictions__banner--lost {
+  background: rgba(239, 68, 68, 0.06);
+  border: 1px solid rgba(239, 68, 68, 0.22);
+  color: var(--curva-bad);
+  font-style: italic;
+  font-weight: 400;
+  font-size: 13px;
+}
+
+.curva-predictions__banner-link {
+  color: var(--curva-accent-gold);
+  text-decoration: none;
+  font-size: 11px;
+  font-family: var(--curva-mono);
+  font-weight: 400;
+  font-style: normal;
+  margin-left: auto;
+}
+
+.curva-predictions__banner-link:hover {
+  text-decoration: underline;
+}
+
+/* -- PredictionPanel: staked line (animated via JS rAF tween) ------------ */
+.curva-predictions__staked {
+  transition: color 300ms ease-out;
+}
+
+.curva-predictions__staked--bump {
+  color: var(--curva-accent-gold);
+}
+
+/* -- RoomHeader: per-peer ticket badge ----------------------------------- */
+.curva-header__peer-ticket {
+  font-size: 10px;
+  margin-left: 3px;
+  cursor: default;
+  vertical-align: middle;
+}
+
 /* -- Diagnostics footer ------------------------------------------------- */
 .curva-diag {
   border-top: 1px solid var(--curva-border);
@@ -2516,5 +2820,658 @@ body {
 }
 .curva-diag__val {
   color: var(--curva-text);
+}
+
+/* ======================================================================
+   C1: ClipGallery video modal (additional tokens already in modal block)
+   Ensure the modal video element has a reasonable max-height so it does
+   not overflow on landscape clips at large resolutions.
+   ====================================================================== */
+
+.curva-clips__modal-video {
+  max-height: 60vh;
+  object-fit: contain;
+}
+
+/* ======================================================================
+   C2: TacticalOverlay
+   ====================================================================== */
+
+/* New token: overlay yellow for drawing strokes */
+:root {
+  --curva-tactical-stroke: #ffdb4d;
+  --curva-tactical-dim: rgba(0, 0, 0, 0.30);
+}
+
+/* Canvas element: sits on top of the video element. Pointer events are
+   controlled by JS (none when unfrozen, auto when frozen). */
+.curva-tactical__canvas {
+  /* position/inset/pointer-events/z-index all set inline by mountTacticalOverlay
+     so they are guaranteed to apply even if this class is overridden elsewhere.
+     This rule is a fallback/documentation anchor only. */
+  touch-action: none; /* prevent browser scroll-drag interfering with pointer events */
+  cursor: crosshair;
+}
+
+/* Dim overlay behind the canvas. Opacity animated by JS (0 <-> 1). */
+.curva-tactical__dim {
+  touch-action: none;
+  pointer-events: none;
+}
+
+/* When the video wrap is frozen, suppress native video controls so the user
+   cannot accidentally seek during drawing. Controls are restored on unfreeze. */
+.curva-tactical--frozen .curva-video__el {
+  pointer-events: none;
+}
+
+/* ======================================================================
+   C3.b: TipButton attribution chip
+   ====================================================================== */
+
+/* New token: attribution chip background tints */
+:root {
+  --curva-attrib-verified-bg:  rgba(74, 222, 128, 0.08);
+  --curva-attrib-verified-border: rgba(74, 222, 128, 0.25);
+  --curva-attrib-pending-bg:  rgba(245, 158, 11, 0.08);
+  --curva-attrib-pending-border: rgba(245, 158, 11, 0.25);
+  --curva-attrib-loading-bg:  rgba(148, 163, 184, 0.06);
+  --curva-attrib-loading-border: rgba(148, 163, 184, 0.18);
+}
+
+/* Base chip */
+.curva-tip__attrib {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-family: var(--curva-mono);
+  letter-spacing: 0.02em;
+  border: 1px solid var(--curva-attrib-loading-border);
+  background: var(--curva-attrib-loading-bg);
+  color: var(--curva-muted);
+  transition: background 200ms ease-out, border-color 200ms ease-out, color 200ms ease-out;
+}
+
+/* Loading state (grey) */
+.curva-tip__attrib--loading {
+  background: var(--curva-attrib-loading-bg);
+  border-color: var(--curva-attrib-loading-border);
+  color: var(--curva-muted);
+}
+
+/* Verified state (green): attribution confirmed on-chain */
+.curva-tip__attrib--verified {
+  background: var(--curva-attrib-verified-bg);
+  border-color: var(--curva-attrib-verified-border);
+  color: var(--curva-good);
+}
+
+/* Pending state (amber): bundler unreachable, check again later */
+.curva-tip__attrib--pending {
+  background: var(--curva-attrib-pending-bg);
+  border-color: var(--curva-attrib-pending-border);
+  color: var(--curva-warn);
+}
+
+/* Mismatch state (amber): marker present but does not match curva */
+.curva-tip__attrib--mismatch {
+  background: var(--curva-attrib-pending-bg);
+  border-color: var(--curva-attrib-pending-border);
+  color: var(--curva-warn);
+}
+
+/* ============================================================
+   Tier 4 tokens and component styles
+   ============================================================ */
+
+:root {
+  /* STADIUM badge: Torino red variant for public spectator rooms */
+  --curva-stadium:        #c8102e;
+  --curva-stadium-bg:     rgba(200, 16, 46, 0.12);
+  --curva-stadium-border: rgba(200, 16, 46, 0.35);
+
+  /* Batch tip total display: gold accent for the running-total line */
+  --curva-batch-total:        var(--curva-accent-gold);
+  --curva-batch-total-over:   var(--curva-bad);
+
+  /* TTS audio badge: gold pill with 3-second fade */
+  --curva-tts-audio-badge:        var(--curva-accent-gold);
+  --curva-tts-audio-badge-bg:     rgba(212, 175, 55, 0.14);
+  --curva-tts-audio-badge-border: rgba(212, 175, 55, 0.35);
+}
+
+/* STADIUM badge (RoomBrowser) */
+.curva-browser__room-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.curva-browser__badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-family: var(--curva-mono);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  line-height: 1.4;
+}
+
+.curva-browser__badge--stadium {
+  background: var(--curva-stadium-bg);
+  border: 1px solid var(--curva-stadium-border);
+  color: var(--curva-stadium);
+}
+
+/* Reader note (Chat.js) */
+.curva-chat__reader-note {
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--curva-muted);
+  background: rgba(138, 138, 138, 0.06);
+  border: 1px solid rgba(138, 138, 138, 0.12);
+  border-radius: 6px;
+  margin: 8px 0 0 0;
+  text-align: center;
+  letter-spacing: 0.01em;
+}
+
+/* Reader-joined pill (Chat.js system:reader-joined) */
+.curva-chat__msg--reader-joined {
+  padding: 3px 8px;
+}
+
+.curva-chat__reader-joined-body {
+  font-size: 11px;
+  color: var(--curva-muted);
+  font-style: italic;
+  letter-spacing: 0.01em;
+}
+
+/* Batch tip success pill distinguisher (Chat.js system:tip-batch) */
+.curva-chat__msg--tip-batch .curva-chat__tip-marker {
+  background: var(--curva-accent-gold);
+  color: var(--curva-bg);
+  font-size: 9px;
+  font-weight: 800;
+  border-radius: 3px;
+  padding: 1px 4px;
+  letter-spacing: 0.05em;
+}
+
+/* Tip mode bar (TipButton.js) */
+.curva-tip__modebar {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.curva-tip__mode {
+  flex: 1;
+  padding: 4px 8px;
+  font-size: 11px;
+  font-family: var(--curva-mono);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border: 1px solid var(--curva-border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--curva-muted);
+  cursor: pointer;
+  transition: background 150ms ease-out, color 150ms ease-out, border-color 150ms ease-out;
+}
+
+.curva-tip__mode:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--curva-text);
+}
+
+.curva-tip__mode--active {
+  background: var(--curva-accent-dim);
+  border-color: var(--curva-primary-border);
+  color: var(--curva-text);
+}
+
+/* Batch panel layout (TipButton.js) */
+.curva-tip__batch-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.curva-tip__batch-peers {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+.curva-tip__batch-peer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.curva-tip__batch-check {
+  accent-color: var(--curva-accent);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.curva-tip__batch-peer-label {
+  font-size: 12px;
+  color: var(--curva-text);
+  cursor: pointer;
+  font-family: var(--curva-mono);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.curva-tip__batch-amount-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.curva-tip__batch-label {
+  font-size: 11px;
+  color: var(--curva-muted);
+  white-space: nowrap;
+}
+
+.curva-tip__batch-amount-input {
+  width: 80px;
+}
+
+.curva-tip__batch-total {
+  font-size: 12px;
+  font-family: var(--curva-mono);
+  color: var(--curva-batch-total);
+  padding: 4px 0;
+  letter-spacing: 0.02em;
+}
+
+.curva-tip__batch-total--over {
+  color: var(--curva-batch-total-over);
+}
+
+.curva-tip__batch-error {
+  font-size: 11px;
+  color: var(--curva-bad);
+  padding: 4px 0;
+}
+
+.curva-tip__batch-status {
+  font-size: 11px;
+  color: var(--curva-muted);
+}
+
+.curva-tip__batch-confirm {
+  width: 100%;
+}
+
+/* TTS audio badge (CommentaryPanel.js) */
+@keyframes tts-badge-fade {
+  0%   { opacity: 1; }
+  70%  { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+.curva-commentary__tts-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-family: var(--curva-mono);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  background: var(--curva-tts-audio-badge-bg);
+  border: 1px solid var(--curva-tts-audio-badge-border);
+  color: var(--curva-tts-audio-badge);
+  margin-left: 8px;
+}
+
+.curva-commentary__tts-badge--fade {
+  animation: tts-badge-fade 3s ease-out forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .curva-commentary__tts-badge--fade {
+    animation: none;
+    opacity: 0;
+  }
+}
+
+/* ==========================================================================
+   Tier 4 R2: IdentityWizard modal
+   ========================================================================== */
+
+.curva-identity-wizard {
+  position: fixed;
+  inset: 0;
+  z-index: 9000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.curva-identity-wizard__backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.72);
+  backdrop-filter: blur(4px);
+}
+
+.curva-identity-wizard__card {
+  position: relative;
+  background: var(--curva-surface);
+  border: 1px solid var(--curva-border);
+  border-radius: 12px;
+  padding: var(--sp-8);
+  width: min(480px, 92vw);
+  max-height: 88vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-5);
+}
+
+.curva-identity-wizard__title {
+  font-family: var(--curva-sans);
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--curva-text);
+  margin: 0;
+  letter-spacing: -0.01em;
+}
+
+.curva-identity-wizard__sub {
+  font-size: 13px;
+  color: var(--curva-muted);
+  margin: 0;
+  line-height: 1.5;
+}
+
+.curva-identity-wizard__actions {
+  display: flex;
+  gap: var(--sp-3);
+}
+
+.curva-identity-wizard__btn {
+  flex: 1;
+  padding: var(--sp-3) var(--sp-4);
+  border-radius: 8px;
+  border: 1px solid var(--curva-border);
+  background: var(--curva-surface-2);
+  color: var(--curva-text);
+  font-family: var(--curva-sans);
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.curva-identity-wizard__btn:hover {
+  border-color: var(--curva-web-border-hover);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.curva-identity-wizard__btn--primary {
+  background: var(--curva-accent);
+  border-color: var(--curva-accent);
+  color: #fff;
+}
+
+.curva-identity-wizard__btn--primary:hover {
+  background: #a30d25;
+  border-color: #a30d25;
+}
+
+.curva-identity-wizard__btn:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+
+/* Mnemonic word grid: 6 columns x 4 rows */
+.curva-identity-wizard__mnemonic-grid {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: var(--sp-2);
+}
+
+.curva-identity-wizard__word {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  background: var(--curva-mnemonic-word-bg);
+  border: 1px solid var(--curva-border);
+  border-radius: 6px;
+  padding: var(--sp-2) var(--sp-1);
+}
+
+.curva-identity-wizard__word-num {
+  font-family: var(--curva-mono);
+  font-size: 9px;
+  color: var(--curva-muted);
+  letter-spacing: 0.04em;
+}
+
+.curva-identity-wizard__word-text {
+  font-family: var(--curva-mono);
+  font-size: 12px;
+  color: var(--curva-text);
+  font-weight: 500;
+  word-break: break-all;
+}
+
+.curva-identity-wizard__warning {
+  font-size: 12px;
+  color: var(--curva-warn);
+  background: rgba(245, 158, 11, 0.08);
+  border: 1px solid rgba(245, 158, 11, 0.25);
+  border-radius: 6px;
+  padding: var(--sp-3) var(--sp-4);
+  line-height: 1.5;
+}
+
+.curva-identity-wizard__checkbox-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  font-size: 13px;
+  color: var(--curva-text);
+  cursor: pointer;
+  user-select: none;
+}
+
+.curva-identity-wizard__checkbox-row input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin-top: 1px;
+  flex-shrink: 0;
+  cursor: pointer;
+  accent-color: var(--curva-accent);
+}
+
+.curva-identity-wizard__restore-area {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.curva-identity-wizard__restore-input {
+  width: 100%;
+  min-height: 96px;
+  padding: var(--sp-3);
+  background: var(--curva-surface-2);
+  border: 1px solid var(--curva-border);
+  border-radius: 8px;
+  color: var(--curva-text);
+  font-family: var(--curva-mono);
+  font-size: 13px;
+  resize: vertical;
+  line-height: 1.6;
+}
+
+.curva-identity-wizard__restore-input:focus {
+  outline: none;
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.curva-identity-wizard__restore-hint {
+  font-size: 12px;
+  color: var(--curva-muted);
+}
+
+.curva-identity-wizard__error {
+  font-size: 12px;
+  color: var(--curva-bad);
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.25);
+  border-radius: 6px;
+  padding: var(--sp-2) var(--sp-3);
+}
+
+/* ==========================================================================
+   Tier 4 R2: identity badge (verified / unverified / mismatch)
+   ========================================================================== */
+
+.curva-chat__identity-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: 4px;
+  position: relative;
+  cursor: default;
+  vertical-align: middle;
+}
+
+.curva-chat__identity-badge svg {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+}
+
+.curva-chat__identity-badge--verified svg { color: var(--curva-identity-verified-color); }
+.curva-chat__identity-badge--unverified svg { color: var(--curva-identity-unverified-color); }
+.curva-chat__identity-badge--mismatch svg { color: var(--curva-identity-mismatch-color); }
+
+/* Tooltip via ::after on the badge span */
+.curva-chat__identity-badge[data-tip] {
+  --tip: attr(data-tip);
+}
+
+.curva-chat__identity-badge[data-tip]:hover::after {
+  content: attr(data-tip);
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 6px);
+  transform: translateX(-50%);
+  white-space: nowrap;
+  background: var(--curva-surface-2);
+  border: 1px solid var(--curva-border);
+  border-radius: 4px;
+  padding: 3px 8px;
+  font-size: 11px;
+  color: var(--curva-muted-text);
+  pointer-events: none;
+  z-index: 100;
+}
+
+/* Dim mismatched messages slightly */
+.curva-chat__msg--identity-mismatch .curva-chat__body {
+  opacity: 0.5;
+}
+
+/* ==========================================================================
+   Tier 4 R2: bot query + reply pills
+   ========================================================================== */
+
+.curva-chat__msg--bot-query {
+  border-left: 2px solid var(--curva-bot-query-border);
+  background: rgba(212, 175, 55, 0.04);
+}
+
+.curva-chat__msg--bot-reply {
+  border-left: 2px solid var(--curva-bot-reply-border);
+  background: rgba(124, 227, 193, 0.04);
+}
+
+.curva-chat__bot-marker {
+  font-size: 14px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.curva-chat__bot-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.curva-chat__bot-text {
+  font-size: 13px;
+  color: var(--curva-text);
+  line-height: 1.5;
+}
+
+.curva-chat__bot-prompt-prefix {
+  font-size: 11px;
+  color: var(--curva-muted);
+  font-family: var(--curva-mono);
+  letter-spacing: 0.04em;
+}
+
+.curva-chat__bot-attribution {
+  font-size: 11px;
+  color: var(--curva-muted);
+  font-family: var(--curva-mono);
+  letter-spacing: 0.02em;
+}
+
+.curva-chat__bot-tool-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1);
+  margin-top: 2px;
+}
+
+.curva-chat__bot-tool-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-family: var(--curva-mono);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  border: 1px solid var(--curva-bot-query-border);
+  color: var(--curva-accent-gold);
+  background: rgba(212, 175, 55, 0.06);
+}
+
+.curva-chat__bot-tool-badge--failed {
+  border-color: rgba(239, 68, 68, 0.4);
+  color: var(--curva-bad);
+  background: rgba(239, 68, 68, 0.06);
 }
 
