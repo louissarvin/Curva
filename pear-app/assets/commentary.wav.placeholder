@@ -1,0 +1,53 @@
+Curva commentary WAV fallback (Wave 14 STT)
+=============================================
+
+Path referenced by env `CURVA_COMMENTATOR_WAV_FALLBACK`. When the QVAC
+Whisper STT feature flag `CURVA_QVAC_STT_ENABLED` is on but the Bare
+runtime does not expose live microphone capture (`bare-audio` addon not
+linked), the room host feeds this WAV into `transcribeStream()` so the
+demo still produces live captions.
+
+## Format required
+
+- Container: canonical PCM WAV (44-byte header, no extra chunks)
+- Codec: 32-bit float little-endian (`f32le`)
+- Channels: 1 (mono)
+- Sample rate: 16000 Hz
+- Duration: 30 to 60 seconds
+- Max size: 5 MB
+
+## How to obtain a compliant file
+
+1. Record 30 to 60 seconds of the World Cup 2026 demo commentary using
+   your OS microphone (Italian, English, or Indonesian). Speak clearly;
+   the Silero VAD threshold is 0.6 so mumbled runs get dropped.
+
+2. Convert to the required format with ffmpeg:
+
+   ffmpeg -i input.m4a -ac 1 -ar 16000 -acodec pcm_f32le \
+     assets/commentary.wav
+
+3. Verify the header manually:
+
+   xxd -l 44 assets/commentary.wav
+   #  first 4 bytes: 52 49 46 46            ("RIFF")
+   #  bytes 20-21:   03 00                  (format tag 3 = IEEE float)
+   #  bytes 22-23:   01 00                  (channels = 1)
+   #  bytes 24-27:   80 3E 00 00            (sample rate = 16000)
+
+4. Drop the file at `pear-app/assets/commentary.wav` (this exact path is
+   ignored by git; do NOT commit large binaries) and launch:
+
+   CURVA_QVAC_STT_ENABLED=true \
+   CURVA_COMMENTATOR_WAV_FALLBACK=./assets/commentary.wav \
+   npm start
+
+The worker log should print
+`STT WAV fallback loop started {"sourceKind":"wav","lang":"en"}`.
+
+## Why the demo team ships a placeholder
+
+The real WAV can carry the host's voice and is therefore treated as
+personal data. Every developer records their own. The placeholder keeps
+the path in tree so the fallback resolver has a known filename to look
+for, and gives clear instructions for producing the compliant asset.
