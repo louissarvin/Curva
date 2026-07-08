@@ -63,6 +63,36 @@ const normalizeVisibility = (v: unknown): RoomVisibility => {
   return lower === 'public' ? 'public' : 'private';
 };
 
+// Same-laptop demo helper: cache the host's Autobase base keys so viewers
+// who cannot form a direct Hyperswarm socket (hairpin NAT, missing relay,
+// etc) can still bootstrap the correct chat + playhead Autobase without
+// waiting for a `room:hello` frame that only rides direct P2P connections.
+//
+// In-memory only. On restart, the host republishes on next boot. No schema
+// change required. Keys are 32-byte lowercase hex.
+type RoomBaseKeys = {
+  chatBaseKey: string;
+  playheadBaseKey: string;
+  publishedAt: number;
+};
+const roomBaseKeys = new Map<string, RoomBaseKeys>();
+const isValidHex32 = (s: unknown): s is string =>
+  typeof s === 'string' && /^[0-9a-f]{64}$/.test(s.toLowerCase());
+
+export const publishRoomBaseKeys = (
+  slug: string,
+  chatBaseKey: string,
+  playheadBaseKey: string
+): void => {
+  roomBaseKeys.set(slug, {
+    chatBaseKey: chatBaseKey.toLowerCase(),
+    playheadBaseKey: playheadBaseKey.toLowerCase(),
+    publishedAt: Date.now(),
+  });
+};
+export const readRoomBaseKeys = (slug: string): RoomBaseKeys | null =>
+  roomBaseKeys.get(slug) ?? null;
+
 const buildRoomView = (
   r: {
     id: string;
@@ -75,6 +105,7 @@ const buildRoomView = (
     expiresAt: Date;
     createdAt: Date;
     visibility?: string | null;
+    _bases?: RoomBaseKeys | null;
     match?: {
       id: string;
       kickoffUtc: Date;
@@ -97,6 +128,10 @@ const buildRoomView = (
   createdAt: r.createdAt.toISOString(),
   peerCount: peerCount ?? 0,
   visibility: normalizeVisibility(r.visibility),
+  // Same-laptop demo helper (see roomBaseKeys map above). Null when the
+  // host has not yet published, or the backend has been restarted since.
+  chatBaseKey: r._bases?.chatBaseKey ?? null,
+  playheadBaseKey: r._bases?.playheadBaseKey ?? null,
   match: r.match
     ? {
         id: r.match.id,
@@ -500,8 +535,43 @@ export const roomRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts, d
         success: true,
         error: null,
         data: {
-          room: buildRoomView(room, seederSupervisor.getTelemetry(slug)?.peerCount ?? 0),
+          room: buildRoomView(
+            { ...room, _bases: readRoomBaseKeys(slug) },
+            seederSupervisor.getTelemetry(slug)?.peerCount ?? 0
+          ),
         },
+      });
+    } catch (err) {
+      return handleServerError(reply, err as Error);
+    }
+  });
+
+  // PUT /rooms/:slug/bases — host publishes its Autobase base keys so viewers
+  // that can't form a direct P2P socket (same-laptop hairpin NAT, missing
+  // relay) can still bootstrap the correct chat + playhead Autobase. Keys are
+  // 32-byte lowercase hex. In-memory only; keys reset on backend restart and
+  // the host republishes on next boot. No auth for the demo (matching the
+  // trust posture of the tip-address publish path).
+  app.put('/:slug/bases', async (request: FastifyRequest, reply: FastifyReply) => {
+    try {
+      const { slug } = request.params as { slug: string };
+      if (!isValidSlug(slug)) return handleError(reply, 400, 'Invalid slug', 'VALIDATION_ERROR');
+      const body = (request.body || {}) as Record<string, unknown>;
+      const chatBaseKey = typeof body.chatBaseKey === 'string' ? body.chatBaseKey.toLowerCase() : '';
+      const playheadBaseKey = typeof body.playheadBaseKey === 'string' ? body.playheadBaseKey.toLowerCase() : '';
+      if (!isValidHex32(chatBaseKey)) {
+        return handleError(reply, 400, 'chatBaseKey must be 32-byte lowercase hex', 'VALIDATION_ERROR');
+      }
+      if (!isValidHex32(playheadBaseKey)) {
+        return handleError(reply, 400, 'playheadBaseKey must be 32-byte lowercase hex', 'VALIDATION_ERROR');
+      }
+      const room = await prismaQuery.room.findUnique({ where: { slug } });
+      if (!room || room.deletedAt) return handleNotFoundError(reply, 'Room');
+      publishRoomBaseKeys(slug, chatBaseKey, playheadBaseKey);
+      return reply.code(200).send({
+        success: true,
+        error: null,
+        data: { slug, chatBaseKey, playheadBaseKey, publishedAt: Date.now() },
       });
     } catch (err) {
       return handleServerError(reply, err as Error);
