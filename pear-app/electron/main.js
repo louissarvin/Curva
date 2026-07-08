@@ -11,6 +11,125 @@ const path = require('path')
 const PearRuntime = require('pear-runtime')
 const FramedStream = require('framed-stream')
 
+// ---------------------------------------------------------------------------
+// F1: live match score in the dock badge.
+//
+// Uses Electron's built-in app.setBadgeCount(count). Verified 2026-07-06
+// against https://www.electronjs.org/docs/latest/api/app.
+//   - macOS: numeric badge on dock. 0 hides. No-arg shows a plain dot.
+//   - Linux: Unity launcher only. 0 hides. No-arg is a no-op.
+//   - Windows: no-op (wrapped in try/catch to stay silent).
+//
+// The badge count is the TOTAL goals in the match (home + away). A 1-0 shows
+// "1", a 1-1 shows "2". Rationale: the badge is a numeric-only surface on
+// both platforms, so we cannot render "1-0" directly. Total goals is the
+// least-misleading single number, and it monotonically increases through a
+// match which matches the "notification count" mental model users already
+// have. The full score is rendered in the renderer UI; the badge is a
+// glanceable "goals scored" indicator.
+//
+// On badge:goal-flash we briefly clear the badge to 0 and restore the last
+// known count after 500ms, which triggers macOS's dock bounce animation on
+// any change and gives a visible "flash" the moment a goal lands.
+// ---------------------------------------------------------------------------
+
+let badgeCurrentCount = 0
+let badgeFlashTimer = null
+
+function safeSetBadgeCount(n) {
+  try {
+    app.setBadgeCount(Math.max(0, n | 0))
+  } catch (err) {
+    // Windows and unsupported Linux environments end up here. Silent no-op is
+    // the documented expectation, but log once at debug level for visibility.
+    console.log(JSON.stringify({
+      level: 'debug',
+      component: 'badge',
+      msg: 'setBadgeCount unsupported',
+      message: err && err.message
+    }))
+  }
+}
+
+function handleBadgeScoreUpdate(payload) {
+  const home = Math.max(0, (payload && payload.home) | 0)
+  const away = Math.max(0, (payload && payload.away) | 0)
+  const total = home + away
+  badgeCurrentCount = total
+  // If we're mid-flash, do not stomp the flashed 0. The pending timer will
+  // apply the fresh count on fire.
+  if (badgeFlashTimer) return
+  safeSetBadgeCount(total)
+}
+
+function handleBadgeGoalFlash() {
+  if (badgeFlashTimer) {
+    clearTimeout(badgeFlashTimer)
+    badgeFlashTimer = null
+  }
+  // Force a value change so macOS re-notifies the dock. Setting to 0 hides
+  // the badge; restoring after 500ms produces the flash + bounce.
+  safeSetBadgeCount(0)
+  badgeFlashTimer = setTimeout(() => {
+    badgeFlashTimer = null
+    safeSetBadgeCount(badgeCurrentCount)
+  }, 500)
+}
+
+function handleBadgeClear() {
+  if (badgeFlashTimer) {
+    clearTimeout(badgeFlashTimer)
+    badgeFlashTimer = null
+  }
+  badgeCurrentCount = 0
+  safeSetBadgeCount(0)
+}
+
+// Renderer-originated IPC. Frame validation is defensive: the renderer is
+// sandboxed but a compromised preload could still forward bad shapes.
+ipcMain.on('badge:score-update', (_evt, payload) => {
+  if (!payload || typeof payload !== 'object') return
+  handleBadgeScoreUpdate(payload)
+})
+ipcMain.on('badge:goal-flash', () => {
+  handleBadgeGoalFlash()
+})
+ipcMain.on('badge:clear', () => {
+  handleBadgeClear()
+})
+
+// Worker-originated frames. The Bare SSE consumer emits
+//   { event: 'badge:score-update', payload: {home, away} }
+//   { event: 'badge:goal-flash', payload: {} }
+//   { event: 'badge:clear', payload: {} }
+// on the framed IPC pipe. We sniff those frames alongside the existing
+// renderer forward. The sniffer captures no per-worker state so no teardown
+// is needed on worker exit.
+function sniffBadgeFrame(data) {
+  let frame
+  try { frame = JSON.parse(data.toString()) } catch { return }
+  if (!frame || typeof frame !== 'object') return
+  const event = frame.event
+  if (event === 'badge:score-update') {
+    if (!frame.payload || typeof frame.payload !== 'object') return
+    handleBadgeScoreUpdate(frame.payload)
+    return
+  }
+  if (event === 'badge:goal-flash') {
+    handleBadgeGoalFlash()
+    return
+  }
+  if (event === 'badge:clear') {
+    handleBadgeClear()
+    return
+  }
+}
+
+// Clear badge on quit. Belt-and-suspenders in case a live match was in flight.
+app.on('will-quit', () => {
+  handleBadgeClear()
+})
+
 const { isMac, isLinux, isWindows } = require('which-runtime')
 const { command, flag } = require('paparam')
 const pkg = require('../package.json')
@@ -185,12 +304,17 @@ function getWorker(specifier) {
 
   workers.set(specifier, pipe)
   pipe.on('data', sendIPC)
+  // F1: also sniff main-worker frames for badge:* events so the SSE consumer
+  // running in Bare can drive the dock badge without a renderer round-trip.
+  const attachBadgeSniffer = specifier === mainWorkerSpecifier
+  if (attachBadgeSniffer) pipe.on('data', sniffBadgeFrame)
   worker.stdout.on('data', sendStdout)
   worker.stderr.on('data', sendStderr)
   worker.once('exit', (code) => {
     app.removeListener('before-quit', onBeforeQuit)
     ipcMain.removeHandler('pear:worker:writeIPC:' + specifier)
     pipe.removeListener('data', sendIPC)
+    if (attachBadgeSniffer) pipe.removeListener('data', sniffBadgeFrame)
     worker.stdout.removeListener('data', sendStdout)
     worker.stderr.removeListener('data', sendStderr)
     sendToAll('pear:worker:exit:' + specifier, code)
