@@ -1488,6 +1488,48 @@ async function tryDiscoverHostAddress() {
       ownerAddress: node.value.ownerAddress
     })
     log('info', 'tip:host-discovered emitted', { smart: node.value.smartAddress })
+    return
+  }
+  // Fallback: swarm-based delivery (room:hello piggyback + roomState Hyperbee)
+  // fails when two peers on the same laptop cannot hole-punch each other, or
+  // when replication has not caught up yet. The backend directory already
+  // stores hostSmartAddress + hostOwnerAddress at room-registration time
+  // (POST /rooms), so read that as a public fallback. This is safe because
+  // the directory record is host-signed and any tip the peer sends still
+  // requires the sponsor to accept the EIP-3009 authorization. Best-effort.
+  try {
+    if (!room || room.isHost) return
+    if (!config.backendUrl || !room.slug) return
+    const url = config.backendUrl.replace(/\/$/, '') + '/rooms/' + encodeURIComponent(room.slug)
+    const res = await fetch(url).catch(() => null)
+    if (!res || !res.ok) return
+    const body = await res.json().catch(() => null)
+    const rec = body?.data?.room
+    const smart = typeof rec?.hostSmartAddress === 'string' && rec.hostSmartAddress.startsWith('0x')
+      ? rec.hostSmartAddress.toLowerCase()
+      : null
+    const owner = typeof rec?.hostOwnerAddress === 'string' && rec.hostOwnerAddress.startsWith('0x')
+      ? rec.hostOwnerAddress.toLowerCase()
+      : null
+    if (!smart) return
+    const isFirst = !cachedHostAddresses
+    cachedHostAddresses = { smartAddress: smart, ownerAddress: owner }
+    emit('tip:host-discovered', {
+      chainId: rec?.chainId || null,
+      smartAddress: smart,
+      ownerAddress: owner
+    })
+    log('info', 'tip:host-discovered via backend directory', { smart, owner })
+    if (isFirst && walletReady && room && !room.isHost && !room.tip) {
+      const slug = room.slug
+      setTimeout(() => {
+        openRoomFor(slug, false).catch((err) =>
+          log('warn', 'reopen after directory discovery failed', { message: err.message })
+        )
+      }, 500)
+    }
+  } catch (err) {
+    log('warn', 'backend directory fallback failed', { message: err?.message })
   }
 }
 
