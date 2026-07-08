@@ -43,7 +43,15 @@ const {
   createPeerCountLookup,
   createSeederStats
 } = require('../bare/topics.js')
-const { handleFromPubkey } = require('../bare/identity.js')
+const {
+  handleFromPubkey,
+  setKeetIdentity
+} = require('../bare/identity.js')
+// Tier 4 Round 2 keet portable identity.
+const {
+  createKeetIdentity,
+  featureEnabled: keetIdentityFeatureEnabled
+} = require('../bare/keetIdentity.js')
 const { openRoom } = require('../bare/room.js')
 const { createBackendClient } = require('../bare/backend.js')
 const { createTranslator } = require('../bare/translate.js')
@@ -52,6 +60,9 @@ const { createWalletAdapter } = require('../bare/wallet/worklet.js')
 const { SEPOLIA, DEMO_AMOUNT_BASE_UNITS } = require('../bare/wallet/eip3009.js')
 const { createLatencyTracker } = require('../bare/diagnostics.js')
 const { suspendSwarm, resumeSwarm } = require('../bare/swarmLifecycle.js')
+// pear.assets branding pack: expose Pear.app.assets.branding.path to renderer.
+// See bare/assets.js and branding-drive/PUBLISH.md.
+const { getBrandingPath, getBrandingBytes } = require('../bare/assets.js')
 
 const pipe = new FramedStream(Bare.IPC)
 
@@ -90,6 +101,16 @@ function emit(event, payload) {
   } catch (err) {
     console.error('[Curva] emit failed:', event, err.message)
   }
+}
+
+// pear.assets branding pack: re-read the drive path and broadcast. Called
+// once at boot and on every 'assets:refresh' IPC. Safe to call before the
+// drive has landed; payload.path will be null and the renderer keeps its
+// bundled fallback.
+function emitBrandingSnapshot() {
+  const path = getBrandingPath()
+  const bytes = getBrandingBytes()
+  emit('assets:branding', { path, bytes })
 }
 
 // Wave 8A: write a JSON frame to a raw Hyperswarm socket. Used by the
@@ -186,8 +207,19 @@ const peerCountLookup = createPeerCountLookup({ swarm, ttlMs: 60_000, maxConcurr
 // The single per-connection side effect is `store.replicate(conn)` (required
 // by every join). Everything else here is observability + IPC.
 swarm.on('connection', (conn, info) => {
-  try { store.replicate(conn) } catch (err) {
+  let replicateStream = null
+  try { replicateStream = store.replicate(conn) } catch (err) {
     console.error('[Curva] store.replicate failed:', err?.message)
+  }
+  // Tier 3: tactical drawing channel rides the same corestore-replicate
+  // Protomux. `room.attachTacticalToStream` grabs the existing muxer via
+  // Hypercore.getProtocolMuxer(stream) and adds `curva/tactical/1` alongside
+  // the existing corestore channels. Never wraps the raw socket. See
+  // bare/tacticalChannel.js resolveMuxer for the docs-verified pattern.
+  if (room && replicateStream) {
+    try { room.attachTacticalToStream(replicateStream, conn) } catch (err) {
+      log('warn', 'tactical attach failed', { peer: info?.publicKey && b4a.toString(info.publicKey, 'hex').slice(0, 8), error: err?.message })
+    }
   }
   const peerKey = info?.publicKey ? b4a.toString(info.publicKey, 'hex') : 'unknown'
 
@@ -230,6 +262,11 @@ swarm.on('connection', (conn, info) => {
     log('info', 'swarm connection closed', { peer: peerKey })
     if (relayed) relayActiveConns.delete(peerKey)
     try { seederStats.onPeerDisconnected(peerKey) } catch { /* noop */ }
+    // Tier 3: release the tactical channel handle for this connection so the
+    // room does not leak Protomux subscriptions.
+    if (room) {
+      try { room.detachTacticalForConn(conn) } catch { /* noop */ }
+    }
     emit('peer:disconnected', { pubkey: peerKey, count: swarm.connections.size })
   })
   conn.on('error', (err) => {
@@ -358,6 +395,14 @@ let roomUnsubs = []             // cleanup fns for playhead/chat listeners
 let identityCache = null        // { pubkey, handle }
 let wallet = null               // wallet adapter (once initialized)
 let walletReady = false
+
+// Tier 4 Round 2: keet portable identity handle. Populated when the
+// CURVA_KEET_IDENTITY_ENABLED flag is on AND the wallet passcode has been
+// supplied (same passcode unlocks both blobs, distinct namespaced keys).
+// Consumers pull via bare/identity.js getKeetIdentity(); we also keep a
+// module-scoped alias for the IPC cases below.
+let keetIdentity = null
+let keetIdentityPasscode = null // held in-memory so restore/generate IPC can reuse
 let cachedHostAddresses = null  // { smartAddress, ownerAddress } discovered from room state
 
 // Phase 3.5: QVAC translation. Opt-in per-user. Lazy-inited on first
@@ -435,19 +480,113 @@ const commentatorFlagEnabled = (() => {
     return String(v).toLowerCase() === 'true'
   } catch { return false }
 })()
+// Wave 14: Whisper STT captions. Independent of the commentator LLM flag so a
+// host can ship captions without paying the LLM download cost (or vice versa).
+const sttFlagEnabled = (() => {
+  try {
+    const v = (typeof process !== 'undefined' && process.env && process.env.CURVA_QVAC_STT_ENABLED) || ''
+    const s = String(v).toLowerCase()
+    return s === '1' || s === 'true' || s === 'yes' || s === 'on'
+  } catch { return false }
+})()
 log('info', 'commentator feature flag', { enabled: commentatorFlagEnabled })
+log('info', 'commentator STT feature flag', { enabled: sttFlagEnabled })
 
 let commentator = null
 let commentatorGoalUnsub = null
+
+// ===== QVAC ROOM BOT (Wave 13B) =====
+// `/bot <prompt>` in chat routes through Qwen3 + curva-mcp HTTP transport.
+// Shares the LLM handle with the commentator when both flags are on: the
+// commentator loads Qwen3 with modelConfig.tools = true and roomBot reuses
+// the same modelId via getSharedLlmHandle(). When only roomBot is on, it
+// loads its own copy of the model with tools:true. Feature flag:
+// CURVA_QVAC_BOT_ENABLED (default false). See bare/roomBot.js for the
+// docs-verification memo + MCP HTTP client adapter.
+const { createRoomBot, botFlagEnabled: readBotFlag } = require('../bare/roomBot.js')
+const botFlagEnabled = (() => {
+  try { return readBotFlag() } catch { return false }
+})()
+log('info', 'roomBot feature flag', { enabled: botFlagEnabled })
+let roomBot = null
+let roomBotChatUnsub = null
+// ===== END QVAC ROOM BOT =====
+
+// ===== SUPERTONIC TTS GOAL ANNOUNCER (Tier 4) =====
+// Multilingual goal announcements via Supertonic 3. Off by default: reads
+// CURVA_QVAC_TTS_ENABLED at process start. The model is ~121 MB and is only
+// loaded once .enable() is called (which we drive lazily from the goal hook
+// below when the flag is on). Fire-and-forget from the goal event path so
+// TTS latency never blocks event propagation. Docs verified in
+// pear-app/bare/announcer.js head memo.
+const {
+  createAnnouncer: createTtsAnnouncer,
+  announcerFlagEnabled: readAnnouncerFlag
+} = require('../bare/announcer.js')
+const announcerFlagEnabled = (() => {
+  try { return readAnnouncerFlag() } catch { return false }
+})()
+const announcerLocalesEnv = (() => {
+  const raw = (typeof process !== 'undefined' && process.env &&
+    process.env.CURVA_QVAC_TTS_LOCALES) || ''
+  const arr = String(raw).split(',').map((s) => s.trim().toLowerCase()).filter(Boolean)
+  return arr.length > 0 ? arr : null
+})()
+const announcerDefaultLocale = (() => {
+  const raw = (typeof process !== 'undefined' && process.env &&
+    process.env.CURVA_QVAC_TTS_LOCALE) || 'en'
+  return String(raw).toLowerCase().slice(0, 2) || 'en'
+})()
+log('info', 'announcer feature flag', {
+  enabled: announcerFlagEnabled,
+  defaultLocale: announcerDefaultLocale,
+  locales: announcerLocalesEnv
+})
+
+let announcer = null
+let announcerEnablePromise = null
+
+function ensureAnnouncer () {
+  if (announcer) return announcer
+  if (!announcerFlagEnabled) return null
+  announcer = createTtsAnnouncer({
+    storageDir: config.dir,
+    isHost: !!config.isHost,
+    chat: room?.chat || null,
+    phrasebookUrl: config.backendUrl
+      ? config.backendUrl.replace(/\/$/, '') + '/phrasebook'
+      : null,
+    log,
+    emit
+  })
+  const locales = announcerLocalesEnv || [announcerDefaultLocale]
+  announcerEnablePromise = announcer.enable({ locales, defaultLocale: announcerDefaultLocale })
+    .then((res) => {
+      log('info', 'announcer enable result', res)
+      return res
+    })
+    .catch((err) => {
+      log('warn', 'announcer enable failed', { message: err && err.message })
+      return { enabled: false, reason: err && err.message }
+    })
+  return announcer
+}
+// ===== END SUPERTONIC TTS GOAL ANNOUNCER =====
 
 function ensureCommentator() {
   if (commentator) return commentator
   if (!commentatorFlagEnabled) return null
   if (!room?.chat) return null
+  // Wave 13B: when the roomBot is on, we MUST load Qwen3 with modelConfig
+  // tools:true so the shared handle can drive MCP tool-calls. The commentator
+  // path does not need tools by itself, so we only pass the flag when the
+  // roomBot piggy-backs on the load.
+  const modelConfig = botFlagEnabled ? { tools: true } : null
   commentator = createCommentator({
     storageDir: config.dir,
     isHost: !!config.isHost,
     chat: room.chat,
+    modelConfig,
     getMatchTimeMs: () => {
       try {
         const st = room?.playhead?.state?.() || {}
@@ -477,7 +616,82 @@ function ensureCommentator() {
       })
     })
   }
+  // Wave 14: opt-in Whisper STT captions. Off by default. When the host sets
+  // CURVA_QVAC_STT_ENABLED, spin up a transcribeStream() session using the
+  // WAV fallback (or bare-audio live capture once that addon ships) and
+  // broadcast every VAD-segmented text event as a `system:caption` message.
+  // Failure is non-fatal: the commentator LLM path continues regardless.
+  if (config.isHost && sttFlagEnabled) {
+    const sttLang = (typeof process !== 'undefined' && process.env && process.env.CURVA_COMMENTATOR_STT_LANG) || 'en'
+    commentator.enableSTT({
+      lang: sttLang,
+      preferLive: false,
+      getMatchTimeMs: () => {
+        try {
+          const st = room?.playhead?.state?.() || {}
+          return Math.max(0, Number(st.match_time_ms || 0))
+        } catch { return 0 }
+      }
+    }).then((res) => {
+      log('info', 'commentator STT enable result', res)
+    }).catch((err) => {
+      log('warn', 'commentator STT enable failed', { message: err?.message })
+    })
+  }
   return commentator
+}
+
+async function ensureRoomBot () {
+  if (roomBot) return roomBot
+  if (!botFlagEnabled) return null
+  if (!room?.chat) return null
+
+  // Prefer the commentator's already-loaded Qwen3 when available. When the
+  // commentator flag is off (or the model hasn't landed yet), roomBot loads
+  // its own copy of QWEN3_600M_INST_Q4 with modelConfig.tools = true.
+  let sharedLlmHandle = null
+  try {
+    if (commentator && typeof commentator.getSharedLlmHandle === 'function') {
+      sharedLlmHandle = commentator.getSharedLlmHandle()
+    }
+  } catch (_) { sharedLlmHandle = null }
+
+  roomBot = createRoomBot({
+    chat: room.chat,
+    backendUrl: config.backendUrl || 'http://localhost:3700',
+    authToken: (typeof process !== 'undefined' && process.env && process.env.CURVA_MCP_ACCESS_TOKEN) || null,
+    sharedLlmHandle,
+    isHost: !!config.isHost,
+    flagEnabled: true,     // ensureRoomBot only runs when botFlagEnabled is true
+    emit: (event, payload) => emit(event, payload),
+    log
+  })
+
+  try {
+    await roomBot.enable()
+  } catch (err) {
+    log('warn', 'roomBot enable failed', { message: err && err.message })
+  }
+
+  // Subscribe to chat: any peer's `msg` starting with "/bot " triggers the
+  // roomBot. Only ONE peer per room actually runs the bot (whoever set the
+  // flag), so duplicate replies are naturally suppressed by the opt-in model.
+  if (typeof room.chat.onMessage === 'function') {
+    roomBotChatUnsub = room.chat.onMessage((m) => {
+      if (!m || m.type !== 'msg' || typeof m.text !== 'string') return
+      if (!m.text.startsWith('/bot ')) return
+      const prompt = m.text.slice(5).trim()
+      if (prompt.length === 0) return
+      // Fire-and-forget. answer() enforces its own rate-limit per peer, so
+      // even a chat storm cannot back-pressure the writer.
+      roomBot.answer(prompt, {
+        sourcePeer: m.by_peer || '',
+        recentChat: recentChatRing.slice(-6),
+        matchTimeMs: Number(m.match_time_ms) || 0
+      }).catch((err) => log('warn', 'roomBot answer threw', { message: err && err.message }))
+    })
+  }
+  return roomBot
 }
 
 // Ring buffer of last-N chat messages for prompt context. Bare's chat.onMessage
@@ -546,6 +760,31 @@ const attendanceFlagEnabledInWorker = (() => {
 log('info', 'attendance feature flag', { enabled: attendanceFlagEnabledInWorker })
 // ===== END ATTENDANCE =====
 
+// ===== DEMO MODE (D1/D2) =====
+// Flag hierarchy per memory/impl_attendance_prediction.md:
+//   - CURVA_DEMO_MODE (master, default false)
+//   - CURVA_ATTENDANCE_AUTOISSUE (defaults to master when unset)
+//   - CURVA_PREDICTIONS_AUTOOPEN (defaults to master when unset)
+// The per-feature enable flags (CURVA_ATTENDANCE_ENABLED,
+// CURVA_PREDICTIONS_ENABLED) still gate module instantiation upstream. These
+// demo flags only decide whether the auto-fire playhead hook in room.js runs.
+function readBoolFlagFromEnv(name, fallback) {
+  try {
+    const raw = (typeof process !== 'undefined' && process.env && process.env[name])
+    if (raw === undefined || raw === null || raw === '') return fallback
+    return String(raw).toLowerCase() === 'true'
+  } catch { return fallback }
+}
+const demoMasterEnabled = readBoolFlagFromEnv('CURVA_DEMO_MODE', false)
+const attendanceAutoIssueEnabled = readBoolFlagFromEnv('CURVA_ATTENDANCE_AUTOISSUE', demoMasterEnabled)
+const predictionsAutoOpenEnabled = readBoolFlagFromEnv('CURVA_PREDICTIONS_AUTOOPEN', demoMasterEnabled)
+log('info', 'demo mode flags', {
+  demoMaster: demoMasterEnabled,
+  attendanceAutoIssue: attendanceAutoIssueEnabled,
+  predictionsAutoOpen: predictionsAutoOpenEnabled
+})
+// ===== END DEMO MODE =====
+
 // ===== BLIND PEERING (Wave 15) =====
 // Docs: https://docs.pears.com/how-to/blind-peering/add-blind-peering-to-a-chat-app/
 // Package: blind-peering@2.4.0 (see pear-app/bare/blindPeering.js for the docs
@@ -608,7 +847,24 @@ async function openRoomFor(slug, isHost) {
     // Wave 15: pass the shared blind-peering client. Handles feature-flag off
     // internally by returning a no-op client (see bare/blindPeering.js).
     blindPeering,
+    // Demo automation hooks. Non-fatal if any subsystem is not yet loaded;
+    // the timeline degrades to no-op branches when a dep is null (e.g. the
+    // announcer is not enabled). See bare/demoTimeline.js head memo.
+    demoHooks: {
+      get announcer() { return announcer },
+      get commentator() { return commentator },
+      log: (level, msg, extra) => log(level, msg, extra),
+      emit: (event, payload) => emit(event, payload)
+    },
     onTipStateChange: (kind, row) => {
+      // Tier 4 batch tip: the batch-* kinds carry a shape distinct from the
+      // single-tip row (recipients[], userOpHash, etherscanUrl). Route them
+      // through a dedicated sanitizer so the batch details survive; single-tip
+      // kinds keep the original whitelist.
+      if (typeof kind === 'string' && kind.startsWith('batch-')) {
+        emit('tip:' + kind, sanitizeTipBatchPayload(row))
+        return
+      }
       // Redact secrets; keep only display-safe fields.
       emit('tip:' + kind, sanitizeTipRow(row))
     }
@@ -623,6 +879,20 @@ async function openRoomFor(slug, isHost) {
       at: Date.now()
     })
   } catch { /* noop */ }
+
+  // Tier 3: tactical drawing channel event fanout. The channel itself is
+  // attached per-connection above in the swarm.on('connection') handler; here
+  // we forward each event kind to the renderer so TacticalOverlay can react.
+  // Feature-flagged behind CURVA_TACTICAL_ENABLED so production defaults off.
+  if (typeof room.onTactical === 'function') {
+    for (const kind of ['stroke', 'presence', 'typing', 'freeze', 'unfreeze']) {
+      try {
+        room.onTactical(kind, (m) => emit('tactical:' + kind, m))
+      } catch (err) {
+        log('warn', 'tactical subscribe failed', { kind, error: err?.message })
+      }
+    }
+  }
 
   // Wire subscribers. Every callback forwards to the renderer via emit().
   // Diagnostics: capture two-window playhead sync latency. record() ignores
@@ -655,6 +925,36 @@ async function openRoomFor(slug, isHost) {
     emit('chat:goal-cluster', payload)
   })
   roomUnsubs = [offPh, offMsg, offCluster]
+
+  // Tier 4: Supertonic announcer also reacts to host-broadcast `system:goal`
+  // chat rows so peers hear a synthesized announcement even when the goal
+  // did not come from the backend SSE feed. Fire-and-forget.
+  if (announcerFlagEnabled) {
+    const off = room.chat.onMessage((msg) => {
+      if (!announcer || !msg || msg.type !== 'system:goal') return
+      const targets = announcerLocalesEnv || [announcerDefaultLocale]
+      for (const targetLocale of targets) {
+        announcer.speak({
+          matchId: msg.matchId || msg.match_id || null,
+          minute: msg.minute,
+          scorer: msg.scorer || '',
+          team: msg.team || '',
+          score: msg.newScore || msg.score || null,
+          targetLocale
+        })
+          .then((audio) => {
+            if (!audio) return
+            emit('announcer:audio', audio)
+          })
+          .catch((err) => {
+            log('warn', 'announcer.speak (chat) failed', {
+              locale: targetLocale, message: err && err.message
+            })
+          })
+      }
+    })
+    roomUnsubs.push(off)
+  }
 
   // -- Wave 8A: Pattern B addWriter socket handshake ----------------------
   //
@@ -799,6 +1099,18 @@ async function openRoomFor(slug, isHost) {
     hostSmartAddress: room.tip?.hostSmartAddr || null
   })
   log('info', 'room ready', { slug, isHost, myDriveKey: room.clips.myDriveKey })
+
+  // Wave 13B: kick roomBot when the flag is on. Fire-and-forget so a slow
+  // model load never blocks room:ready. If the commentator flag is also on
+  // the renderer will call `commentator:enable` on the host; only after that
+  // load will getSharedLlmHandle() return non-null and a subsequent
+  // ensureRoomBot() would reuse it. For simplicity roomBot here loads its own
+  // Qwen3 handle if no shared one is available yet.
+  if (botFlagEnabled) {
+    ensureRoomBot().catch((err) => {
+      log('warn', 'ensureRoomBot failed', { message: err && err.message })
+    })
+  }
 }
 
 async function tryDiscoverHostAddress() {
@@ -852,6 +1164,34 @@ function sanitizeTipRow(row) {
     submitted_at: row.submitted_at,
     confirmed_at: row.confirmed_at,
     error: row.error || null
+  }
+}
+
+// Tier 4: batch tip payloads have a different shape (recipients[] instead of
+// a single to_address, userOpHash instead of tx hash). Whitelist the display
+// fields the renderer needs and drop anything wallet-internal.
+function sanitizeTipBatchPayload(payload) {
+  if (!payload || typeof payload !== 'object') return null
+  return {
+    status: payload.status || null,
+    userOpHash: payload.userOpHash || payload.user_op_hash || payload.tx_hash || null,
+    count: payload.count ?? (Array.isArray(payload.recipients) ? payload.recipients.length : null),
+    totalAtomic: payload.totalAtomic || payload.total_base || null,
+    etherscanUrl: payload.etherscanUrl || null,
+    recipients: Array.isArray(payload.recipients)
+      ? payload.recipients.map((r) => ({
+          address: r.address || null,
+          handle: r.handle || null,
+          amountAtomicUsdt: r.amountAtomicUsdt || null
+        }))
+      : null,
+    fee: payload.fee || payload.userop_fee || null,
+    token: payload.token || null,
+    chainId: payload.chainId || null,
+    route: payload.route || 'erc4337-batch',
+    created_at: payload.created_at || null,
+    submitted_at: payload.submitted_at || null,
+    error: payload.error || null
   }
 }
 
@@ -936,6 +1276,18 @@ async function initWallet(payload) {
     ownerAddress: info.ownerAddress
   })
 
+  // Tier 4 Round 2: bootstrap keet portable identity behind the feature flag.
+  // Uses the same passcode as the WDK wallet (spec requirement) but a SEPARATE
+  // storage sub-dir so a wallet-reset does not accidentally corrupt the identity
+  // blob. Any error here is non-fatal for the wallet path; the room simply
+  // renders messages as unverified.
+  keetIdentityPasscode = passcode
+  try {
+    await ensureKeetIdentityLoaded()
+  } catch (err) {
+    log('warn', 'keet identity boot failed', { message: err?.message, code: err?.code })
+  }
+
   // If we have an open room, re-open it so the tip service gets wired with the
   // newly-initialized wallet. This is cheaper than a full swarm rejoin.
   if (room) {
@@ -944,6 +1296,48 @@ async function initWallet(payload) {
     await closeCurrentRoom()
     await openRoomFor(slug, wasHost)
   }
+}
+
+// -- Tier 4 Round 2 keet identity helpers ---------------------------------
+// The identity storage lives in a subdir separate from the wallet blob so a
+// wallet-reset cannot corrupt the identity. Same passcode unlocks both.
+function keetIdentityStorageDir() {
+  const dir = path.join(config.dir, 'curva', 'keet-identity')
+  try { fs.mkdirSync(dir, { recursive: true }) } catch (err) {
+    if (err.code !== 'EEXIST') throw err
+  }
+  return dir
+}
+
+async function ensureKeetIdentityLoaded() {
+  if (!keetIdentityFeatureEnabled()) return null
+  if (keetIdentity) return keetIdentity
+  if (!keetIdentityPasscode) return null
+
+  // Lazy-load SecretManager the same way initWallet does.
+  let SecretManager
+  try {
+    require('../bare/wallet/semverPatch.js').applyPatch()
+    SecretManager = require('@tetherto/wdk-secret-manager')
+    SecretManager = SecretManager.default || SecretManager
+  } catch (err) {
+    log('warn', 'keet identity: SecretManager unavailable', { message: err?.message })
+    return null
+  }
+
+  const handle = createKeetIdentity({
+    SecretManager,
+    storageDir: keetIdentityStorageDir(),
+    log: (level, msg, meta) => log(level, '[keet] ' + msg, meta)
+  })
+  const res = await handle.loadOrGenerate({ passphrase: keetIdentityPasscode })
+  keetIdentity = handle
+  setKeetIdentity(handle)
+  emit('identity:ready', {
+    identityPublicKey: res.identityPublicKeyHex,
+    mnemonicGenerated: !!res.mnemonic
+  })
+  return handle
 }
 
 function walletInfoSnapshot() {
@@ -1119,6 +1513,276 @@ function disconnectActivityFeed() {
   activityReader = null
 }
 
+// -- F3 (partial): match live SSE consumer --------------------------------
+//
+// Separate consumer from the activity feed above. Opens a persistent SSE
+// connection to `${BACKEND_URL}/match/live/stream` and reacts to two event
+// types:
+//   - `match.goal`  { matchId, team, newScore:{home,away}, scorer, minute }
+//   - `match.score` { matchId, home, away }  (also accepts match.score_changed
+//                                             with { current:{home,away} })
+// Heartbeats arrive as `match.pulse` every 15s and are ignored.
+//
+// Forwards to Electron main via emit('badge:score-update', {home,away}) and
+// emit('badge:goal-flash', {}). Also invokes in-process subscribers registered
+// via matchLiveStreamConsumer.on(eventName, cb) so commentator.js and any
+// other worker-side module can react without a second SSE connection.
+//
+// Reconnect strategy: exponential backoff 500ms, 1s, 2s, 4s, capped at 8s.
+// After MAX_CONSECUTIVE_FAILURES (5) consecutive failures OR if backend is
+// unset, the consumer disables itself silently with a single warning log.
+//
+// Docs verified 2026-07-06:
+//   https://undici.nodejs.org/#/docs/api/Fetch  (response.body is a web
+//   ReadableStream; .getReader() is the stable web-streams API for chunked
+//   consumption). Bare ships undici; the same pattern is already used by
+//   connectActivityFeed() above.
+//   https://html.spec.whatwg.org/multipage/server-sent-events.html  (SSE
+//   frame grammar: events separated by blank line; per-event lines prefixed
+//   by `event:`, `data:`, `id:`, `retry:`).
+const matchLiveStreamConsumer = (() => {
+  const MAX_BACKOFF_MS = 8000
+  const BACKOFF_SCHEDULE_MS = [500, 1000, 2000, 4000, 8000]
+  const MAX_CONSECUTIVE_FAILURES = 5
+
+  let reader = null
+  let abortCtrl = null
+  let reconnectTimer = null
+  let running = false
+  let disabled = false
+  let consecutiveFailures = 0
+  const listeners = new Map() // eventName -> Set<cb>
+
+  function on(eventName, cb) {
+    if (typeof eventName !== 'string' || typeof cb !== 'function') return () => {}
+    let set = listeners.get(eventName)
+    if (!set) {
+      set = new Set()
+      listeners.set(eventName, set)
+    }
+    set.add(cb)
+    return () => {
+      const s = listeners.get(eventName)
+      if (s) s.delete(cb)
+    }
+  }
+
+  function fanout(eventName, payload) {
+    const set = listeners.get(eventName)
+    if (!set || set.size === 0) return
+    for (const cb of set) {
+      try { cb(payload) } catch (err) {
+        log('warn', 'matchLiveStream listener threw', {
+          event: eventName,
+          message: err && err.message
+        })
+      }
+    }
+  }
+
+  function backoffMs() {
+    const idx = Math.min(consecutiveFailures, BACKOFF_SCHEDULE_MS.length - 1)
+    return Math.min(MAX_BACKOFF_MS, BACKOFF_SCHEDULE_MS[idx] || MAX_BACKOFF_MS)
+  }
+
+  function parseFrame(frame) {
+    // SSE frame: lines separated by \n. Fields: event, data, id, retry.
+    // Comments (`:` prefix) are ignored. Multi-line data is joined by \n
+    // per the spec.
+    let evName = 'message'
+    const dataLines = []
+    let eventId = null
+    for (const rawLine of frame.split('\n')) {
+      const line = rawLine.replace(/\r$/, '')
+      if (line.length === 0) continue
+      if (line.startsWith(':')) continue // comment / heartbeat
+      const colon = line.indexOf(':')
+      const field = colon === -1 ? line : line.slice(0, colon)
+      let value = colon === -1 ? '' : line.slice(colon + 1)
+      if (value.startsWith(' ')) value = value.slice(1)
+      if (field === 'event') evName = value
+      else if (field === 'data') dataLines.push(value)
+      else if (field === 'id') eventId = value
+    }
+    if (dataLines.length === 0) return null
+    return { event: evName, id: eventId, data: dataLines.join('\n') }
+  }
+
+  function normalizeScore(payload) {
+    if (!payload || typeof payload !== 'object') return null
+    // match.goal shape: { newScore: {home, away} }
+    if (payload.newScore && typeof payload.newScore === 'object') {
+      const home = payload.newScore.home | 0
+      const away = payload.newScore.away | 0
+      return { home: Math.max(0, home), away: Math.max(0, away) }
+    }
+    // match.score_changed shape: { current: {home, away} }
+    if (payload.current && typeof payload.current === 'object') {
+      const home = payload.current.home | 0
+      const away = payload.current.away | 0
+      return { home: Math.max(0, home), away: Math.max(0, away) }
+    }
+    // match.score flat shape: { home, away }
+    if (typeof payload.home === 'number' && typeof payload.away === 'number') {
+      return { home: Math.max(0, payload.home | 0), away: Math.max(0, payload.away | 0) }
+    }
+    return null
+  }
+
+  function handleEvent(evName, payload) {
+    if (evName === 'match.pulse') {
+      // Cup Final: enriched pulse now carries { matchId, minute, status,
+      // injuryTime, ts }. When `minute` is present we forward it to the
+      // renderer via a dedicated IPC event so the VideoPlayer floating badge
+      // can render "34'", "45+3'", "HT", "FT", etc. Empty heartbeats (payload
+      // { ts } only) fall through and are ignored the same as before.
+      if (payload && typeof payload === 'object' && typeof payload.matchId === 'string') {
+        const matchId = payload.matchId
+        const minute = Number.isFinite(payload.minute) ? (payload.minute | 0) : null
+        const status = typeof payload.status === 'string' ? payload.status : null
+        const injuryTime = Number.isFinite(payload.injuryTime) ? (payload.injuryTime | 0) : null
+        const out = { matchId, minute, status, injuryTime, ts: Date.now() }
+        emit('match:minute-update', out)
+        fanout('match.minute', out)
+      }
+      return
+    }
+    if (evName === 'match.goal') {
+      const score = normalizeScore(payload)
+      if (score) {
+        emit('badge:score-update', score)
+      }
+      emit('badge:goal-flash', {})
+      fanout('match.goal', payload)
+      return
+    }
+    if (evName === 'match.score' || evName === 'match.score_changed') {
+      const score = normalizeScore(payload)
+      if (score) {
+        emit('badge:score-update', score)
+        fanout('match.score', { ...payload, ...score })
+      }
+      return
+    }
+    // Any other event type is fanned out but not badged.
+    fanout(evName, payload)
+  }
+
+  async function readLoop(resp) {
+    reader = resp.body.getReader()
+    const decoder = new TextDecoder('utf-8')
+    let buf = ''
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buf += decoder.decode(value, { stream: true })
+      let idx
+      while ((idx = buf.indexOf('\n\n')) !== -1) {
+        const frame = buf.slice(0, idx)
+        buf = buf.slice(idx + 2)
+        const parsed = parseFrame(frame)
+        if (!parsed) continue
+        let payload
+        try { payload = JSON.parse(parsed.data) } catch { continue }
+        handleEvent(parsed.event, payload)
+      }
+    }
+  }
+
+  async function openOnce() {
+    const backend = config.backendUrl
+    if (!backend || typeof backend !== 'string') {
+      throw new Error('backend URL unset')
+    }
+    const url = backend.replace(/\/$/, '') + '/match/live/stream'
+    abortCtrl = new AbortController()
+    const resp = await fetch(url, {
+      headers: { Accept: 'text/event-stream' },
+      signal: abortCtrl.signal
+    })
+    if (!resp.ok || !resp.body) {
+      throw new Error('http ' + resp.status)
+    }
+    log('info', 'match live SSE consumer connected', { url })
+    consecutiveFailures = 0
+    await readLoop(resp)
+  }
+
+  async function runLoop() {
+    while (running && !disabled) {
+      try {
+        await openOnce()
+        // Clean EOF: treat as a transient disconnect. Reconnect after the
+        // shortest backoff step. Do NOT count as a failure since the server
+        // may have simply completed a request lifecycle.
+        log('info', 'match live SSE stream closed by server; will reconnect')
+      } catch (err) {
+        if (!running) break
+        consecutiveFailures++
+        log('warn', 'match live SSE consumer failed', {
+          message: err && err.message,
+          attempt: consecutiveFailures
+        })
+        if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+          disabled = true
+          log('warn', 'match live SSE consumer disabled after repeated failures', {
+            failures: consecutiveFailures
+          })
+          break
+        }
+      } finally {
+        try { if (reader) reader.cancel() } catch { /* noop */ }
+        reader = null
+        abortCtrl = null
+      }
+      if (!running || disabled) break
+      const wait = backoffMs()
+      await new Promise((resolve) => {
+        reconnectTimer = setTimeout(() => {
+          reconnectTimer = null
+          resolve()
+        }, wait)
+      })
+    }
+    running = false
+  }
+
+  function start() {
+    if (running || disabled) return
+    if (!config.backendUrl) {
+      log('warn', 'match live SSE consumer skipped: backend URL unset')
+      disabled = true
+      return
+    }
+    running = true
+    consecutiveFailures = 0
+    runLoop().catch((err) => {
+      log('error', 'match live SSE consumer loop crashed', {
+        message: err && err.message
+      })
+      running = false
+    })
+  }
+
+  function stop() {
+    running = false
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer)
+      reconnectTimer = null
+    }
+    if (abortCtrl) {
+      try { abortCtrl.abort() } catch { /* noop */ }
+    }
+    if (reader) {
+      try { reader.cancel() } catch { /* noop */ }
+    }
+    reader = null
+    abortCtrl = null
+  }
+
+  return { start, stop, on }
+})()
+
 async function closeCurrentRoom() {
   if (!room) return
   const slug = room.slug
@@ -1127,6 +1791,23 @@ async function closeCurrentRoom() {
   }
   roomUnsubs = []
   disconnectActivityFeed()
+  // Wave 13B: unhook the roomBot chat subscription before the room's autobase
+  // goes away so we don't hold a dangling callback reference. The bot itself
+  // keeps its LLM handle for the next room-open (avoiding a re-download).
+  if (roomBotChatUnsub) {
+    try { roomBotChatUnsub() } catch { /* noop */ }
+    roomBotChatUnsub = null
+  }
+  // If the room is closing we drop the bot entirely so a rejoin uses the
+  // freshly-opened room.chat. The Qwen3 handle it owns is unloaded here iff
+  // it was not shared with the commentator.
+  if (roomBot) {
+    try { await roomBot.close() } catch { /* noop */ }
+    roomBot = null
+  }
+  // F1: clear the dock badge whenever a room closes so the icon doesn't hold
+  // a stale score after the user leaves the match.
+  emit('badge:clear', {})
   try {
     await room.close()
   } catch (err) {
@@ -1160,6 +1841,13 @@ async function closeCurrentRoom() {
       backendUrl: config.backendUrl
     })
     log('info', 'ready', { pubkey: identity.pubkey, handle: identity.handle })
+
+    // pear.assets branding pack: emit initial branding snapshot. Path is null
+    // until the drive lands (async background fetch per Pear docs). The
+    // renderer must render a bundled fallback first, then re-render on the
+    // 'assets:branding' event when path becomes a string. See
+    // branding-drive/PUBLISH.md for the publish/link-versioning workflow.
+    emitBrandingSnapshot()
 
     // Task 8: fetch the current pear:// distribution key from the backend
     // once at cold start. Cached in bare/topics.js module scope. Non-blocking
@@ -1207,6 +1895,41 @@ async function closeCurrentRoom() {
     // two --seed:peer instances immediately share playhead + chat without the
     // renderer needing to click "Join". Renderer-driven room:join still works.
     await openRoomFor(config.roomSlug, config.isHost)
+
+    // F3 (partial): boot the match live SSE consumer so goal / score events
+    // from the backend drive the dock badge for the duration of the app
+    // lifetime. Reconnects on its own; silently disables after 5 failures.
+    matchLiveStreamConsumer.start()
+
+    // Tier 4: subscribe the Supertonic announcer to the in-process match.goal
+    // fanout. Off by default; behind CURVA_QVAC_TTS_ENABLED. Fire-and-forget
+    // so a slow synth cannot back-pressure the SSE loop.
+    if (announcerFlagEnabled) {
+      ensureAnnouncer()
+      matchLiveStreamConsumer.on('match.goal', (payload) => {
+        if (!announcer) return
+        const targets = announcerLocalesEnv || [announcerDefaultLocale]
+        for (const targetLocale of targets) {
+          announcer.speak({
+            matchId: payload && payload.matchId,
+            minute: payload && payload.minute,
+            scorer: (payload && payload.scorer) || '',
+            team: (payload && payload.team) || '',
+            score: (payload && payload.newScore) || null,
+            targetLocale
+          })
+            .then((audio) => {
+              if (!audio) return
+              emit('announcer:audio', audio)
+            })
+            .catch((err) => {
+              log('warn', 'announcer.speak failed', {
+                locale: targetLocale, message: err && err.message
+              })
+            })
+        }
+      })
+    }
   } catch (err) {
     log('error', 'boot failed', { message: err.message, stack: err.stack })
     emit('error', { code: 'BOOT_FAILED', message: err.message })
@@ -1265,6 +1988,15 @@ async function dispatchCommand(msg) {
       case 'room:leave': {
         await closeCurrentRoom()
         emit('room:closed', {})
+        emit('ack', { id, cmd })
+        return
+      }
+      // pear.assets branding pack: re-read Pear.app.assets.branding and
+      // rebroadcast. Renderer calls this on a low-frequency timer until it
+      // sees a non-null path, then stops. Docs describe no fetch-complete
+      // event, so a pull-based refresh is the documented pattern.
+      case 'assets:refresh': {
+        emitBrandingSnapshot()
         emit('ack', { id, cmd })
         return
       }
@@ -1376,6 +2108,76 @@ async function dispatchCommand(msg) {
         const driveKey = String(payload?.driveKey || '')
         room.clips.trackPeerDrive(peerPubkey, driveKey)
         emit('ack', { id, cmd })
+        return
+      }
+      case 'clip:link': {
+        // Renderer asks for a loopback HTTP URL it can drop into <video src>.
+        // The URL is served by hypercore-blob-server bound to 127.0.0.1 and
+        // token-gated per process lifetime. Never expose the token separately;
+        // it rides on the URL query string.
+        if (!room) throw new RoomNotJoinedError()
+        const driveKey = String(payload?.driveKey || '')
+        const blobPath = String(payload?.blobPath || payload?.path || '')
+        try {
+          const link = room.clips.getClipLink(driveKey, blobPath)
+          emit('clip:link', {
+            url: link.url,
+            token: link.token,
+            expiresMs: link.expiresMs,
+            port: link.port,
+            host: link.host,
+            driveKey,
+            blobPath,
+            requestId: id
+          })
+          emit('ack', { id, cmd })
+        } catch (err) {
+          emit('clip:link', {
+            error: err?.message || 'clip link unavailable',
+            code: err?.code || 'INTERNAL',
+            driveKey,
+            blobPath,
+            requestId: id
+          })
+          throw err
+        }
+        return
+      }
+
+      // -- tactical drawing channel (Tier 3) ------------------------------
+      // Renderer broadcasts strokes, presence, typing indicators and
+      // freeze/unfreeze frames via these five IPC cases. Each maps 1:1 to a
+      // room.sendTactical* method. The room enforces host-only for freeze /
+      // unfreeze; non-host attempts are silently dropped there.
+      case 'tactical:send-stroke': {
+        if (!room) return
+        try { room.sendTacticalStroke(payload) } catch (err) {
+          log('warn', 'tactical stroke send failed', { error: err?.message })
+        }
+        return
+      }
+      case 'tactical:send-presence': {
+        if (!room) return
+        try { room.sendTacticalPresence(payload) } catch { /* noop */ }
+        return
+      }
+      case 'tactical:send-typing': {
+        if (!room) return
+        try { room.sendTacticalTyping(payload) } catch { /* noop */ }
+        return
+      }
+      case 'tactical:send-freeze': {
+        if (!room) return
+        try { room.sendTacticalFreeze(payload) } catch (err) {
+          log('warn', 'tactical freeze send failed', { error: err?.message })
+        }
+        return
+      }
+      case 'tactical:send-unfreeze': {
+        if (!room) return
+        try { room.sendTacticalUnfreeze(payload) } catch (err) {
+          log('warn', 'tactical unfreeze send failed', { error: err?.message })
+        }
         return
       }
 
@@ -1582,11 +2384,137 @@ async function dispatchCommand(msg) {
         emit('ack', { id, cmd })
         return
       }
+
+      // -- Tier 4 Round 2 keet portable identity ------------------------
+      // The identity uses the same passcode as the wallet (spec: one passcode
+      // unlocks both blobs). If the wallet has not been initialized yet, all
+      // four cases respond with IDENTITY_LOCKED so the renderer can prompt.
+      case 'identity:has': {
+        const enabled = keetIdentityFeatureEnabled()
+        const present = !!(keetIdentity && keetIdentity.isLoaded())
+        emit('ack', {
+          id,
+          cmd,
+          payload: {
+            enabled,
+            present,
+            identityPublicKey: present ? keetIdentity.getIdentityPublicKeyHex() : null
+          }
+        })
+        return
+      }
+      case 'identity:generate-new': {
+        if (!keetIdentityFeatureEnabled()) {
+          emit('identity:error', { code: 'FEATURE_DISABLED', requestId: id })
+          throw new Error('FEATURE_DISABLED')
+        }
+        if (!keetIdentityPasscode) {
+          emit('identity:error', { code: 'IDENTITY_LOCKED', requestId: id })
+          throw new Error('IDENTITY_LOCKED')
+        }
+        // Fresh mnemonic; the caller (renderer wizard) is responsible for
+        // showing it once and dropping it. We overwrite any prior blob under
+        // this passcode -- callers must confirm intent before calling.
+        let SecretManager
+        try {
+          require('../bare/wallet/semverPatch.js').applyPatch()
+          SecretManager = require('@tetherto/wdk-secret-manager')
+          SecretManager = SecretManager.default || SecretManager
+        } catch (err) {
+          emit('identity:error', { code: 'DEPS_MISSING', message: err?.message, requestId: id })
+          throw err
+        }
+        const handle = createKeetIdentity({
+          SecretManager,
+          storageDir: keetIdentityStorageDir(),
+          log: (level, msg, meta) => log(level, '[keet] ' + msg, meta)
+        })
+        const res = await handle.loadOrGenerate({
+          passphrase: keetIdentityPasscode,
+          force: true
+        })
+        keetIdentity = handle
+        setKeetIdentity(handle)
+        // The mnemonic is emitted ONCE here; renderer must drop after display.
+        // Deliberately not part of a persistent event stream — this is the ack.
+        emit('ack', {
+          id,
+          cmd,
+          payload: {
+            mnemonic: res.mnemonic,
+            identityPublicKey: res.identityPublicKeyHex
+          }
+        })
+        emit('identity:ready', {
+          identityPublicKey: res.identityPublicKeyHex,
+          mnemonicGenerated: true
+        })
+        return
+      }
+      case 'identity:restore': {
+        if (!keetIdentityFeatureEnabled()) {
+          emit('identity:error', { code: 'FEATURE_DISABLED', requestId: id })
+          throw new Error('FEATURE_DISABLED')
+        }
+        if (!keetIdentityPasscode) {
+          emit('identity:error', { code: 'IDENTITY_LOCKED', requestId: id })
+          throw new Error('IDENTITY_LOCKED')
+        }
+        const mnemonic = payload?.mnemonic
+        if (typeof mnemonic !== 'string' || mnemonic.trim().split(/\s+/).length !== 24) {
+          emit('identity:error', { code: 'MNEMONIC_INVALID', requestId: id })
+          throw new RangeError('mnemonic must be 24 BIP-39 words')
+        }
+        let SecretManager
+        try {
+          require('../bare/wallet/semverPatch.js').applyPatch()
+          SecretManager = require('@tetherto/wdk-secret-manager')
+          SecretManager = SecretManager.default || SecretManager
+        } catch (err) {
+          emit('identity:error', { code: 'DEPS_MISSING', message: err?.message, requestId: id })
+          throw err
+        }
+        const handle = createKeetIdentity({
+          SecretManager,
+          storageDir: keetIdentityStorageDir(),
+          log: (level, msg, meta) => log(level, '[keet] ' + msg, meta)
+        })
+        const res = await handle.restore({
+          mnemonic,
+          passphrase: keetIdentityPasscode
+        })
+        keetIdentity = handle
+        setKeetIdentity(handle)
+        emit('ack', {
+          id,
+          cmd,
+          payload: { identityPublicKey: res.identityPublicKeyHex }
+        })
+        emit('identity:ready', {
+          identityPublicKey: res.identityPublicKeyHex,
+          mnemonicGenerated: false
+        })
+        return
+      }
+      case 'identity:get-public-key': {
+        const enabled = keetIdentityFeatureEnabled()
+        const key = enabled && keetIdentity ? keetIdentity.getIdentityPublicKeyHex() : null
+        emit('ack', { id, cmd, payload: { enabled, identityPublicKey: key } })
+        return
+      }
+      // -- End Tier 4 Round 2 keet portable identity --------------------
+
       case 'tip:propose': {
         if (!room?.tip) throw new TipNotReadyError()
         const amount = String(payload?.amount ?? DEMO_AMOUNT_BASE_UNITS)
         const note = typeof payload?.note === 'string' ? payload.note : undefined
         const row = await room.tip.proposeTip({ amount, note })
+        emit('ack', { id, cmd, payload: { status: row.status, tx_hash: row.tx_hash } })
+        return
+      }
+      case 'tip:batch': {
+        if (!room?.tip || typeof room.tip.tipBatch !== 'function') throw new TipNotReadyError()
+        const row = await room.tip.tipBatch({ recipients: payload?.recipients })
         emit('ack', { id, cmd, payload: { status: row.status, tx_hash: row.tx_hash } })
         return
       }
@@ -2176,6 +3104,38 @@ async function dispatchCommand(msg) {
       }
       // ===== END BLIND PEERING (Wave 15) =====
 
+      // ===== DEMO AUTOMATION (Tier polish) =====
+      // One-button pitch driver. Host-only; feature-flag CURVA_DEMO_AUTOMATION_ENABLED.
+      // Backing timeline lives in bare/demoTimeline.js. Every action here is a
+      // passthrough into an already-shipped code path.
+      case 'demo:start': {
+        if (!room) throw new RoomNotJoinedError()
+        const result = typeof room.triggerDemoTimeline === 'function'
+          ? room.triggerDemoTimeline()
+          : null
+        emit('demo:status', result || { state: 'idle', elapsedMs: 0, currentStep: 0, totalSteps: 0 })
+        emit('ack', { id, cmd, payload: result })
+        return
+      }
+      case 'demo:stop': {
+        if (!room) throw new RoomNotJoinedError()
+        const result = typeof room.abortDemoTimeline === 'function'
+          ? room.abortDemoTimeline()
+          : { state: 'idle', elapsedMs: 0, currentStep: 0, totalSteps: 0 }
+        emit('demo:status', result)
+        emit('ack', { id, cmd, payload: result })
+        return
+      }
+      case 'demo:status': {
+        const result = (room && typeof room.demoTimelineStatus === 'function')
+          ? room.demoTimelineStatus()
+          : { state: 'idle', elapsedMs: 0, currentStep: 0, totalSteps: 0 }
+        emit('demo:status', result)
+        emit('ack', { id, cmd, payload: result })
+        return
+      }
+      // ===== END DEMO AUTOMATION (Tier polish) =====
+
       default:
         log('info', 'ipc unknown cmd (ignored)', { cmd, id })
     }
@@ -2221,6 +3181,9 @@ function encodeBase64(buf) {
 goodbye(async () => {
   log('info', 'shutting down')
   disconnectActivityFeed()
+  try { matchLiveStreamConsumer.stop() } catch (err) {
+    log('warn', 'matchLiveStreamConsumer stop failed', { message: err && err.message })
+  }
   try {
     if (translator) await translator.close()
   } catch (err) {
@@ -2232,6 +3195,21 @@ goodbye(async () => {
     if (commentator) await commentator.close()
   } catch (err) {
     log('warn', 'commentator close failed', { message: err.message })
+  }
+  // Wave 13B: close roomBot. Only unloads the model if roomBot loaded it
+  // itself (see `state.ownedUnloadModel` inside bare/roomBot.js) so we
+  // don't double-free a handle shared with the commentator.
+  try {
+    if (roomBotChatUnsub) roomBotChatUnsub()
+    if (roomBot) await roomBot.close()
+  } catch (err) {
+    log('warn', 'roomBot close failed', { message: err.message })
+  }
+  // Tier 4: close Supertonic announcer (unloads any per-locale TTS models).
+  try {
+    if (announcer) await announcer.close()
+  } catch (err) {
+    log('warn', 'announcer close failed', { message: err.message })
   }
   try {
     await closeCurrentRoom()
