@@ -1,0 +1,24 @@
+{
+  "name": "Curva branding pack",
+  "version": "0.1.0",
+  "namespace": "branding",
+  "asset_count": 11,
+  "created": "2026-07-06",
+  "note": "This drive is fetched at boot via pear.assets.branding in the main app manifest. Contents are not official FIFA or team artwork; they are lightweight demo placeholders.",
+  "logo": "curva-logo.svg",
+  "ultras": {
+    "curva-nord-jakarta": "curva-nord-jakarta.svg",
+    "curva-sud-torino": "curva-sud-torino.svg"
+  },
+  "crests": {
+    "ita": "crests/ita.svg",
+    "arg": "crests/arg.svg",
+    "mex": "crests/mex.svg",
+    "zaf": "crests/zaf.svg",
+    "esp": "crests/esp.svg",
+    "bra": "crests/bra.svg",
+    "fra": "crests/fra.svg",
+    "gbr": "crests/gbr.svg"
+  },
+  "chants": "chants.json"
+}

@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 90 60" width="90" height="60" role="img" aria-label="Brazil">
+  <rect width="90" height="60" fill="#009C3B"/>
+  <polygon points="45,6 84,30 45,54 6,30" fill="#FFDF00"/>
+  <circle cx="45" cy="30" r="10" fill="#002776"/>
+</svg>

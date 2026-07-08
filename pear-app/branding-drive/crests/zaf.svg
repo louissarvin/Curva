@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 90 60" width="90" height="60" role="img" aria-label="South Africa">
+  <rect width="90" height="30" y="0" fill="#E03C31"/>
+  <rect width="90" height="30" y="30" fill="#001489"/>
+  <polygon points="0,0 30,30 0,60" fill="#007A4D"/>
+  <polygon points="0,0 24,0 42,30 24,60 0,60 22,30" fill="#FFFFFF"/>
+  <polygon points="0,0 12,0 32,30 12,60 0,60 22,30" fill="#000000"/>
+</svg>

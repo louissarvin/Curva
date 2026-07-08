@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200" role="img" aria-label="Curva Nord Jakarta">
+  <circle cx="100" cy="100" r="94" fill="#8b1a1a"/>
+  <circle cx="100" cy="100" r="76" fill="none" stroke="#f5f5f5" stroke-width="4"/>
+  <text x="100" y="92" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="22" font-weight="700" fill="#f5f5f5" letter-spacing="2">CURVA</text>
+  <text x="100" y="120" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="22" font-weight="700" fill="#f5f5f5" letter-spacing="2">NORD</text>
+  <text x="100" y="150" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="14" font-weight="500" fill="#f5f5f5" letter-spacing="3">JAKARTA</text>
+</svg>
