@@ -34,6 +34,12 @@
 // in depth (prevents a churn attack that keeps re-registering the same base).
 
 const b4a = require('b4a')
+// Observability seam (Wave 16). No-op unless CURVA_OBSERVABILITY_ENABLED=true
+// and the hypertrace package is present. See bare/observability.js header for
+// the docs-verification memo (hypertrace@1.4.2 API confirmed 2026-07-10).
+const { installTracer: _installTracer, NOOP_TRACER } = (() => {
+  try { return require('./observability.js') } catch { return { installTracer: () => ({ trace () {} }), NOOP_TRACER: { trace () {} } } }
+})()
 
 // Rate-limit window: at most 5 register attempts per Autobase per rolling min.
 const RATE_LIMIT_WINDOW_MS = 60 * 1000
@@ -118,6 +124,12 @@ function createBlindPeeringClient({
     closed: false
   }
 
+  // Wave 16 observability. Install BEFORE any noop-return branches so the
+  // returned no-op client still carries a (no-op) tracer field; callers that
+  // read `.tracer` do not need to null-check.
+  class BlindPeering {}
+  const tracer = _installTracer(new BlindPeering(), { name: 'BlindPeering' }) || NOOP_TRACER
+
   // Feature no-op branch: flag off OR key empty.
   if (!state.enabled) {
     log.info('blind-peering disabled (flag off)')
@@ -142,6 +154,7 @@ function createBlindPeeringClient({
     bp = new Klass(swarm.dht, corestore, { keys: [state.key] })
     state.active = true
     log.info('blind-peering client active', { peerKeyShort: shortKey(state.key) })
+    tracer.trace('client-active', { keyShort: shortKey(state.key) })
   } catch (err) {
     state.lastError = err?.message || String(err)
     log.error('blind-peering init failed', { message: state.lastError })
@@ -203,6 +216,7 @@ function createBlindPeeringClient({
         window: RATE_LIMIT_WINDOW_MS,
         max: RATE_LIMIT_MAX
       })
+      tracer.trace('rate-limited', { key: shortKey(discoveryKeyHex) })
       return { ok: false, reason: 'rate-limited' }
     }
 
@@ -231,6 +245,7 @@ function createBlindPeeringClient({
       log.info('blind-peering registered autobase', {
         discoveryKey: shortKey(discoveryKeyHex)
       })
+      tracer.trace('autobase-registered', { key: shortKey(discoveryKeyHex) })
       return { ok: true, discoveryKey: discoveryKeyHex }
     } catch (err) {
       state.lastError = err?.message || String(err)
@@ -238,6 +253,7 @@ function createBlindPeeringClient({
         discoveryKey: shortKey(discoveryKeyHex),
         message: state.lastError
       })
+      tracer.trace('autobase-register-failed', { key: shortKey(discoveryKeyHex) })
       return { ok: false, reason: 'register-failed:' + state.lastError }
     }
   }
@@ -369,7 +385,7 @@ function createBlindPeeringClient({
     state.active = false
   }
 
-  return { registerAutobase, unregisterAutobase, registerCore, suspend, resume, status, close }
+  return { registerAutobase, unregisterAutobase, registerCore, suspend, resume, status, close, tracer }
 }
 
 function makeNoop(state, { reason }) {
@@ -388,7 +404,8 @@ function makeNoop(state, { reason }) {
     async suspend() {},
     async resume() {},
     status,
-    async close() {}
+    async close() {},
+    tracer: NOOP_TRACER
   }
 }
 

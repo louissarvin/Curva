@@ -355,9 +355,9 @@ function createCommentator (opts = {}) {
     sdkFactory = null,
     modelSrc = DEFAULT_MODEL_SRC,
     modelSizeMb = DEFAULT_MODEL_SIZE_MB,
-    // Semifinal QVAC depth: room-scoped kvCache key. Reusing the cache across
-    // 60 s ticks in the same room turns the second and later completions into
-    // sub-100 ms time-to-first-token calls (verified per docs
+    // Room-scoped kvCache key. Reusing the cache across 60 s ticks in the
+    // same room turns the second and later completions into sub-100 ms
+    // time-to-first-token calls (verified per docs
     // https://docs.qvac.tether.io/ai-capabilities/text-generation/ kvCache
     // section, fetched 2026-07-10).
     roomSlug = 'default',
@@ -558,6 +558,35 @@ function createCommentator (opts = {}) {
     let sawThinking = false
     let sawContent = false
     let stopReason = null
+    // Wave 16 "thinking ghost": aggregate thinkingDelta chunks into a rolling
+    // buffer and emit `commentator:thinking-preview {text}` every 100ms OR
+    // whenever the buffer has grown by at least 50 chars since the last
+    // preview. Prevents the renderer from being flooded with 200+ token-level
+    // updates while still delivering sub-second UI freshness. Verified per
+    // https://docs.qvac.tether.io/ai-capabilities/text-generation/ (fetched
+    // 2026-07-10) that thinkingDelta events fire with `captureThinking: true`
+    // on Qwen3 (default true for this model per model registry).
+    let thinkingBuf = ''
+    let lastThinkPreviewAt = 0
+    let lastThinkPreviewLen = 0
+    const THINK_PREVIEW_INTERVAL_MS = 100
+    const THINK_PREVIEW_CHAR_STEP = 50
+    // Hard cap on the preview payload so a runaway reasoning trace does not
+    // send megabytes across IPC. Renderers only need enough to show the ghost.
+    const THINK_PREVIEW_MAX_CHARS = 1024
+    function maybeEmitThinkingPreview (force = false) {
+      if (thinkingBuf.length === 0) return
+      const t = now()
+      const grew = thinkingBuf.length - lastThinkPreviewLen
+      const elapsed = t - lastThinkPreviewAt
+      if (!force && grew < THINK_PREVIEW_CHAR_STEP && elapsed < THINK_PREVIEW_INTERVAL_MS) return
+      lastThinkPreviewAt = t
+      lastThinkPreviewLen = thinkingBuf.length
+      const clipped = thinkingBuf.length > THINK_PREVIEW_MAX_CHARS
+        ? thinkingBuf.slice(-THINK_PREVIEW_MAX_CHARS)
+        : thinkingBuf
+      emit('commentator:thinking-preview', { text: clipped, len: thinkingBuf.length })
+    }
     try {
       const matchTimeMs = Math.max(0, Number(getMatchTimeMs() || 0))
       const prompt = buildPrompt({
@@ -571,16 +600,23 @@ function createCommentator (opts = {}) {
       emit('commentary:trigger', { type: trigger?.type || 'tick', matchTimeMs })
 
       const history = [{ role: 'user', content: prompt }]
-      // Semifinal: reuse a per-room kvCache so multi-turn requests share the
-      // Qwen3 KV so we get sub-100 ms time-to-first-token on repeat triggers.
-      // SDK contract: kvCache accepts `true` (auto) or a caller-managed string
+      // Reuse a per-room kvCache so multi-turn requests share the Qwen3 KV
+      // and we get sub-100 ms time-to-first-token on repeat triggers. SDK
+      // contract: kvCache accepts `true` (auto) or a caller-managed string
       // key. Verified in @qvac/sdk/dist/schemas/completion-stream.d.ts.
       const kvCacheKey = 'commentator:room:' + (roomSlug || 'default')
       const result = sdkHandle.completion({
         modelId: sdkHandle.modelId,
         history,
         stream: true,
-        kvCache: kvCacheKey
+        kvCache: kvCacheKey,
+        // Wave 16: request thinkingDelta events explicitly so the "thinking
+        // ghost" preview always renders even on models where framing default
+        // is off. Verified against
+        // node_modules/@qvac/sdk/dist/schemas/completion-stream.js:138 which
+        // defines `captureThinking` as an optional boolean on the completion
+        // request schema (docs fetched 2026-07-10).
+        captureThinking: true
       })
 
       // Preferred path: `result.events` is the discriminated union stream
@@ -620,6 +656,8 @@ function createCommentator (opts = {}) {
               emit('commentator:thinking-start', {})
             }
             emit('commentator:thinking', { text: chunk })
+            thinkingBuf += chunk
+            maybeEmitThinkingPreview()
           } else if (event.type === 'completionStats') {
             const stats = (event.stats && typeof event.stats === 'object') ? event.stats : {}
             emit('commentator:stats', {
@@ -661,6 +699,10 @@ function createCommentator (opts = {}) {
       } else if (typeof result === 'string') {
         tokensBuf = result
       }
+
+      // Flush any accumulated thinking buffer so the renderer's ghost preview
+      // shows the final reasoning trace before the done event freezes it.
+      maybeEmitThinkingPreview(true)
 
       // Always emit a `commentator:done` so renderers can freeze the growing
       // message even when the SDK never sent a completionDone event (legacy
