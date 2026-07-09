@@ -2553,14 +2553,20 @@ async function closeCurrentRoom() {
       }
     }).catch(() => { /* noop */ })
 
-    // Auto-join the configured room's swarm topic. The renderer can also
-    // trigger room:join to instantiate Autobases inside the room.
-    await joinRoom(config.roomSlug)
-
-    // Phase 1: auto-open the room's Autobases on the configured slug so that
-    // two --seed:peer instances immediately share playhead + chat without the
-    // renderer needing to click "Join". Renderer-driven room:join still works.
-    await openRoomFor(config.roomSlug, config.isHost)
+    // Auto-join the configured room's swarm topic AND open its Autobases.
+    // Gated by --no-auto-open (config.autoOpenRoom): when the flag is set
+    // the peer boots straight to the lobby with no room mounted, and the
+    // renderer drives the actual join via `room:join` IPC after the user
+    // clicks Create or Join in the STADIUM directory. Skipping this pair
+    // is what lets the demo start on the lobby instead of dropping into a
+    // stale `demo-room` slug the operator never asked for.
+    if (config.autoOpenRoom) {
+      await joinRoom(config.roomSlug)
+      await openRoomFor(config.roomSlug, config.isHost)
+    } else {
+      log('info', 'auto-open disabled; skipping default room join', { defaultSlug: config.roomSlug })
+      emit('lobby:ready', { roomSlug: config.roomSlug, isHost: config.isHost })
+    }
 
     // F3 (partial): boot the match live SSE consumer so goal / score events
     // from the backend drive the dock badge for the duration of the app
