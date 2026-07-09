@@ -30,10 +30,16 @@ export default function PillNav() {
           {/* Logo */}
           <Link
             to="/"
-            className="font-display font-bold text-[15px] text-[#f5f5f0] tracking-tight mr-3 hover:text-white transition-colors curva-focus rounded"
+            className="flex items-center gap-2 mr-3 hover:opacity-90 transition-opacity curva-focus rounded"
             aria-label="Curva home"
           >
-            Curva
+            <img
+              src="/assets/logo.svg"
+              alt=""
+              aria-hidden="true"
+              className="h-20 w-20 md:h-24 md:w-24 -my-6 md:-my-8 select-none pointer-events-none"
+              draggable={false}
+            />
           </Link>
 
           {/* Separator */}
