@@ -64,6 +64,9 @@ export const Route = createRootRouteWithContext<MyRouterContext>()({
     ],
     links: [
       { rel: 'stylesheet', href: appCss },
+      { rel: 'icon', type: 'image/svg+xml', href: '/assets/logo-index.svg' },
+      { rel: 'apple-touch-icon', href: '/assets/logo-index.svg' },
+      { rel: 'mask-icon', href: '/assets/logo-index.svg', color: '#c8102e' },
       {
         rel: 'preconnect',
         href: 'https://fonts.googleapis.com',
