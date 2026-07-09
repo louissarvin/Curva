@@ -750,13 +750,24 @@ async function resolveEngine (engineFactory) {
       })
       return null
     }
-    // Bare plugin registration. Verified by the SDK's runtime error:
-    //   "No plugins registered in the worker. On Bare, register the plugins
-    //    you need with plugins([...]) before the first SDK call"
-    // The nmtcpp translation plugin lives under a dedicated subpath export
-    // (see @qvac/sdk/package.json exports). Register it once at engine
-    // resolve time; the SDK caches the registration so subsequent loadModel
-    // calls hit the fast path.
+    // Bare plugin registration. The SDK's ensure-worker-ready.js checks
+    // getAllPlugins() at the start of every loadModel/translate call and
+    // throws WORKER_PLUGINS_NOT_REGISTERED if the registry is empty. Two
+    // gotchas we ran into and fix here:
+    //
+    //   1. plugins-factory.js's `plugins()` both registers the plugin AND
+    //      returns a hostApi with loadModel + translate bound. On Bare the
+    //      module resolution can end up with the plugin registered on a
+    //      registry that mod.loadModel does not read, so calling
+    //      mod.loadModel throws WORKER_PLUGINS_NOT_REGISTERED even though
+    //      the register succeeded on the sibling registry. Solution: use
+    //      the hostApi that plugins() returns — it is guaranteed to read
+    //      the same registry the register call just wrote to.
+    //
+    //   2. Belt + braces: also call registerPlugin directly against
+    //      server/plugins/index.js when reachable, so any additional
+    //      registry-instance drift is covered.
+    let sdkForWrap = mod
     try {
       const nmtPluginMod = await import('@qvac/sdk/nmtcpp-translation/plugin').catch((err) => {
         console.warn('[Curva][Translate] @qvac/sdk/nmtcpp-translation/plugin import failed:', err?.message || err)
@@ -764,8 +775,12 @@ async function resolveEngine (engineFactory) {
       })
       const nmtPlugin = nmtPluginMod?.nmtPlugin || nmtPluginMod?.default || nmtPluginMod
       if (nmtPlugin && typeof mod.plugins === 'function') {
-        mod.plugins([nmtPlugin])
-        console.log('[Curva][Translate] registered nmtcpp translation plugin with @qvac/sdk')
+        const host = mod.plugins([nmtPlugin])
+        console.log('[Curva][Translate] registered nmtcpp plugin via @qvac/sdk plugins()')
+        if (host && typeof host.loadModel === 'function' && typeof host.translate === 'function') {
+          sdkForWrap = host
+          console.log('[Curva][Translate] using hostApi returned by plugins() for loadModel + translate')
+        }
       } else if (typeof mod.plugins !== 'function') {
         console.warn('[Curva][Translate] @qvac/sdk exposes no plugins(...) registrar; SDK may reject loadModel')
       } else {
@@ -794,7 +809,7 @@ async function resolveEngine (engineFactory) {
     } catch (err) {
       console.warn('[Curva][Translate] subscribeServerLogs threw:', err?.message || err)
     }
-    return wrapSdkEngine(mod)
+    return wrapSdkEngine(sdkForWrap)
   } catch (err) {
     console.warn('[Curva][Translate] resolveEngine threw:', err?.message || err, err?.stack?.slice(0, 400) || '')
     return null
@@ -1128,10 +1143,11 @@ async function loadSdkLlm ({ modelSrc, onProgress, sdkImpl, modelConfig } = {}) 
     })
     return null
   }
-  // Bare plugin registration for LLM inference. `plugins(...)` is idempotent
-  // in @qvac/sdk (registerPlugins de-dupes by plugin key), so it's safe to
-  // call from every loadSdkLlm entry point without coordination with the
-  // NMT engine registration above.
+  // Bare plugin registration for LLM inference. Same gotcha as the NMT
+  // engine — use the hostApi returned by plugins() for loadModel + completion
+  // so the SDK's ensure-worker-ready gate reads the same registry we just
+  // populated.
+  let sdkHost = sdk
   try {
     const llmPluginMod = await import('@qvac/sdk/llamacpp-completion/plugin').catch((err) => {
       console.warn('[Curva][LlmLoader] llamacpp-completion plugin import failed:', err?.message || err)
@@ -1139,8 +1155,11 @@ async function loadSdkLlm ({ modelSrc, onProgress, sdkImpl, modelConfig } = {}) 
     })
     const llmPlugin = llmPluginMod?.llmPlugin || llmPluginMod?.default || llmPluginMod
     if (llmPlugin && typeof sdk.plugins === 'function') {
-      sdk.plugins([llmPlugin])
-      console.log('[Curva][LlmLoader] registered llamacpp-completion plugin with @qvac/sdk')
+      const host = sdk.plugins([llmPlugin])
+      console.log('[Curva][LlmLoader] registered llamacpp-completion plugin via @qvac/sdk plugins()')
+      if (host && typeof host.loadModel === 'function' && typeof host.completion === 'function') {
+        sdkHost = host
+      }
     }
   } catch (err) {
     console.warn('[Curva][LlmLoader] plugin registration threw:', err?.message || err)
@@ -1159,11 +1178,11 @@ async function loadSdkLlm ({ modelSrc, onProgress, sdkImpl, modelConfig } = {}) 
   if (modelConfig && typeof modelConfig === 'object') {
     loadOpts.modelConfig = modelConfig
   }
-  const modelId = await sdk.loadModel(loadOpts)
+  const modelId = await sdkHost.loadModel(loadOpts)
   return {
     modelId,
-    completion: sdk.completion.bind(sdk),
-    unloadModel: typeof sdk.unloadModel === 'function' ? sdk.unloadModel.bind(sdk) : null
+    completion: sdkHost.completion.bind(sdkHost),
+    unloadModel: typeof sdkHost.unloadModel === 'function' ? sdkHost.unloadModel.bind(sdkHost) : null
   }
 }
 
