@@ -30,13 +30,16 @@ export default function Header() {
         >
           <Menu size={24} />
         </button>
-        <h1 className="ml-4 text-xl font-semibold">
-          <Link to="/">
+        <h1 className="ml-4 text-xl font-semibold flex items-center gap-3">
+          <Link to="/" className="flex items-center gap-3" aria-label="Curva home">
             <img
-              src="/tanstack-word-logo-white.svg"
-              alt="TanStack Logo"
-              className="h-10"
+              src="/assets/logo.svg"
+              alt=""
+              aria-hidden="true"
+              className="h-12 w-12 md:h-14 md:w-14 select-none"
+              draggable={false}
             />
+            <span className="font-display tracking-tight">Curva</span>
           </Link>
         </h1>
       </header>
