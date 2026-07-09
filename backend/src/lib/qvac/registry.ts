@@ -17,6 +17,9 @@ export type QvacModelFamily =
   | 'bergamot'
   | 'whisper'
   | 'llama'
+  | 'llama-vlm'
+  | 'llama-vlm-mmproj'
+  | 'ocr'
   | 'parakeet'
   | 'silero-vad'
   | 'tts-supertonic'
@@ -62,6 +65,9 @@ const KNOWN_FAMILIES: ReadonlySet<QvacModelFamily> = new Set([
   'bergamot',
   'whisper',
   'llama',
+  'llama-vlm',
+  'llama-vlm-mmproj',
+  'ocr',
   'parakeet',
   'silero-vad',
   'tts-supertonic',

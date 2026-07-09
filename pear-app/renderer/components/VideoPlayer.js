@@ -33,7 +33,12 @@ export function mountVideoPlayer({
   initialSource,
   isHost = false,
   matchId = null,
-  liveMinuteOverlayEnabled = true
+  liveMinuteOverlayEnabled = true,
+  // Cup Final: FrameAnalyzePanel (VLM + OCR). onPausedChange fires with a
+  // boolean whenever the local paused state flips. captureFrame() (added to
+  // the returned handle below) hands back a PNG data URL of the current
+  // frame — used by the panel to feed the VLM / OCR bare wrappers.
+  onPausedChange = null
 } = {}) {
   if (!container) throw new TypeError('container is required')
   if (!curva) throw new TypeError('curva bridge is required')
@@ -213,6 +218,48 @@ export function mountVideoPlayer({
   video.addEventListener('seeked', () => emit('seek'))
   video.addEventListener('ratechange', () => emit('rate', { rate: video.playbackRate }))
 
+  // Cup Final: mirror local paused state to the FrameAnalyzePanel. The
+  // callback fires for BOTH inbound (peer-driven) and outbound (local click)
+  // pauses, because both surface as native DOM 'play' / 'pause' events on
+  // the <video> element. The panel only enables its buttons when paused=true.
+  function notifyPausedChange () {
+    if (typeof onPausedChange !== 'function') return
+    try { onPausedChange(!!video.paused) } catch { /* noop */ }
+  }
+  video.addEventListener('play', notifyPausedChange)
+  video.addEventListener('pause', notifyPausedChange)
+
+  /**
+   * Capture the current frame as a PNG data URL. Returns null when the video
+   * has no dimensions yet (not enough data loaded) — callers should handle
+   * null as "frame unavailable".
+   *
+   * XSS/security note: this is a browser API path (Canvas.toDataURL). The
+   * canvas is a fresh element with no external content; the data URL is a
+   * client-only string that we hand to the bare-side VLM/OCR wrappers. No
+   * data crosses the wire from this call.
+   *
+   * @returns {string|null}
+   */
+  function captureFrame () {
+    if (!video.videoWidth || !video.videoHeight) return null
+    try {
+      const canvas = document.createElement('canvas')
+      canvas.width = video.videoWidth
+      canvas.height = video.videoHeight
+      const ctx = canvas.getContext('2d')
+      if (!ctx) return null
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
+      return canvas.toDataURL('image/png')
+    } catch (err) {
+      // Cross-origin videos taint the canvas; toDataURL then throws. We
+      // return null so the panel can show "Frame unavailable" without
+      // crashing the room.
+      console.warn('[curva] captureFrame failed:', err?.message)
+      return null
+    }
+  }
+
   // T3: host-only anchor emitter. Every ANCHOR_INTERVAL_MS while the video is
   // actively playing, publish { type:'seek', is_anchor:true, match_time_ms:... }
   // The worker downgrades non-host anchors, so a leak of the isHost flag here
@@ -306,7 +353,7 @@ export function mountVideoPlayer({
     container.textContent = ''
   }
 
-  return { destroy, video, setSource, wrap, attachTacticalOverlay }
+  return { destroy, video, setSource, wrap, attachTacticalOverlay, captureFrame }
 }
 
 function short(hex) {
