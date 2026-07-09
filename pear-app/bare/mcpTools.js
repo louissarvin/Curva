@@ -1,4 +1,4 @@
-// Curva in-process MCP tools (Semifinal QVAC depth).
+// Curva in-process MCP tools.
 //
 // Docs-verification memo ---------------------------------------------------
 //

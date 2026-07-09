@@ -1,4 +1,4 @@
-// Semifinal QVAC depth: in-process MCP tool server tests.
+// In-process MCP tool server tests.
 
 const test = require('brittle')
 const {

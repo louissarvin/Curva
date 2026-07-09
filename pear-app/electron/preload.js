@@ -910,7 +910,7 @@ contextBridge.exposeInMainWorld('curva', {
     onTokens:    (cb) => onEvent('commentary:tokens', cb),
     onEmitted:   (cb) => onEvent('commentary:emitted', cb),
     onError:     (cb) => onEvent('commentary:error', cb),
-    // Semifinal QVAC depth: full completion-event stream from bare/commentator.js.
+    // Full completion-event stream from bare/commentator.js.
     onToken:     (cb) => onEvent('commentator:token', cb),
     onThinking:  (cb) => onEvent('commentator:thinking', cb),
     onStats:     (cb) => onEvent('commentator:stats', cb),
@@ -1134,7 +1134,7 @@ contextBridge.exposeInMainWorld('curva', {
   // Payload: { writerCount } (total Autobase writer slots; divide by 2 for peer count).
   onWritersUpdate(cb) { return onEvent('room:writers-update', cb) },
 
-  // ===== SEMIFINAL QVAC DEPTH =====
+  // ===== DEEP QVAC BRIDGES: delegated inference, RAG, MCP tools =====
   //
   // Delegated inference (bare/delegatedProvider.js).
   delegated: {
@@ -1191,6 +1191,155 @@ contextBridge.exposeInMainWorld('curva', {
         throw new RangeError('name required')
       }
       return writeMain('mcp:call', { name: name.slice(0, 64), args: args || {} })
+    }
+  },
+
+  // ===== VOICE COACH (Cup Final) =====
+  // Push-to-talk STT + RAG + LLM + MCP + TTS pipeline. Every method delegates
+  // to the Bare worker's voiceCoach factory (bare/voiceCoach.js). Bridge stays
+  // silent when the worker cannot construct a coach (commentator not loaded).
+  voiceCoach: {
+    startTurn() { return writeMain('voice:start-turn', {}) },
+    pushAudio(pcm) {
+      // Accept Uint8Array / Int16Array / Float32Array / ArrayBuffer / Buffer.
+      // Encoded as base64 for the JSON wire (matches the bare-side b4a decode).
+      if (pcm == null) throw new TypeError('pcm chunk required')
+      let bytes = null
+      if (pcm instanceof ArrayBuffer) bytes = new Uint8Array(pcm)
+      else if (pcm instanceof Uint8Array) bytes = pcm
+      else if (pcm instanceof Int16Array || pcm instanceof Float32Array) {
+        bytes = new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength)
+      } else if (Buffer.isBuffer && Buffer.isBuffer(pcm)) bytes = pcm
+      else throw new TypeError('unsupported pcm chunk type')
+      // Envelope: hard cap on IPC frame size to prevent renderer runaway.
+      // 128 KB per push is ~2s of 16 kHz f32 mono; well above the ~200 ms
+      // cadence VoiceCoachPanel emits at.
+      if (bytes.byteLength > 128 * 1024) {
+        throw new RangeError('pcm chunk too large (>128KB)')
+      }
+      return writeMain('voice:push-audio', { pcm: toBase64(bytes) })
+    },
+    endTurn(opts) { return writeMain('voice:end-turn', opts || {}) },
+    status() { return writeMainAwait('voice:status', {}) },
+    // Generic subscription helper. VoiceCoachPanel calls .on(evt, cb) with the
+    // full `voice:*` event name, so we forward directly.
+    on(evt, cb) {
+      if (typeof evt !== 'string' || evt.length === 0) throw new TypeError('evt required')
+      if (typeof cb !== 'function') throw new TypeError('cb required')
+      return onEvent(evt, cb)
+    },
+    onTurnStarted:       (cb) => onEvent('voice:turn-started', cb),
+    onTranscriptPartial: (cb) => onEvent('voice:transcript-partial', cb),
+    onTranscriptFinal:   (cb) => onEvent('voice:transcript-final', cb),
+    onVad:               (cb) => onEvent('voice:vad', cb),
+    onEndOfTurn:         (cb) => onEvent('voice:endOfTurn', cb),
+    onAnswerToken:       (cb) => onEvent('voice:answer-token', cb),
+    onToolCall:          (cb) => onEvent('voice:tool-call', cb),
+    onStats:             (cb) => onEvent('voice:stats', cb),
+    onGrounded:          (cb) => onEvent('voice:grounded', cb),
+    onDone:              (cb) => onEvent('voice:done', cb),
+    onError:             (cb) => onEvent('voice:error', cb),
+    onAudioCap:          (cb) => onEvent('voice:audio-cap', cb)
+  },
+
+  // ===== VLM CAPTION (Cup Final) =====
+  // SmolVLM2 500M Q8_0 frame captioning. Renderer passes either a data URL
+  // (`data:image/png;base64,...`) from VideoPlayer.captureFrame OR a raw
+  // base64 string; the bare-side handler strips the data-URL header before
+  // decoding.
+  vlm: {
+    caption(dataUrlOrBufferBase64, opts) {
+      if (typeof dataUrlOrBufferBase64 !== 'string' || dataUrlOrBufferBase64.length === 0) {
+        throw new RangeError('image (data URL or base64) required')
+      }
+      // Defense-in-depth: cap the base64 body at ~14 MB (roughly 10 MB raw
+      // image after decoding). The bare-side vlmCaption also enforces
+      // MAX_IMAGE_BYTES=10MB, so this is belt-and-suspenders.
+      if (dataUrlOrBufferBase64.length > 14 * 1024 * 1024) {
+        throw new RangeError('image payload too large')
+      }
+      return writeMainAwait('vlm:caption', { image: dataUrlOrBufferBase64, opts: opts || {} })
+    },
+    onLoading:  (cb) => onEvent('vlm:loading', cb),
+    onLoaded:   (cb) => onEvent('vlm:loaded', cb),
+    onProgress: (cb) => onEvent('vlm:progress', cb),
+    onToken:    (cb) => onEvent('vlm:caption-token', cb),
+    onError:    (cb) => onEvent('vlm:error', cb),
+    onResult:   (cb) => onEvent('vlm:result', cb)
+  },
+
+  // ===== OCR (Cup Final) =====
+  // OCR_LATIN jersey / scoreboard reader. Same payload contract as vlm.caption.
+  ocr: {
+    read(dataUrlOrBufferBase64, opts) {
+      if (typeof dataUrlOrBufferBase64 !== 'string' || dataUrlOrBufferBase64.length === 0) {
+        throw new RangeError('image (data URL or base64) required')
+      }
+      if (dataUrlOrBufferBase64.length > 14 * 1024 * 1024) {
+        throw new RangeError('image payload too large')
+      }
+      return writeMainAwait('ocr:read', { image: dataUrlOrBufferBase64, opts: opts || {} })
+    },
+    onLoading:  (cb) => onEvent('ocr:loading', cb),
+    onLoaded:   (cb) => onEvent('ocr:loaded', cb),
+    onProgress: (cb) => onEvent('ocr:progress', cb),
+    onError:    (cb) => onEvent('ocr:error', cb),
+    onResult:   (cb) => onEvent('ocr:result', cb)
+  },
+
+  // ===== DIAGNOSTICS (Cup Final) =====
+  // Two-way bridge for the DiagnosticsPanel (Metrics + Logs). status() returns
+  // { observabilityEnabled, promStarted, port, enabled, reason }; metrics()
+  // returns { text|null } where `text` is the raw Prometheus exposition body.
+  diagnostics: {
+    status()  { return writeMainAwait('diagnostics:status', {}) },
+    async metrics() {
+      const res = await writeMainAwait('diagnostics:metrics', {})
+      return (res && typeof res.text === 'string') ? res.text : null
+    },
+    onLog: (cb) => onEvent('diagnostics:log', cb)
+  },
+
+  // ===== SCOPED CHAT SYSTEM SEND (Cup Final) =====
+  // Restricted to the coach + VLM + OCR system message types. Every other
+  // system:* type must continue to be authored by its owning subsystem inside
+  // the worker so this bridge never widens the trust surface.
+  chat: {
+    async sendSystem(msg) {
+      if (!msg || typeof msg !== 'object') throw new TypeError('msg required')
+      const ALLOWED = new Set(['system:coach', 'system:vlm-caption', 'system:ocr-read'])
+      if (!ALLOWED.has(msg.type)) {
+        throw new RangeError('chat.sendSystem: type not in allowlist')
+      }
+      if (typeof msg.text !== 'string' || msg.text.length === 0) {
+        throw new RangeError('text required')
+      }
+      const caps = { 'system:coach': 800, 'system:vlm-caption': 800, 'system:ocr-read': 500 }
+      if (msg.text.length > caps[msg.type]) {
+        throw new RangeError('text exceeds cap for ' + msg.type)
+      }
+      const matchTimeMs = Number(msg.match_time_ms ?? msg.matchTimeMs ?? 0)
+      if (!Number.isFinite(matchTimeMs) || matchTimeMs < 0) {
+        throw new RangeError('match_time_ms must be a non-negative number')
+      }
+      const clean = { type: msg.type, text: msg.text, match_time_ms: Math.floor(matchTimeMs) }
+      if (msg.type === 'system:coach') {
+        if (msg.kind !== undefined) {
+          if (typeof msg.kind !== 'string' || msg.kind.length > 32) throw new RangeError('kind must be string <=32 chars')
+          clean.kind = msg.kind
+        }
+        if (msg.stop_reason !== undefined) {
+          if (typeof msg.stop_reason !== 'string' || msg.stop_reason.length > 32) throw new RangeError('stop_reason must be string <=32 chars')
+          clean.stop_reason = msg.stop_reason
+        }
+        if (msg.tool_calls !== undefined) {
+          if (!Array.isArray(msg.tool_calls) || msg.tool_calls.length > 8) {
+            throw new RangeError('tool_calls must be array (max 8)')
+          }
+          clean.tool_calls = msg.tool_calls
+        }
+      }
+      return writeMain('chat:send-system', clean)
     }
   }
 })

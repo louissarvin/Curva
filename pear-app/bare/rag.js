@@ -1,4 +1,4 @@
-// Curva RAG helper (Semifinal QVAC depth).
+// Curva RAG helper.
 //
 // Docs-verification memo ---------------------------------------------------
 //

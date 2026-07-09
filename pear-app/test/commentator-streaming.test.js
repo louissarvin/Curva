@@ -1,4 +1,4 @@
-// Semifinal QVAC depth: commentator streaming completion events + kvCache.
+// Commentator streaming completion events + kvCache tests.
 //
 // Verifies that runTrigger() consumes the SDK's `result.events` async iterator
 // (docs: pear-app/node_modules/@qvac/sdk/dist/schemas/completion-event.d.ts)

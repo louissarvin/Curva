@@ -1,4 +1,4 @@
-// Curva DelegatedInferencePanel: Semifinal QVAC depth renderer.
+// Curva DelegatedInferencePanel.
 //
 // Consumes the `curva.delegated` bridge (electron/preload.js) which fans out
 // to bare/delegatedProvider.js -> @qvac/sdk startQVACProvider + loadModel(

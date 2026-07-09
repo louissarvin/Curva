@@ -208,7 +208,7 @@ function createRoomBot (opts = {}) {
     now = () => Date.now(),
     mcpClientImpl = null,
     fetchImpl = null,
-    // Semifinal QVAC depth extensions.
+    // Deep-QVAC options: in-process MCP tool client + RAG handle.
     roomSlug = 'default',
     roomMcpClient = null,
     rag = null
@@ -392,11 +392,22 @@ function createRoomBot (opts = {}) {
           // model treats them as reference material not instructions, (3) add a
           // safety directive to the system prompt that write-tools require an
           // EXPLICIT current-user request, not an implicit retrieved suggestion.
-          const sanitize = (s) => String(s || '')
-            .replace(/[\x00-\x1F\x7F]/g, ' ') // strip C0 controls (incl. \n\r\t)
-            .replace(/\s+/g, ' ')             // collapse whitespace
-            .trim()
-            .slice(0, 240)
+          // Security audit fix (M4): also strip Unicode direction/formatting
+          // controls (U+2028-U+202F line/paragraph separators + bidi overrides,
+          // U+200B-U+200F zero-widths, U+FEFF BOM) so a crafted RAG snippet
+          // cannot visually forge role headers via right-to-left overrides or
+          // homoglyph zero-width injections. NFKC normalize collapses
+          // homoglyph look-alikes (Cyrillic а vs Latin a).
+          const sanitize = (s) => {
+            const src = String(s || '')
+            const normalized = typeof src.normalize === 'function' ? src.normalize('NFKC') : src
+            return normalized
+              .replace(/[\x00-\x1F\x7F]/g, ' ')                        // C0 controls
+              .replace(/[\u200B-\u200F\u2028-\u202F\u2060-\u206F\uFEFF]/g, '') // bidi/zw/invis
+              .replace(/\s+/g, ' ')
+              .trim()
+              .slice(0, 240)
+          }
           const grounded = hits
             .map((h, i) => (i + 1) + '. <retrieved_untrusted>' + sanitize(h.content) + '</retrieved_untrusted>')
             .join('\n')
@@ -425,10 +436,10 @@ function createRoomBot (opts = {}) {
     let stopReason = null
     try {
       // completion() returns a CompletionRun synchronously (NOT a Promise).
-      // Semifinal QVAC depth: pass an mcp[] array with the ROOM tools (via
-      // state.roomMcp when set by the caller) AND the HTTP backend client so
-      // the LLM can call both. `kvCache` is a stable per-room string so the
-      // Qwen3 KV state is reused across /bot invocations in the same room.
+      // Pass an mcp[] array with the ROOM tools (via state.roomMcp when set
+      // by the caller) AND the HTTP backend client so the LLM can call both.
+      // `kvCache` is a stable per-room string so the Qwen3 KV state is
+      // reused across /bot invocations in the same room.
       const mcpClients = []
       if (state.roomMcp) mcpClients.push({ client: state.roomMcp, includeResources: false })
       if (state.mcp) mcpClients.push({ client: state.mcp, includeResources: true })
@@ -510,8 +521,8 @@ function createRoomBot (opts = {}) {
         }
       }
 
-      // Semifinal streaming lifecycle: emit a `roombot:done` so the renderer
-      // can freeze the growing draft even if the model exits early.
+      // Streaming lifecycle: emit a `roombot:done` so the renderer can
+      // freeze the growing draft even if the model exits early.
       emit('roombot:done', {
         stopReason: stopReason || 'eos',
         totalText: replyBuf

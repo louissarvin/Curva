@@ -423,6 +423,28 @@ export function mountChat({ container, curva, tier = 'writer' } = {}) {
       return
     }
 
+    // Security audit fix (H4): Cup Final QVAC pills. system:coach is the
+    // voice-controlled coach reply, system:vlm-caption is the SmolVLM2 frame
+    // description, system:ocr-read is the extracted scoreboard/jersey text.
+    // All three are host-only + peer-writer-allowed per bare/chat.js. All
+    // text via textContent (LLM/VLM/OCR outputs are untrusted).
+    if (msg?.type === 'system:coach'
+        || msg?.type === 'system:vlm-caption'
+        || msg?.type === 'system:ocr-read') {
+      const li = renderSystemQvacPill(msg, key)
+      list.appendChild(li)
+      rowsByKey.set(key, li)
+      msgCount++
+      count.textContent = msgCount + ' msg' + (msgCount === 1 ? '' : 's')
+      while (list.children.length > 300) {
+        const first = list.firstChild
+        if (first?.dataset?.key) rowsByKey.delete(first.dataset.key)
+        list.removeChild(first)
+      }
+      if (autoScroll) list.scrollTop = list.scrollHeight
+      return
+    }
+
     // Wave 13A: QVAC LLM commentator pill. Distinct small-caps deep-red
     // border with an Italian-flag micro-emoji left of the text so users can
     // tell the line is AI-generated (not a peer message). textContent only —
@@ -740,6 +762,49 @@ export function mountChat({ container, curva, tier = 'writer' } = {}) {
   // Wave 13A: `system:commentary` renderer. Small-caps AI pill with an
   // Italian-flag micro-emoji so viewers instantly know it is AI-generated.
   // All text is set via textContent — the LLM output is untrusted.
+  // Cup Final: shared renderer for system:coach / system:vlm-caption /
+  // system:ocr-read pills. All three follow the commentary discipline:
+  // textContent-only, marker + body + attribution, distinct class so styles.css
+  // can theme each colour differently. Content is model-generated, treat as
+  // fully untrusted.
+  function renderSystemQvacPill(msg, key) {
+    const type = String(msg?.type || '')
+    const cfg = type === 'system:coach' ? {
+      cls: 'curva-chat__msg--coach',
+      marker: '🎧',
+      attribution: 'voice coach · on-device'
+    } : type === 'system:vlm-caption' ? {
+      cls: 'curva-chat__msg--vlm',
+      marker: '📸',
+      attribution: 'frame caption · SmolVLM2 on-device'
+    } : {
+      cls: 'curva-chat__msg--ocr',
+      marker: '🔍',
+      attribution: 'OCR · on-device'
+    }
+    const li = document.createElement('li')
+    li.className = 'curva-chat__msg curva-chat__msg--system ' + cfg.cls
+    li.dataset.key = key
+
+    const marker = document.createElement('span')
+    marker.className = 'curva-chat__commentary-marker'
+    marker.textContent = cfg.marker
+
+    const body = document.createElement('div')
+    body.className = 'curva-chat__commentary-body curva-chat__body'
+    // Cap length defensively; the bare validators already cap 500-800 chars.
+    body.textContent = String(msg?.text || '').slice(0, 1000)
+
+    const attribution = document.createElement('div')
+    attribution.className = 'curva-chat__commentary-attribution'
+    attribution.textContent = cfg.attribution
+
+    li.appendChild(marker)
+    li.appendChild(body)
+    li.appendChild(attribution)
+    return li
+  }
+
   function renderSystemCommentary(msg, key) {
     const li = document.createElement('li')
     li.className = 'curva-chat__msg curva-chat__msg--system curva-chat__msg--commentary'

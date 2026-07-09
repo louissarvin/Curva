@@ -22,8 +22,12 @@ import { mountActivityStrip } from './components/ActivityStrip.js'
 import { mountLeaderboard } from './components/Leaderboard.js'
 import { mountPredictionPanel, isPredictionPanelEnabled } from './components/PredictionPanel.js'
 import { mountCommentaryPanel, isCommentaryPanelEnabled } from './components/CommentaryPanel.js'
+import { mountDelegatedInferencePanel, isDelegatedPanelEnabled } from './components/DelegatedInferencePanel.js'
 import { mountTacticalOverlay } from './components/TacticalOverlay.js'
 import { mountIdentityWizard } from './components/IdentityWizard.js'
+import { mountVoiceCoachPanel, isVoiceCoachEnabled } from './components/VoiceCoachPanel.js'
+import { mountFrameAnalyzePanel } from './components/FrameAnalyzePanel.js'
+import { mountDiagnosticsPanel, isDiagnosticsEnabled } from './components/DiagnosticsPanel.js'
 
 const bridge = window.bridge
 const curva = window.curva
@@ -212,6 +216,24 @@ let mountGeneration = 0
 // AND here so a stale flag can never leak DOM into a locked-down build.
 let commentaryPanel = null
 let commentaryPanelHost = null
+// Delegated inference panel: provider grid, firewall allow/deny, latency
+// probes. Same feature-flag pattern as CommentaryPanel; mount is gated by
+// isDelegatedPanelEnabled which checks the bare bridge exposes
+// curva.delegated.snapshot().
+let delegatedPanel = null
+let delegatedPanelHost = null
+// Cup Final: Voice-Controlled Coach. Same feature-flag pattern as Commentary;
+// gated by isVoiceCoachEnabled which probes `curva.voiceCoach.status()`.
+let voiceCoachPanel = null
+let voiceCoachPanelHost = null
+// Cup Final: FrameAnalyzePanel (VLM + OCR). Mounted next to VideoPlayer and
+// driven by videoPlayer.captureFrame() + onPausedChange callback.
+let frameAnalyzePanel = null
+let frameAnalyzePanelHost = null
+// Cup Final: DiagnosticsPanel (Metrics + Logs). Mounted into the activity
+// strip container when observability is enabled.
+let diagnosticsPanel = null
+let diagnosticsPanelHost = null
 // C2: TacticalOverlay. Only mounted when TACTICAL_ENABLED.
 let tacticalOverlay = null
 
@@ -505,6 +527,39 @@ function mountRoom(payload) {
     logEvent('error', 'commentator flag check failed: ' + err.message)
   })
 
+  // Delegated inference panel mounted below Chat. Same feature-flag pattern
+  // as CommentaryPanel. Uses curva.delegated bridge (electron/preload.js)
+  // which fans out to bare/delegatedProvider.js and the Hyperbee provider
+  // index. Panel is fully additive — nothing renders if the bridge is
+  // unavailable or the snapshot call times out.
+  if (delegatedPanelHost) { try { delegatedPanelHost.remove() } catch { /* noop */ } delegatedPanelHost = null }
+  isDelegatedPanelEnabled(curva).then((enabled) => {
+    if (myGeneration !== mountGeneration) return
+    if (delegatedPanelHost != null) return
+    if (!enabled) {
+      logEvent('info', 'delegated inference bridge unavailable; skipping panel mount')
+      return
+    }
+    if (state.currentRoom == null) return
+    delegatedPanelHost = document.createElement('div')
+    delegatedPanelHost.className = 'curva-app__delegated'
+    // Place below Chat so the provider grid does not compete with the primary
+    // conversation surface. Falls back to body append if chat is missing.
+    if (els.chat && els.chat.parentNode) {
+      els.chat.parentNode.appendChild(delegatedPanelHost)
+    } else {
+      document.body.appendChild(delegatedPanelHost)
+    }
+    delegatedPanel = safeMount('DelegatedInferencePanel', () => mountDelegatedInferencePanel({
+      container: delegatedPanelHost,
+      curva,
+      roomState: state.currentRoom
+    }), delegatedPanelHost)
+    logEvent('info', 'delegated inference panel mounted (isHost=' + (state.currentRoom?.isHost ? 'yes' : 'no') + ')')
+  }).catch((err) => {
+    logEvent('error', 'delegated panel gate check failed: ' + err.message)
+  })
+
   // Wave 14: Attendance ticket tools state mount. The chip + modal live in
   // RoomHeader; here we just kick off the initial config + list query so the
   // chip settles on the correct count within one round-trip of joining the
@@ -517,10 +572,96 @@ function mountRoom(payload) {
   if (curva?.attendance?.list) {
     curva.attendance.list({ limit: 200 }).catch(() => { /* noop */ })
   }
+
+  // Cup Final: VoiceCoachPanel mounted below Chat. Feature-flag gated. Same
+  // gating pattern as CommentaryPanel (Promise.race against a 3s timeout
+  // inside isVoiceCoachEnabled) so a slow SDK probe never blocks room:ready.
+  if (voiceCoachPanelHost) { try { voiceCoachPanelHost.remove() } catch { /* noop */ } voiceCoachPanelHost = null }
+  isVoiceCoachEnabled(curva).then((enabled) => {
+    if (myGeneration !== mountGeneration) return
+    if (voiceCoachPanelHost != null) return
+    if (!enabled) {
+      logEvent('info', 'voice coach disabled; skipping panel mount')
+      return
+    }
+    if (state.currentRoom == null) return
+    voiceCoachPanelHost = document.createElement('div')
+    voiceCoachPanelHost.className = 'curva-app__voice-coach'
+    if (els.chat && els.chat.parentNode) {
+      els.chat.parentNode.appendChild(voiceCoachPanelHost)
+    } else {
+      document.body.appendChild(voiceCoachPanelHost)
+    }
+    voiceCoachPanel = safeMount('VoiceCoachPanel', () => mountVoiceCoachPanel({
+      container: voiceCoachPanelHost,
+      curva,
+      roomState: state.currentRoom
+    }), voiceCoachPanelHost)
+    logEvent('info', 'voice coach panel mounted')
+  }).catch((err) => {
+    logEvent('error', 'voice coach flag check failed: ' + err.message)
+  })
+
+  // Cup Final: FrameAnalyzePanel mounted below the VideoPlayer. Gated on the
+  // presence of BOTH curva.vlm and curva.ocr bridges (preload wires them
+  // unconditionally, but the panel itself hides the individual button when a
+  // bridge is absent). Uses videoPlayer.captureFrame() to grab a PNG data URL
+  // and routes the caption/OCR text back into chat via the scoped
+  // curva.chat.sendSystem bridge.
+  if (frameAnalyzePanelHost) { try { frameAnalyzePanelHost.remove() } catch { /* noop */ } frameAnalyzePanelHost = null }
+  if (curva?.vlm && curva?.ocr && videoPlayer && typeof videoPlayer.captureFrame === 'function') {
+    frameAnalyzePanelHost = document.createElement('div')
+    frameAnalyzePanelHost.className = 'curva-app__frame-analyze'
+    if (els.video && els.video.parentNode) {
+      els.video.parentNode.insertBefore(frameAnalyzePanelHost, els.video.nextSibling)
+    } else {
+      document.body.appendChild(frameAnalyzePanelHost)
+    }
+    frameAnalyzePanel = safeMount('FrameAnalyzePanel', () => mountFrameAnalyzePanel({
+      container: frameAnalyzePanelHost,
+      curva,
+      getFrame: () => videoPlayer.captureFrame(),
+      onSystemMessage: (text, source) => {
+        // Route the caption / OCR summary back into chat as a system pill.
+        // Peers see them alongside their own screen-analysis output.
+        const type = source === 'vlm' ? 'system:vlm-caption' : 'system:ocr-read'
+        const matchTimeMs = (() => {
+          try { return videoPlayer && videoPlayer.video ? Math.floor(videoPlayer.video.currentTime * 1000) : 0 } catch { return 0 }
+        })()
+        curva.chat.sendSystem({ type, text: String(text || '').slice(0, 800), match_time_ms: matchTimeMs })
+          .catch((err) => logEvent('warn', 'chat.sendSystem (' + type + ') failed: ' + (err?.message || 'unknown')))
+      }
+    }), frameAnalyzePanelHost)
+    // Wire the video's paused-state callback so buttons enable only while paused.
+    if (videoPlayer && videoPlayer.video && frameAnalyzePanel && typeof frameAnalyzePanel.setPaused === 'function') {
+      // Seed initial state (VideoPlayer only fires onPausedChange on transition).
+      try { frameAnalyzePanel.setPaused(!!videoPlayer.video.paused) } catch { /* noop */ }
+      const onPause = () => { try { frameAnalyzePanel.setPaused(true) } catch { /* noop */ } }
+      const onPlay = () => { try { frameAnalyzePanel.setPaused(false) } catch { /* noop */ } }
+      videoPlayer.video.addEventListener('pause', onPause)
+      videoPlayer.video.addEventListener('play', onPlay)
+      // Store unbind closures on the panel host so destroyRoom can clean them up.
+      frameAnalyzePanelHost._curvaVideoUnbind = () => {
+        try { videoPlayer.video.removeEventListener('pause', onPause) } catch { /* noop */ }
+        try { videoPlayer.video.removeEventListener('play', onPlay) } catch { /* noop */ }
+      }
+    }
+    logEvent('info', 'frame analyze panel mounted')
+  }
 }
 
 function destroyRoom() {
   if (tacticalOverlay) { try { tacticalOverlay.destroy() } catch { /* noop */ } tacticalOverlay = null }
+  if (frameAnalyzePanelHost && typeof frameAnalyzePanelHost._curvaVideoUnbind === 'function') {
+    try { frameAnalyzePanelHost._curvaVideoUnbind() } catch { /* noop */ }
+    frameAnalyzePanelHost._curvaVideoUnbind = null
+  }
+  if (frameAnalyzePanel) { try { frameAnalyzePanel.destroy() } catch { /* noop */ } frameAnalyzePanel = null }
+  if (frameAnalyzePanelHost) { try { frameAnalyzePanelHost.remove() } catch { /* noop */ } frameAnalyzePanelHost = null }
+  if (voiceCoachPanel) { try { voiceCoachPanel.destroy() } catch { /* noop */ } voiceCoachPanel = null }
+  if (voiceCoachPanelHost) { try { voiceCoachPanelHost.remove() } catch { /* noop */ } voiceCoachPanelHost = null }
+  if (delegatedPanel) { try { delegatedPanel.destroy() } catch { /* noop */ } delegatedPanel = null }
+  if (delegatedPanelHost) { try { delegatedPanelHost.remove() } catch { /* noop */ } delegatedPanelHost = null }
   if (commentaryPanel) { try { commentaryPanel.destroy() } catch { /* noop */ } commentaryPanel = null }
   if (commentaryPanelHost) { try { commentaryPanelHost.remove() } catch { /* noop */ } commentaryPanelHost = null }
   if (predictionPanel) { try { predictionPanel.destroy() } catch { /* noop */ } predictionPanel = null }
@@ -573,6 +714,33 @@ if (diagMode) {
   diagPanel = mountDiagPanel(els.diag, curva)
   els.diag.hidden = false
 }
+
+// Cup Final: DiagnosticsPanel (Metrics + Logs). Feature-flag gated behind the
+// Bare worker's observability status; when CURVA_OBSERVABILITY_ENABLED != true
+// the status probe reports { enabled: false } and no DOM is mounted. Uses a
+// dedicated host element appended below the activity feed so it never fights
+// with the room / browser layout.
+isDiagnosticsEnabled(curva).then((enabled) => {
+  if (!enabled) {
+    logEvent('info', 'observability disabled; skipping diagnostics panel mount')
+    return
+  }
+  if (diagnosticsPanelHost) return
+  diagnosticsPanelHost = document.createElement('div')
+  diagnosticsPanelHost.className = 'curva-app__diagnostics'
+  if (els.feed && els.feed.parentNode) {
+    els.feed.parentNode.appendChild(diagnosticsPanelHost)
+  } else {
+    document.body.appendChild(diagnosticsPanelHost)
+  }
+  diagnosticsPanel = safeMount('DiagnosticsPanel', () => mountDiagnosticsPanel({
+    container: diagnosticsPanelHost,
+    curva
+  }), diagnosticsPanelHost)
+  logEvent('info', 'diagnostics panel mounted')
+}).catch((err) => {
+  logEvent('warn', 'diagnostics flag check failed: ' + (err?.message || 'unknown'))
+})
 
 // Task 9: deep-link auto-join. Electron main parses `curva://room/<slug>`
 // and forwards to the renderer via `curva:deeplink:join`. We call

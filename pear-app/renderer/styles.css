@@ -5722,3 +5722,538 @@ h2::after {
   color: var(--curva-fg-muted) !important;
   margin-right: 8px !important;
 }
+
+/* -------------------------------------------------------------------------
+ * Delegated Inference Panel + streaming commentator badges.
+ * Additive styles only, no overrides to existing panels.
+ * ------------------------------------------------------------------------- */
+
+.curva-app__delegated {
+  margin-top: 16px;
+}
+
+.curva-delegated {
+  background: var(--curva-bg-elevated, #12131a);
+  border: 1px solid var(--curva-border, #23242c);
+  border-radius: 10px;
+  padding: 16px;
+  font-family: 'Urbanist', system-ui, sans-serif;
+  color: var(--curva-fg, #f5f5f0);
+}
+
+.curva-delegated__header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.curva-delegated__title {
+  font-weight: 700;
+  font-size: 13px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.curva-delegated__chip {
+  padding: 3px 10px;
+  border-radius: 12px;
+  font-size: 11px;
+  background: var(--curva-bg-input, #1a1b23);
+  color: var(--curva-fg-muted, #9ea1ac);
+  border: 1px solid var(--curva-border, #23242c);
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+}
+
+.curva-delegated__chip[data-state="started"],
+.curva-delegated__chip[data-state="published"] {
+  background: rgba(34, 197, 94, 0.12);
+  color: #22c55e;
+  border-color: rgba(34, 197, 94, 0.3);
+}
+
+.curva-delegated__firewall {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+  padding: 10px;
+  background: var(--curva-bg-input, #1a1b23);
+  border-radius: 8px;
+}
+
+.curva-delegated__mode-label,
+.curva-delegated__keys-label {
+  font-size: 12px;
+  color: var(--curva-fg-muted, #9ea1ac);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.curva-delegated__mode,
+.curva-delegated__keys {
+  padding: 6px 10px;
+  border: 1px solid var(--curva-border, #23242c);
+  background: var(--curva-bg-elevated, #12131a);
+  color: var(--curva-fg, #f5f5f0);
+  border-radius: 6px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 12px;
+}
+
+.curva-delegated__mode:disabled,
+.curva-delegated__keys:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.curva-delegated__keys {
+  min-width: 280px;
+}
+
+.curva-delegated__save {
+  padding: 6px 14px;
+  border: 1px solid var(--curva-accent, #c8102e);
+  background: var(--curva-accent, #c8102e);
+  color: #fff;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.curva-delegated__save:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.curva-delegated__grid {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.curva-delegated__row {
+  display: grid;
+  grid-template-columns: 1.5fr 2fr 1fr auto auto auto;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 10px;
+  background: var(--curva-bg-input, #1a1b23);
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.curva-delegated__pubkey {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  color: var(--curva-fg, #f5f5f0);
+}
+
+.curva-delegated__models {
+  color: var(--curva-fg-muted, #9ea1ac);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.curva-delegated__latency {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  color: var(--curva-fg-muted, #9ea1ac);
+}
+
+.curva-delegated__test,
+.curva-delegated__allow,
+.curva-delegated__block {
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 11px;
+  cursor: pointer;
+  border: 1px solid var(--curva-border, #23242c);
+  background: var(--curva-bg-elevated, #12131a);
+  color: var(--curva-fg, #f5f5f0);
+}
+
+.curva-delegated__test:hover { border-color: var(--curva-accent, #c8102e); }
+.curva-delegated__allow { border-color: rgba(34, 197, 94, 0.4); color: #22c55e; }
+.curva-delegated__block { border-color: rgba(239, 68, 68, 0.4); color: #ef4444; }
+
+.curva-delegated__empty {
+  padding: 20px;
+  text-align: center;
+  color: var(--curva-fg-muted, #9ea1ac);
+  font-size: 12px;
+  font-style: italic;
+}
+
+/* Streaming inference badges on the commentary panel */
+.curva-commentary__tps-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  background: rgba(34, 197, 94, 0.12);
+  color: #22c55e;
+  border: 1px solid rgba(34, 197, 94, 0.3);
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
+.curva-commentary__thinking-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-family: 'Urbanist', system-ui, sans-serif;
+  background: rgba(168, 85, 247, 0.12);
+  color: #a855f7;
+  border: 1px solid rgba(168, 85, 247, 0.3);
+  margin-left: 6px;
+  vertical-align: middle;
+  animation: curva-commentary-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes curva-commentary-pulse {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 1; }
+}
+
+/* ================================================================
+   Cup Final: Voice Coach + Frame Analyze + Diagnostics panels
+   Additive — matches the .curva-delegated__* / .curva-commentary__*
+   token vocabulary. No design tokens are re-defined here.
+   ================================================================ */
+
+.curva-voice-coach {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+  background: var(--curva-panel);
+  border: 1px solid var(--curva-border);
+  border-radius: 8px;
+  color: var(--curva-text);
+  font-family: var(--curva-sans);
+}
+.curva-voice-coach__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.curva-voice-coach__title {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--curva-text);
+  letter-spacing: 0.02em;
+}
+.curva-voice-coach__chip {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--curva-muted);
+  border: 1px solid var(--curva-border);
+  text-transform: lowercase;
+}
+.curva-voice-coach__chip.is-idle { color: var(--curva-muted); }
+.curva-voice-coach__chip.is-listening {
+  color: var(--curva-good);
+  border-color: rgba(74, 222, 128, 0.35);
+  background: rgba(74, 222, 128, 0.08);
+}
+.curva-voice-coach__chip.is-error {
+  color: var(--curva-bad);
+  border-color: rgba(239, 68, 68, 0.35);
+  background: rgba(239, 68, 68, 0.08);
+}
+.curva-voice-coach__ptt {
+  padding: 10px 14px;
+  font-family: var(--curva-sans);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--curva-text);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--curva-border);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.curva-voice-coach__ptt:hover { border-color: var(--curva-accent); }
+.curva-voice-coach__ptt:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.curva-voice-coach__ptt.is-active,
+.curva-voice-coach__ptt.is-speaking {
+  background: var(--curva-accent-dim);
+  border-color: var(--curva-accent);
+  color: var(--curva-text);
+}
+.curva-voice-coach__transcript {
+  font-size: 12px;
+  color: var(--curva-muted);
+  min-height: 18px;
+  line-height: 1.4;
+  font-style: italic;
+  overflow-wrap: anywhere;
+}
+.curva-voice-coach__answer {
+  font-size: 13px;
+  color: var(--curva-text);
+  min-height: 18px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.curva-voice-coach__meta,
+.curva-voice-coach__hint {
+  font-size: 11px;
+  color: var(--curva-muted);
+}
+
+.curva-frame-analyze {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+  margin-top: var(--sp-2);
+  background: var(--curva-panel);
+  border: 1px solid var(--curva-border);
+  border-radius: 8px;
+  color: var(--curva-text);
+  font-family: var(--curva-sans);
+}
+.curva-frame-analyze__header {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--curva-text);
+}
+.curva-frame-analyze__hint {
+  font-size: 11px;
+  color: var(--curva-muted);
+}
+.curva-frame-analyze__buttons {
+  display: flex;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+.curva-frame-analyze__btn {
+  padding: 6px 12px;
+  font-family: var(--curva-sans);
+  font-size: 12px;
+  color: var(--curva-text);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--curva-border);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+.curva-frame-analyze__btn:hover:not(:disabled) { border-color: var(--curva-accent); }
+.curva-frame-analyze__btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.curva-frame-analyze__status {
+  font-size: 11px;
+  color: var(--curva-muted);
+}
+.curva-frame-analyze__caption {
+  font-size: 12px;
+  color: var(--curva-text);
+  padding: var(--sp-2);
+  background: rgba(255, 255, 255, 0.03);
+  border-left: 2px solid var(--curva-accent);
+  border-radius: 4px;
+  overflow-wrap: anywhere;
+}
+.curva-frame-analyze__blocks {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.curva-frame-analyze__block {
+  font-size: 12px;
+  padding: 4px 8px;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 4px;
+  color: var(--curva-text);
+  overflow-wrap: anywhere;
+}
+.curva-frame-analyze__block-conf {
+  color: var(--curva-muted);
+  font-size: 11px;
+  font-family: var(--curva-mono);
+}
+
+.curva-diagnostics {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+  margin-top: var(--sp-3);
+  background: var(--curva-panel);
+  border: 1px solid var(--curva-border);
+  border-radius: 8px;
+  color: var(--curva-text);
+  font-family: var(--curva-sans);
+  max-height: 400px;
+  overflow: hidden;
+}
+.curva-diagnostics-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--sp-2);
+}
+.curva-diagnostics-header h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--curva-text);
+}
+.curva-diagnostics-status {
+  font-size: 11px;
+  color: var(--curva-muted);
+  font-family: var(--curva-mono);
+}
+.curva-diagnostics-tabs {
+  display: flex;
+  gap: var(--sp-1);
+  border-bottom: 1px solid var(--curva-border);
+  padding-bottom: var(--sp-1);
+}
+.curva-diagnostics-tab {
+  padding: 4px 10px;
+  font-family: var(--curva-sans);
+  font-size: 12px;
+  color: var(--curva-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.curva-diagnostics-tab:hover { color: var(--curva-text); }
+.curva-diagnostics-tab.is-active {
+  color: var(--curva-text);
+  border-color: var(--curva-border);
+  background: rgba(255, 255, 255, 0.03);
+}
+.curva-diagnostics-panel {
+  overflow-y: auto;
+  max-height: 300px;
+}
+.curva-diagnostics-toolbar {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: center;
+  padding-bottom: var(--sp-2);
+}
+.curva-diagnostics-toolbar button {
+  padding: 4px 10px;
+  font-family: var(--curva-sans);
+  font-size: 11px;
+  color: var(--curva-text);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--curva-border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.curva-diagnostics-source {
+  font-size: 11px;
+  color: var(--curva-muted);
+  font-family: var(--curva-mono);
+}
+.curva-diagnostics-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+  font-family: var(--curva-mono);
+}
+.curva-diagnostics-table th,
+.curva-diagnostics-table td {
+  text-align: left;
+  padding: 3px 6px;
+  border-bottom: 1px solid var(--curva-border);
+  color: var(--curva-text);
+  overflow-wrap: anywhere;
+}
+.curva-diagnostics-table th {
+  color: var(--curva-muted);
+  font-weight: 500;
+  position: sticky;
+  top: 0;
+  background: var(--curva-panel);
+}
+.curva-diagnostics-metrics { }
+.curva-diagnostics-logs { }
+.curva-diagnostics-loglist {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-family: var(--curva-mono);
+  font-size: 11px;
+}
+.curva-diagnostics-loglist li {
+  padding: 3px 6px;
+  background: rgba(255, 255, 255, 0.02);
+  border-radius: 3px;
+  display: flex;
+  gap: var(--sp-2);
+  color: var(--curva-text);
+  overflow-wrap: anywhere;
+}
+.curva-diagnostics-log-line,
+.curva-diagnostics-log-info { }
+.curva-diagnostics-log-warn { color: var(--curva-warn); }
+.curva-diagnostics-log-error { color: var(--curva-bad); }
+.curva-log-ts { color: var(--curva-muted); }
+.curva-log-level {
+  color: var(--curva-muted);
+  text-transform: uppercase;
+}
+.curva-log-msg { color: var(--curva-text); }
+.curva-diagnostics-empty {
+  font-size: 11px;
+  color: var(--curva-muted);
+  padding: var(--sp-2);
+  font-style: italic;
+}
+
+/* -------------------------------------------------------------------------
+ * Cup Final: system:coach / system:vlm-caption / system:ocr-read pills.
+ * Match the commentary pill discipline (italic + left border) but each type
+ * gets its own accent color so a skimming judge can tell the flow at a
+ * glance: coach = purple (voice), vlm = amber (vision), ocr = cyan (text).
+ * All content set via textContent in Chat.js (LLM/VLM/OCR outputs untrusted).
+ * ------------------------------------------------------------------------- */
+
+.curva-chat__msg--coach {
+  background: rgba(168, 85, 247, 0.05);
+  border-left: 2px solid #a855f7;
+  padding-left: 14px;
+  font-style: italic;
+}
+
+.curva-chat__msg--vlm {
+  background: rgba(245, 158, 11, 0.05);
+  border-left: 2px solid #f59e0b;
+  padding-left: 14px;
+}
+
+.curva-chat__msg--ocr {
+  background: rgba(6, 182, 212, 0.05);
+  border-left: 2px solid #06b6d4;
+  padding-left: 14px;
+  font-family: var(--curva-mono, 'JetBrains Mono', ui-monospace, monospace);
+  font-size: 12px;
+}

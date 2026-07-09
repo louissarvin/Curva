@@ -25,6 +25,11 @@ const { attachTacticalChannel } = require('./tacticalChannel.js')
 const { verifyPeerProof: keetVerifyPeerProof } = require('./keetIdentity.js')
 const { topicForSlug } = require('./topics.js')
 const { createDemoTimeline, timelineFlagEnabled } = require('./demoTimeline.js')
+// Wave 16: hypertrace observability. See bare/observability.js header memo
+// for docs verification. No-op unless CURVA_OBSERVABILITY_ENABLED=true.
+const { installTracer: _installRoomTracer, NOOP_TRACER: _ROOM_NOOP_TRACER } = (() => {
+  try { return require('./observability.js') } catch { return { installTracer: () => ({ trace () {} }), NOOP_TRACER: { trace () {} } } }
+})()
 
 // T3 (Final Fix Wave): peer-invitation signing seed is a per-room, per-peer
 // value persisted in roomState under this key. Reading from
@@ -137,6 +142,10 @@ function spectatorTierEnabled() {
 async function openRoom(store, opts) {
   if (!store) throw new TypeError('store is required')
   if (!opts || typeof opts !== 'object') throw new TypeError('opts required')
+  // Room-scoped tracer. Constructed against a stable ctx so the Prometheus
+  // exporter reports `object_classname="Room"` (not the Anon module scope).
+  class Room {}
+  const tracer = _installRoomTracer(new Room(), { name: 'Room' }) || _ROOM_NOOP_TRACER
   const {
     slug,
     isHost,
@@ -1279,6 +1288,10 @@ async function openRoom(store, opts) {
     return demoTimeline.status()
   }
 
+  // Wave 16: record a single boot-time trace so `trace_counter{object_classname="Room"}`
+  // is always visible in Prometheus for the demo panel, even before any peer joins.
+  try { tracer.trace('opened', { host: isHost ? 'host' : 'peer' }) } catch { /* trace() is best-effort */ }
+
   return {
     slug,
     isHost,
@@ -1331,7 +1344,11 @@ async function openRoom(store, opts) {
     triggerDemoTimeline,
     abortDemoTimeline,
     demoTimelineStatus,
-    close
+    close,
+    // Wave 16 observability seam. No-op when the flag is off. Exposed so
+    // workers/main.js can .trace('room:join', {...}) at IPC boundaries
+    // without importing hypertrace itself.
+    tracer
   }
 }
 

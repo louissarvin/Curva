@@ -931,6 +931,11 @@ function isValidMessage(v) {
   // Wave 13A shape validator. Kept adjacent to the pool-lifecycle validators
   // so the authorship-gate + shape-check pair is co-located.
   if (v.type === 'system:commentary') return isValidSystemCommentary(v)
+  // Wave 15/CupFinal: on-device coach + VLM + OCR system pills. Peer-writer
+  // allowed (each peer authors from its own local model output).
+  if (v.type === 'system:coach') return isValidSystemCoach(v)
+  if (v.type === 'system:vlm-caption') return isValidSystemVlmCaption(v)
+  if (v.type === 'system:ocr-read') return isValidSystemOcrRead(v)
   // Wave 13B: `/bot` roomBot query + reply. Peer-writer allowed for both
   // (any peer can ask the bot; any peer that runs the bot can reply). The
   // reducer applies a host-only gate on `system:bot-reply` when the host is
@@ -1176,6 +1181,58 @@ function isValidSystemCommentary(v) {
   return true
 }
 
+// Wave 15/CupFinal: on-device coach + VLM + OCR system pills.
+//
+// system:coach carries the voice-coach LLM output (text) plus an optional
+// `kind` marker ('voice-out' | 'voice-in') and an optional `tool_calls`
+// mirror of the roomBot shape. All fields are peer-authored — the room does
+// NOT gate authorship since these represent the LOCAL peer's own model output
+// (no host trust required). Text cap: 800 chars (matches voiceCoach MAX_REPLY_CHARS).
+function isValidSystemCoach (v) {
+  if (!v || typeof v !== 'object') return false
+  if (v.type !== 'system:coach') return false
+  if (typeof v.by_peer !== 'string') return false
+  if (typeof v.wall_clock_ms !== 'number' || v.wall_clock_ms < 0) return false
+  if (typeof v.match_time_ms !== 'number' || v.match_time_ms < 0) return false
+  if (typeof v.text !== 'string' || v.text.length === 0 || v.text.length > 800) return false
+  if (v.kind !== undefined && (typeof v.kind !== 'string' || v.kind.length > 32)) return false
+  if (v.stop_reason !== undefined && (typeof v.stop_reason !== 'string' || v.stop_reason.length > 32)) return false
+  if (v.tool_calls !== undefined) {
+    if (!Array.isArray(v.tool_calls) || v.tool_calls.length > 8) return false
+    for (const t of v.tool_calls) {
+      if (!t || typeof t !== 'object') return false
+      if (typeof t.name !== 'string' || t.name.length === 0 || t.name.length > 64) return false
+      if (typeof t.ok !== 'boolean') return false
+      if (t.error !== undefined && (typeof t.error !== 'string' || t.error.length > 96)) return false
+    }
+  }
+  return true
+}
+
+// system:vlm-caption carries a SmolVLM2 caption (already sanitized by
+// bare/vlmCaption.js sanitizeCaption). Text cap: 800 chars.
+function isValidSystemVlmCaption (v) {
+  if (!v || typeof v !== 'object') return false
+  if (v.type !== 'system:vlm-caption') return false
+  if (typeof v.by_peer !== 'string') return false
+  if (typeof v.wall_clock_ms !== 'number' || v.wall_clock_ms < 0) return false
+  if (typeof v.match_time_ms !== 'number' || v.match_time_ms < 0) return false
+  if (typeof v.text !== 'string' || v.text.length === 0 || v.text.length > 800) return false
+  return true
+}
+
+// system:ocr-read carries the OCR block summary (bare/ocr.js sanitizeText +
+// FrameAnalyzePanel join). Text cap: 500 chars.
+function isValidSystemOcrRead (v) {
+  if (!v || typeof v !== 'object') return false
+  if (v.type !== 'system:ocr-read') return false
+  if (typeof v.by_peer !== 'string') return false
+  if (typeof v.wall_clock_ms !== 'number' || v.wall_clock_ms < 0) return false
+  if (typeof v.match_time_ms !== 'number' || v.match_time_ms < 0) return false
+  if (typeof v.text !== 'string' || v.text.length === 0 || v.text.length > 500) return false
+  return true
+}
+
 // Wave 13B: shape validator for `system:bot-query`. Peer-writer allowed. The
 // text is capped at 500 chars (roomBot.answer() also trims to 500 before
 // broadcast) so a malicious peer cannot smuggle a giant prompt through the
@@ -1273,6 +1330,10 @@ module.exports = {
     checkHostSystemAuthorship,
     // Wave 13A exports for brittle tests
     isValidSystemCommentary,
+    // Wave 15/CupFinal exports for brittle tests
+    isValidSystemCoach,
+    isValidSystemVlmCaption,
+    isValidSystemOcrRead,
     // Wave 13B exports for brittle tests
     isValidSystemBotQuery,
     isValidSystemBotReply,

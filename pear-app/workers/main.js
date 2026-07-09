@@ -696,11 +696,11 @@ async function ensureRoomBot () {
     }
   } catch (_) { sharedLlmHandle = null }
 
-  // Semifinal QVAC depth: wire an in-process MCP tool client so the bot can
-  // call Curva-native tools (getMatchState, getRoomStats, getRecentTips,
-  // translateText) alongside the backend companion server. Also wire a RAG
-  // instance so completion() answers are grounded on the room's glossary +
-  // chat history.
+  // Wire an in-process MCP tool client so the bot can call Curva-native
+  // tools (getMatchState, getRoomStats, getRecentTips, translateText)
+  // alongside the backend companion server. Also wire a RAG instance so
+  // completion() answers are grounded on the room's glossary + chat
+  // history.
   const roomMcp = ensureMcpTools()
   const rag = await ensureRag()
   // Fire-and-forget: ingest the football glossary once per room boot. The
@@ -753,8 +753,8 @@ async function ensureRoomBot () {
 //
 // These three modules are lazy-init: they are only constructed when their
 // first IPC command arrives (or when roomBot needs them). This keeps the room
-// open cost the same for users who don't use the semifinal features while
-// making the code path discoverable and testable for judges.
+// open cost the same for users who don't touch the deep QVAC surface while
+// keeping the modules discoverable and testable in isolation.
 const { createRag, glossaryToDocuments } = require('../bare/rag.js')
 const { createMcpToolsClient } = require('../bare/mcpTools.js')
 const { createDelegatedRegistry } = require('../bare/delegatedProvider.js')
@@ -849,8 +849,8 @@ function pushRecentChat(msg) {
   })
   while (recentChatRing.length > 20) recentChatRing.shift()
 
-  // Semifinal QVAC depth: opportunistically ingest each new chat line into
-  // the RAG "chat" workspace so subsequent /bot queries can reference it.
+  // Opportunistically ingest each new chat line into the RAG "chat"
+  // workspace so subsequent /bot queries can reference it.
   // Best-effort — do NOT block or throw. The RAG module already caps the
   // per-room workspace document count.
   const rawText = typeof msg.text === 'string' ? msg.text.trim() : ''
@@ -939,6 +939,133 @@ log('info', 'demo mode flags', {
   predictionsAutoOpen: predictionsAutoOpenEnabled
 })
 // ===== END DEMO MODE =====
+
+// ===== OBSERVABILITY (Cup Final) =====
+// Hypertrace + hypertrace-prometheus exporter. Feature-flag off by default;
+// bare/observability.js returns no-op handles when CURVA_OBSERVABILITY_ENABLED
+// != 'true' or the hypertrace packages are not installed. Also bridges the
+// @qvac/sdk server-log stream so DiagnosticsPanel can render a unified tail.
+const { startPrometheus, subscribeToServerLogs } = require('../bare/observability.js')
+// Security audit fix (C1): startPrometheus is now async because it binds its
+// own loopback-only HTTP server. Hold a Promise-typed placeholder synchronously
+// so downstream code can `await promHandleReady` before touching .stop/.port/
+// .metrics. When observability is disabled, resolves to a no-op handle in
+// under 1 ms so this never blocks room boot.
+let promHandle = { started: false, stopped: false, port: null, reason: 'starting', stop: async () => {} }
+const promHandleReady = (async () => {
+  try {
+    promHandle = await startPrometheus({ logger: {
+      info: (msg, extra) => log('info', 'observability: ' + msg, extra),
+      warn: (msg, extra) => log('warn', 'observability: ' + msg, extra),
+      error: (msg, extra) => log('error', 'observability: ' + msg, extra)
+    } })
+  } catch (err) {
+    log('warn', 'observability start threw', { message: err && err.message })
+    promHandle = { started: false, stopped: true, port: null, reason: err?.message || 'threw', stop: async () => {} }
+  }
+  log('info', 'observability boot', {
+    started: !!promHandle.started,
+    port: promHandle.port || null,
+    reason: promHandle.reason || null
+  })
+  return promHandle
+})()
+// SDK server-log bridge: forwards @qvac/sdk internal logs to renderer via
+// `diagnostics:log` so DiagnosticsPanel's Logs tab can tail them. Lazy import
+// so a missing SDK is a silent no-op.
+let observabilityLogUnsub = () => {}
+try {
+  import('@qvac/sdk').then((mod) => {
+    try {
+      observabilityLogUnsub = subscribeToServerLogs(mod || {}, (entry) => {
+        try { emit('diagnostics:log', entry) } catch { /* noop */ }
+      })
+    } catch (err) {
+      log('warn', 'observability log bridge attach failed', { message: err && err.message })
+    }
+  }).catch(() => { /* SDK absent — no logs to bridge */ })
+} catch { /* noop */ }
+// ===== END OBSERVABILITY =====
+
+// ===== VLM + OCR (Cup Final) =====
+// One SmolVLM2 + one OCR_LATIN instance per Bare worker process. Model load is
+// deferred until the first vlm:caption / ocr:read IPC arrives.
+const { createVlmCaption } = require('../bare/vlmCaption.js')
+const { createOcr } = require('../bare/ocr.js')
+let vlmCaption = null
+let ocrHandle = null
+function ensureVlm () {
+  if (vlmCaption) return vlmCaption
+  vlmCaption = createVlmCaption({
+    tmpDir: path.join(config.dir, 'curva', 'tmp'),
+    emit: (ev, p) => emit(ev, p),
+    log: (msg, extra) => log('info', 'vlm: ' + msg, extra)
+  })
+  return vlmCaption
+}
+function ensureOcr () {
+  if (ocrHandle) return ocrHandle
+  ocrHandle = createOcr({
+    emit: (ev, p) => emit(ev, p),
+    log: (msg, extra) => log('info', 'ocr: ' + msg, extra)
+  })
+  return ocrHandle
+}
+// ===== END VLM + OCR =====
+
+// ===== VOICE COACH (Cup Final) =====
+// Per-room lifecycle: opened lazily on first voice IPC and torn down in
+// closeCurrentRoom. Requires a sharedLlmHandle from commentator; when the
+// commentator flag is off (or the model has not been loaded yet), the coach
+// stays null and status() reports { hasSdk, hasLlm: false }.
+const { createVoiceCoach } = require('../bare/voiceCoach.js')
+let voiceCoach = null
+// Security audit fix (C2): ensureVoiceCoach was async + unguarded, so two
+// concurrent voice:start-turn IPC calls could both see voiceCoach == null,
+// both `await import('@qvac/sdk')` + ensureRag(), both construct — last-write-
+// wins would orphan the first coach's STT session, listeners, and
+// pipelineRunOnce Set. Fix: cache the in-flight promise. Second racer awaits
+// the same result. Cleared in finally so a failed construction can be retried.
+let voiceCoachInflight = null
+async function ensureVoiceCoach () {
+  if (voiceCoach) return voiceCoach
+  if (voiceCoachInflight) return voiceCoachInflight
+  if (!room || !room.chat) return null
+  voiceCoachInflight = (async () => {
+    let sharedLlmHandle = null
+    try {
+      if (commentator && typeof commentator.getSharedLlmHandle === 'function') {
+        sharedLlmHandle = commentator.getSharedLlmHandle()
+      }
+    } catch { sharedLlmHandle = null }
+    if (!sharedLlmHandle) return null
+    let sdk = null
+    try { sdk = await import('@qvac/sdk') } catch { sdk = null }
+    const rag = await ensureRag().catch(() => null)
+    const mcpBundle = ensureMcpTools()
+    try {
+      voiceCoach = createVoiceCoach({
+        sdk,
+        sharedLlmHandle,
+        chat: room.chat,
+        mcpClient: null,
+        roomMcpClient: (mcpBundle && mcpBundle.client) || null,
+        ragHandle: rag || null,
+        announcer,
+        roomSlug: room.slug,
+        lang: 'en',
+        emit: (ev, p) => emit(ev, p),
+        log
+      })
+    } catch (err) {
+      log('warn', 'voiceCoach construct failed', { message: err && err.message })
+      voiceCoach = null
+    }
+    return voiceCoach
+  })().finally(() => { voiceCoachInflight = null })
+  return voiceCoachInflight
+}
+// ===== END VOICE COACH =====
 
 // ===== BLIND PEERING (Wave 15) =====
 // Docs: https://docs.pears.com/how-to/blind-peering/add-blind-peering-to-a-chat-app/
@@ -2567,6 +2694,13 @@ async function closeCurrentRoom() {
     try { await roomBot.close() } catch { /* noop */ }
     roomBot = null
   }
+  // Cup Final: voiceCoach is per-room (shares chat.send closure with the
+  // active room autobase). Drop it here so the next openRoomFor rebinds
+  // against the new room state.
+  if (voiceCoach) {
+    try { await voiceCoach.close() } catch { /* noop */ }
+    voiceCoach = null
+  }
   // F1: clear the dock badge whenever a room closes so the icon doesn't hold
   // a stale score after the user leaves the match.
   emit('badge:clear', {})
@@ -4015,6 +4149,196 @@ async function dispatchCommand(msg) {
       }
       // ===== END SEMIFINAL QVAC DEPTH =====
 
+      // ===== VOICE COACH (Cup Final) =====
+      case 'voice:start-turn': {
+        if (!room) throw new RoomNotJoinedError()
+        const coach = await ensureVoiceCoach()
+        if (!coach) {
+          emit('voice:error', { code: 'COACH_NOT_READY', message: 'shared LLM handle unavailable (commentator not loaded?)', requestId: id })
+          emit('ack', { id, cmd })
+          return
+        }
+        try {
+          const res = await coach.startTurn()
+          emit('ack', { id, cmd, payload: res })
+        } catch (err) {
+          emit('voice:error', { code: err?.code || 'START_FAILED', message: err?.message, requestId: id })
+          emit('ack', { id, cmd })
+        }
+        return
+      }
+      case 'voice:push-audio': {
+        const coach = voiceCoach
+        if (!coach) {
+          emit('ack', { id, cmd, payload: { ok: false, code: 'NO_TURN' } })
+          return
+        }
+        // Decode base64 audio from the wire. The renderer packs Float32/Int16
+        // as base64 in `payload.pcm` (see preload).
+        const b64 = typeof payload?.pcm === 'string' ? payload.pcm : ''
+        const bytes = b64 ? decodeBase64(b64) : null
+        if (!bytes) {
+          emit('ack', { id, cmd, payload: { ok: false, code: 'BAD_AUDIO' } })
+          return
+        }
+        // b4a.from(str,'base64') returns a Bare Buffer (Uint8Array subclass);
+        // voiceCoach.coerceAudio accepts Uint8Array directly.
+        const res = await coach.pushAudio(bytes)
+        emit('ack', { id, cmd, payload: res })
+        return
+      }
+      case 'voice:end-turn': {
+        const coach = voiceCoach
+        if (!coach) {
+          emit('ack', { id, cmd, payload: { ok: false, code: 'NO_TURN' } })
+          return
+        }
+        try {
+          const res = await coach.endTurn(payload || {})
+          emit('ack', { id, cmd, payload: res })
+        } catch (err) {
+          emit('voice:error', { code: err?.code || 'END_FAILED', message: err?.message, requestId: id })
+          emit('ack', { id, cmd })
+        }
+        return
+      }
+      case 'voice:status': {
+        // Report status even when not-yet-constructed so the renderer's
+        // feature-flag check can gate the panel mount without side effects.
+        if (!voiceCoach) {
+          const hasSdk = true // best-effort — resolved lazily at ensureVoiceCoach()
+          const hasLlm = !!(commentator && typeof commentator.getSharedLlmHandle === 'function' && commentator.getSharedLlmHandle())
+          emit('voice:status', {
+            hasSdk,
+            hasLlm,
+            hasAnnouncer: !!announcer,
+            hasRag: !!ragInstance,
+            hasMcp: !!mcpToolsInstance,
+            turnActive: false,
+            lang: 'en',
+            lastError: null,
+            enabled: hasLlm,
+            reason: hasLlm ? null : 'shared-llm-unavailable',
+            requestId: id
+          })
+        } else {
+          const st = voiceCoach.status()
+          emit('voice:status', { ...st, enabled: !!st.hasSdk && !!st.hasLlm, requestId: id })
+        }
+        emit('ack', { id, cmd })
+        return
+      }
+      // ===== END VOICE COACH =====
+
+      // ===== VLM CAPTION (Cup Final) =====
+      case 'vlm:caption': {
+        const buf = decodeImagePayload(payload?.image)
+        if (!buf) {
+          emit('vlm:result', { ok: false, code: 'BAD_IMAGE_INPUT', reason: 'image required', requestId: id })
+          emit('ack', { id, cmd })
+          return
+        }
+        const opts = (payload && typeof payload.opts === 'object' && payload.opts) || {}
+        const v = ensureVlm()
+        const res = await v.caption(buf, opts)
+        emit('vlm:result', { ...res, requestId: id })
+        emit('ack', { id, cmd, payload: res })
+        return
+      }
+      // ===== END VLM CAPTION =====
+
+      // ===== OCR (Cup Final) =====
+      case 'ocr:read': {
+        const buf = decodeImagePayload(payload?.image)
+        if (!buf) {
+          emit('ocr:result', { ok: false, code: 'BAD_IMAGE_INPUT', reason: 'image required', requestId: id })
+          emit('ack', { id, cmd })
+          return
+        }
+        const opts = (payload && typeof payload.opts === 'object' && payload.opts) || {}
+        const o = ensureOcr()
+        const res = await o.read(buf, opts)
+        emit('ocr:result', { ...res, requestId: id })
+        emit('ack', { id, cmd, payload: res })
+        return
+      }
+      // ===== END OCR =====
+
+      // ===== DIAGNOSTICS (Cup Final) =====
+      case 'diagnostics:status': {
+        emit('diagnostics:status', {
+          observabilityEnabled: !!promHandle.started,
+          promStarted: !!promHandle.started,
+          port: promHandle.port || null,
+          enabled: !!promHandle.started,
+          reason: promHandle.reason || null,
+          requestId: id
+        })
+        emit('ack', { id, cmd })
+        return
+      }
+      case 'diagnostics:metrics': {
+        const port = promHandle && promHandle.port
+        if (!port) {
+          emit('diagnostics:metrics', { text: null, requestId: id })
+          emit('ack', { id, cmd })
+          return
+        }
+        try {
+          const res = await fetch('http://localhost:' + port + '/metrics', {
+            headers: { Accept: 'text/plain' }
+          })
+          if (!res || !res.ok) {
+            emit('diagnostics:metrics', { text: null, requestId: id })
+          } else {
+            const text = await res.text()
+            emit('diagnostics:metrics', { text, requestId: id })
+          }
+        } catch (err) {
+          emit('diagnostics:metrics', { text: null, error: err && err.message, requestId: id })
+        }
+        emit('ack', { id, cmd })
+        return
+      }
+      // ===== END DIAGNOSTICS =====
+
+      // ===== SCOPED CHAT SYSTEM SEND (Cup Final) =====
+      // Allowlisted system message pathway for coach + VLM + OCR pills that
+      // originate from the LOCAL peer's own on-device model output. Every
+      // other system type must continue to be authored by the room-internal
+      // subsystem (commentator, tip service, etc.) so we don't accidentally
+      // widen the write surface.
+      case 'chat:send-system': {
+        if (!room?.chat) throw new RoomNotJoinedError()
+        const type = payload?.type
+        const ALLOWED = new Set(['system:coach', 'system:vlm-caption', 'system:ocr-read'])
+        if (typeof type !== 'string' || !ALLOWED.has(type)) {
+          throw new RangeError('system:send: type not in allowlist')
+        }
+        const text = typeof payload?.text === 'string' ? payload.text : ''
+        if (text.length === 0) throw new RangeError('text required')
+        const matchTimeMs = Number(payload?.match_time_ms ?? payload?.matchTimeMs ?? 0)
+        const msg = {
+          type,
+          text,
+          match_time_ms: Math.max(0, Math.floor(matchTimeMs))
+        }
+        if (type === 'system:coach') {
+          if (typeof payload?.kind === 'string') msg.kind = payload.kind.slice(0, 32)
+          if (typeof payload?.stop_reason === 'string') msg.stop_reason = payload.stop_reason.slice(0, 32)
+          if (Array.isArray(payload?.tool_calls)) msg.tool_calls = payload.tool_calls.slice(0, 8)
+        }
+        try {
+          const stored = await room.chat.sendSystem(msg)
+          emit('ack', { id, cmd, payload: { key: stored.wall_clock_ms } })
+        } catch (err) {
+          emit('error', { cmd, id, code: err?.code || 'CHAT_SEND_SYSTEM_FAILED', message: err?.message })
+          emit('ack', { id, cmd })
+        }
+        return
+      }
+      // ===== END SCOPED CHAT SYSTEM SEND =====
+
       default:
         log('info', 'ipc unknown cmd (ignored)', { cmd, id })
     }
@@ -4050,6 +4374,23 @@ function decodeBase64(str) {
   } catch { return null }
 }
 
+// Cup Final helper: decode the renderer's image payload into a Buffer for
+// vlmCaption / ocr. Accepts either:
+//   - a data URL (`data:image/png;base64,<b64>`) from VideoPlayer.captureFrame
+//   - a bare base64 string (no header)
+// Rejects anything else (including empty strings). We do NOT accept raw
+// file:// paths across the IPC boundary — the renderer never has one.
+function decodeImagePayload (input) {
+  if (typeof input !== 'string' || input.length === 0) return null
+  let b64 = input
+  const comma = input.indexOf(',')
+  if (input.startsWith('data:') && comma > 0) {
+    // Strip the data-URL prefix; keep everything after the first comma.
+    b64 = input.slice(comma + 1)
+  }
+  return decodeBase64(b64)
+}
+
 function encodeBase64(buf) {
   if (!buf) return ''
   return b4a.toString(buf, 'base64')
@@ -4062,6 +4403,28 @@ goodbye(async () => {
   disconnectActivityFeed()
   try { matchLiveStreamConsumer.stop() } catch (err) {
     log('warn', 'matchLiveStreamConsumer stop failed', { message: err && err.message })
+  }
+  // Cup Final: close per-worker VLM + OCR + voiceCoach handles first so a slow
+  // model unload does not race the swarm teardown.
+  try { if (voiceCoach) await voiceCoach.close() } catch (err) {
+    log('warn', 'voiceCoach close failed', { message: err && err.message })
+  }
+  try { if (vlmCaption) await vlmCaption.close() } catch (err) {
+    log('warn', 'vlmCaption close failed', { message: err && err.message })
+  }
+  try { if (ocrHandle) await ocrHandle.close() } catch (err) {
+    log('warn', 'ocr close failed', { message: err && err.message })
+  }
+  // Cup Final: observability teardown. Prometheus.stop() closes the HTTP
+  // server + clears the global hypertrace trace function.
+  try { if (typeof observabilityLogUnsub === 'function') observabilityLogUnsub() } catch { /* noop */ }
+  try {
+    // Await the async promHandle bootstrap so we don't skip stop() during a
+    // fast shutdown that races the loopback listen() call.
+    await promHandleReady
+    if (promHandle && typeof promHandle.stop === 'function') await promHandle.stop()
+  } catch (err) {
+    log('warn', 'prometheus stop failed', { message: err && err.message })
   }
   try {
     if (translator) await translator.close()

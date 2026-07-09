@@ -80,7 +80,7 @@ export function mountCommentaryPanel({ container, curva, roomState } = {}) {
   header.appendChild(pulse)
   header.appendChild(chip)
   header.appendChild(sttBadge)
-  // Semifinal QVAC depth: tokens-per-second badge (from completionStats event).
+  // Tokens-per-second badge (from completionStats event).
   const tpsBadge = document.createElement('span')
   tpsBadge.className = 'curva-commentary__tps-badge'
   tpsBadge.textContent = ''
@@ -88,7 +88,7 @@ export function mountCommentaryPanel({ container, curva, roomState } = {}) {
   tpsBadge.setAttribute('aria-live', 'polite')
   tpsBadge.title = 'Tokens per second (on-device QVAC completion)'
   header.appendChild(tpsBadge)
-  // Semifinal QVAC depth: thinking indicator, hidden until first thinkingDelta.
+  // Thinking indicator, hidden until first thinkingDelta.
   const thinkBadge = document.createElement('span')
   thinkBadge.className = 'curva-commentary__thinking-badge'
   thinkBadge.textContent = 'thinking…'
@@ -256,9 +256,9 @@ export function mountCommentaryPanel({ container, curva, roomState } = {}) {
     pulse.classList.remove('curva-commentary__pulse--active')
   }))
 
-  // Semifinal QVAC depth: subscribe to the SDK's completion-event stream.
-  // These handlers are additive — existing onTokens/onEmitted stay wired so
-  // pre-semifinal renderers do not regress.
+  // Subscribe to the SDK's completion-event stream. These handlers are
+  // additive — existing onTokens / onEmitted stay wired so downstream
+  // consumers do not regress.
   if (typeof curva.commentator.onToken === 'function') {
     offs.push(curva.commentator.onToken((p) => {
       if (typeof p?.text !== 'string') return

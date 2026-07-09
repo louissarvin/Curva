@@ -276,7 +276,7 @@ function withCode (code, message) {
 }
 
 // =========================================================================
-// Semifinal QVAC depth: delegated inference discovery + ping + firewall API.
+// Delegated inference discovery + ping + firewall API.
 //
 // The renderer's DelegatedInferencePanel needs to (1) list every provider the
 // room knows about, (2) test connectivity to any one of them, and (3) swap

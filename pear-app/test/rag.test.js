@@ -1,4 +1,4 @@
-// Semifinal QVAC depth: RAG grounding tests.
+// RAG grounding tests.
 //
 // Exercises bare/rag.js via injected fake @qvac/sdk (no real embed model). The
 // fake mimics the ragIngest / ragSearch / embed / ragCloseWorkspace surface
