@@ -2,10 +2,10 @@
 name: curva
 description: Curva watch-party skill for AI agents. Lets an agent join a peer-to-peer Curva match room via pear:// deep link, chat in any of 12 Bergamot locales with on-device translation, send gasless USDT tips to the room host through WDK (EIP-3009 primary, ERC-4337 fallback), and participate in host-opened match prediction pools. Use when an agent needs to spectate a World Cup 2026 match room, cheer with peers, tip the host, or place a prediction stake. Operates on Sepolia (chainId 11155111) with USDT contract 0xd077a400968890eacc75cdc901f0356c943e4fdb. All value transfers require explicit human confirmation and honor per-capability spending limits.
 license: MIT
-compatibility: Requires Node.js 20+, Pear runtime (pear-runtime), @tetherto/wdk ^1.0.0-beta.12, @tetherto/wdk-wallet-evm-erc-4337 ^1.0.0-beta.10, @tetherto/wdk-secret-manager ^1.0.0-beta.3, @qvac/sdk ^0.14.0, and outbound access to the Curva Companion (default http://localhost:3700 or a hosted instance).
+compatibility: Requires Node.js 20+, Pear runtime (pear-runtime), @tetherto/wdk ^1.0.0-beta.12, @tetherto/wdk-wallet-evm-erc-4337 ^1.0.0-beta.10, @tetherto/wdk-secret-manager ^1.0.0-beta.3, @qvac/sdk ^0.14.0, and outbound access to the Curva Companion (default http://localhost:3700 or a hosted instance). Bundled MCP server at mcp/curva-mcp/ for Claude Desktop / Cursor integration.
 metadata:
   author: curva-team
-  version: "0.1.0"
+  version: "0.2.0"
   homepage: "https://github.com/PLACEHOLDER-ORG/curva"
   chains: "ethereum-sepolia"
   tokens: "USDT"
@@ -141,6 +141,46 @@ Register a room's Autobase discovery keys with a third-party blind peer so the r
 - Real code path: `pear-app/bare/blindPeering.js`, `pear-app/bare/room.js` registration hook
 - Feature-flag precondition: `CURVA_BLIND_PEERING_ENABLED=true` AND `CURVA_BLIND_PEER_KEY` set
 - Human confirmation: not required (no value transfer, no chat content leaves the peer)
+
+### 9. `tip_batch`
+
+Send several USDT tips in one confirmation flow. Each tip is signed independently as an EIP-3009 `TransferWithAuthorization` and relayed sequentially through the F11 facilitator so a partial failure on tip N does not roll back tips 1..N-1. Purpose-built for goal-storm scenarios where the agent wants to tip multiple hosts (or the same host in multiple rooms) in a single elicitation. Callable over MCP via the `curva-mcp` server bundled at `mcp/curva-mcp/`.
+
+- Arguments: `tips` (array, 1..5 entries of `{ room_slug: string, amount_usdt: number, note?: string }`, required), `session_total_hint` (number, optional, informational display in the elicitation dialog)
+- Wallet permissions: one owner-EOA `signTypedData` per entry (never a single aggregated signature — the facilitator recovers per-tip)
+- Spending limit: sum of entries capped at the current session ceiling (default `25 USDT`); each entry additionally capped at `15 USDT` per-call
+- Chain: Sepolia (11155111)
+- Token: USDT `0xd077a400968890eacc75cdc901f0356c943e4fdb`
+- Real code path: reuse `send_tip` sign+relay for every entry; wrap in a single elicitation surface with the full breakdown
+- Verification: array of `GET /wdk/verify/<txHash>` URLs, one per successful entry, plus a `failed` array with `{ roomSlug, reason }` for skipped entries
+- Feature-flag preconditions: `RELAY_SPONSOR_ENABLED=true` (same as `send_tip`)
+- Human confirmation: MANDATORY. Dialog shows every recipient handle, per-tip amount, and the running session total. A single decline cancels the whole batch.
+
+### 10. `pay_x402_resource_on_plasma`
+
+Same as `pay_x402_resource` (capability 6) but pinned to Tether Plasma settlement instead of Sepolia. Uses the multi-chain seam introduced in F10 (`backend/src/lib/evm/chains.ts`); the x402 challenge's `network` field must resolve to Plasma's CAIP-2 chain id and the facilitator must have a Plasma-side sponsor wallet configured. Callable over MCP via the `curva-mcp` server.
+
+- Arguments: `resource_url` (absolute HTTPS URL, required), `max_price_atomic` (string, optional, default `1000000` = 1 USDT)
+- Wallet permissions: one EIP-3009 `TransferWithAuthorization` typed data matching the challenge, signed on the Plasma domain (chainId per Plasma's config in `backend/src/data/chains.json`)
+- Spending limit: default per-call `1 USDT`, per-session `5 USDT`; runtime override wins
+- Chain: Tether Plasma (chainId per current chains.json Plasma entry, expressed as `eip155:<n>` in the x402 network field)
+- Token: USDT on Plasma (address per chains.json Plasma entry)
+- Real code path: identical to `pay_x402_resource`, plus a chain-guard that rejects any challenge whose `network` field does not match the Plasma chain id
+- Verification: `X-Payment-Response` header carries the settlement txHash; explorer URL is built from the Plasma chain's `explorerBase` in chains.json
+- Feature-flag preconditions: `CURVA_X402_ENABLED=true`, `RELAY_SPONSOR_ENABLED=true`, AND the Plasma chain must be `enabled: true` in `backend/src/data/chains.json`
+- Human confirmation: MANDATORY. Same red-flag / fiat context requirements as capability 6.
+
+### 11. `verify_tip_attribution`
+
+Attribute a tip settlement to a room by cross-referencing the Companion's `/tips/:address` view and the room registry. Given a peer smart-account address, list every tip settled from that peer, with `{ txHash, roomSlug, hostHandle, amountUsdt, settledAt }` per entry. Purely read-only. Powers agent workflows that need to prove "peer X supported room Y" without touching the chat log. Callable over MCP via the `curva-mcp` server.
+
+- Arguments: `peer_address` (0x-prefixed 20-byte hex, required), `room_slug` (string, optional, filters the response to a single room), `since_unix` (integer, optional, drops entries older than the cutoff)
+- Wallet permissions: none
+- Spending limit: `0 USDT`
+- Real code path: `GET /tips/:address` on the Companion, join against `/rooms` by `hostSmartAddress` for room/host enrichment
+- Verification: each entry links to `GET /wdk/verify/<txHash>` for its Etherscan proof
+- Feature-flag preconditions: none (uses standard tip index)
+- Human confirmation: not required (read-only; caller controls the peer address so no privacy escalation)
 
 ## Example agent scenarios
 
