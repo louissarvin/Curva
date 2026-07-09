@@ -3,8 +3,6 @@ import {
   Scripts,
   createRootRouteWithContext,
 } from '@tanstack/react-router'
-import { TanStackRouterDevtoolsPanel } from '@tanstack/react-router-devtools'
-import { TanStackDevtools } from '@tanstack/react-devtools'
 
 import HeroUIProvider from '../providers/HeroUIProvider'
 import LenisSmoothScrollProvider from '../providers/LenisSmoothScrollProvider'
@@ -12,8 +10,6 @@ import { ThemeProvider } from '../providers/ThemeProvider'
 import ErrorPage from '../components/ErrorPage'
 import PillNav from '../components/PillNav'
 import Footer from '../components/Footer'
-
-import TanStackQueryDevtools from '../integrations/tanstack-query/devtools'
 
 import appCss from '../styles.css?url'
 
@@ -99,16 +95,6 @@ function RootDocument({ children }: { children: React.ReactNode }) {
             <PillNav />
             <main id="main-content">{children}</main>
             <Footer />
-            <TanStackDevtools
-              config={{ position: 'bottom-right' }}
-              plugins={[
-                {
-                  name: 'Tanstack Router',
-                  render: <TanStackRouterDevtoolsPanel />,
-                },
-                TanStackQueryDevtools,
-              ]}
-            />
           </HeroUIProvider>
         </ThemeProvider>
         <Scripts />
