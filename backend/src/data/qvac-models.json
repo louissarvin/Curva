@@ -268,6 +268,22 @@
       "license": "Apache-2.0",
       "notes": "Registry constant TTS_MULTILINGUAL_SUPERTONIC3_Q8_0. Loaded once per target language (config-level 'language' field, per @qvac/sdk schemas/text-to-speech.d.ts). Output is mono 16-bit PCM at 44100 Hz; wrap in a 44-byte WAV header before shipping to the renderer <audio> element. sampleRate=44100, channels=1, bitDepth=16.",
       "status": "ready"
+    },
+    {
+      "id": "embed-embeddinggemma-300m-q4",
+      "name": "EmbeddingGemma 300M Q4_0",
+      "family": "embeddings",
+      "size": 277852192,
+      "sizeLabel": "265 MB",
+      "capabilities": ["embed", "rag"],
+      "sourceLangs": ["en", "it", "id", "es", "pt", "de", "fr"],
+      "targetLangs": [],
+      "contentDigest": "sha256:edc6015cb15694c27be7d1d33f1bc015db9a358ff51ed524628c027504907ba9",
+      "downloadUrl": "https://huggingface.co/unsloth/embeddinggemma-300m-GGUF/resolve/6661a6504c30d8304af13455cb4a5d4f5bc6011f/embeddinggemma-300m-Q4_0.gguf",
+      "mirrorUrl": null,
+      "license": "Gemma-terms-of-use",
+      "notes": "Registry constant EMBEDDINGGEMMA_300M_Q4_0. Backs the RAG grounding path in pear-app/bare/rag.js: on room open the football glossary is ingested into `curva/room/<slug>/glossary`, and every chat line >6 chars is auto-ingested into `curva/room/<slug>/chat`. roomBot.answer() prepends the top-3 ragSearch() hits to the system prompt for grounded /bot replies. sha256Checksum comes from @qvac/sdk registry (dist/models/registry/models.js#EMBEDDINGGEMMA_300M_Q4_0).",
+      "status": "ready"
     }
   ]
 }

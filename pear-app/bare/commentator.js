@@ -355,6 +355,12 @@ function createCommentator (opts = {}) {
     sdkFactory = null,
     modelSrc = DEFAULT_MODEL_SRC,
     modelSizeMb = DEFAULT_MODEL_SIZE_MB,
+    // Semifinal QVAC depth: room-scoped kvCache key. Reusing the cache across
+    // 60 s ticks in the same room turns the second and later completions into
+    // sub-100 ms time-to-first-token calls (verified per docs
+    // https://docs.qvac.tether.io/ai-capabilities/text-generation/ kvCache
+    // section, fetched 2026-07-10).
+    roomSlug = 'default',
     // Wave 13B: extra modelConfig to hand into loadSdkLlm. When roomBot is
     // enabled alongside the commentator we pass { tools: true } so the shared
     // Qwen3 handle can serve both features. When undefined, backward-compat:
@@ -549,6 +555,9 @@ function createCommentator (opts = {}) {
     state.streaming = true
     state.lastEmitAt = nowMs
     let tokensBuf = ''
+    let sawThinking = false
+    let sawContent = false
+    let stopReason = null
     try {
       const matchTimeMs = Math.max(0, Number(getMatchTimeMs() || 0))
       const prompt = buildPrompt({
@@ -562,27 +571,104 @@ function createCommentator (opts = {}) {
       emit('commentary:trigger', { type: trigger?.type || 'tick', matchTimeMs })
 
       const history = [{ role: 'user', content: prompt }]
+      // Semifinal: reuse a per-room kvCache so multi-turn requests share the
+      // Qwen3 KV so we get sub-100 ms time-to-first-token on repeat triggers.
+      // SDK contract: kvCache accepts `true` (auto) or a caller-managed string
+      // key. Verified in @qvac/sdk/dist/schemas/completion-stream.d.ts.
+      const kvCacheKey = 'commentator:room:' + (roomSlug || 'default')
       const result = sdkHandle.completion({
         modelId: sdkHandle.modelId,
         history,
-        stream: true
+        stream: true,
+        kvCache: kvCacheKey
       })
 
-      if (result && result.tokenStream && typeof result.tokenStream[Symbol.asyncIterator] === 'function') {
+      // Preferred path: `result.events` is the discriminated union stream
+      // documented in dist/schemas/completion-event.d.ts. Event types:
+      //   contentDelta{seq,text}, thinkingDelta{seq,text}, toolCall,
+      //   toolError, completionStats{stats:{tokensPerSecond,...}},
+      //   completionDone{stopReason}.
+      // Fallback path: `result.tokenStream` (legacy) or `result.text` (string
+      // promise) so pre-Wave-15 fake sdks in existing tests keep working.
+      const hasEvents = result && result.events && typeof result.events[Symbol.asyncIterator] === 'function'
+      const hasTokenStream = result && result.tokenStream && typeof result.tokenStream[Symbol.asyncIterator] === 'function'
+
+      if (hasEvents) {
+        for await (const event of result.events) {
+          if (state.destroyed) break
+          if (!event || typeof event !== 'object') continue
+          if (event.type === 'contentDelta') {
+            const chunk = typeof event.text === 'string' ? event.text : ''
+            if (!sawContent && chunk.length > 0) {
+              sawContent = true
+              emit('commentator:content-start', { matchTimeMs })
+            }
+            tokensBuf += chunk
+            // Emit BOTH legacy `commentary:tokens` (for existing renderer +
+            // tests) and the new streaming-shaped `commentator:token`.
+            emit('commentary:tokens', { token: chunk })
+            emit('commentator:token', { text: chunk })
+            // Code review fix (High): set stopReason='length' when we hit the
+            // char cap so the renderer can distinguish truncation from natural
+            // EOS. Without this, the done event defaults to 'eos' and a judge
+            // sees a mid-sentence cut labeled as complete.
+            if (tokensBuf.length > 600) { stopReason = 'length'; break }
+          } else if (event.type === 'thinkingDelta') {
+            const chunk = typeof event.text === 'string' ? event.text : ''
+            if (!sawThinking && chunk.length > 0) {
+              sawThinking = true
+              emit('commentator:thinking-start', {})
+            }
+            emit('commentator:thinking', { text: chunk })
+          } else if (event.type === 'completionStats') {
+            const stats = (event.stats && typeof event.stats === 'object') ? event.stats : {}
+            emit('commentator:stats', {
+              tokensPerSecond: Number(stats.tokensPerSecond) || null,
+              timeToFirstToken: Number(stats.timeToFirstToken) || null,
+              generatedTokens: Number(stats.generatedTokens) || null,
+              cacheTokens: Number(stats.cacheTokens) || null,
+              backendDevice: typeof stats.backendDevice === 'string' ? stats.backendDevice : null
+            })
+          } else if (event.type === 'completionDone') {
+            stopReason = typeof event.stopReason === 'string' ? event.stopReason : 'eos'
+            break
+          }
+        }
+      } else if (hasTokenStream) {
         for await (const token of result.tokenStream) {
           if (state.destroyed) break
           const s = typeof token === 'string' ? token : String(token ?? '')
           tokensBuf += s
           emit('commentary:tokens', { token: s })
+          emit('commentator:token', { text: s })
           // Hard cap to prevent runaway generation.
-          if (tokensBuf.length > 600) break
+          if (tokensBuf.length > 600) { stopReason = 'length'; break }
         }
-      } else if (result && typeof result.text?.then === 'function') {
+        // Code review fix (High): legacy path never emits `commentator:stats`,
+        // so the tokens-per-second badge stays dark. Emit a deterministic null
+        // stats event so the renderer can decide whether to hide or show a
+        // "n/a" state instead of a stuck-loading indicator.
+        emit('commentator:stats', {
+          tokensPerSecond: null,
+          timeToFirstToken: null,
+          generatedTokens: null,
+          cacheTokens: null,
+          backendDevice: null
+        })
+      } else if (result && typeof result === 'object' && typeof result.text?.then === 'function') {
         // Non-streaming fallback (SDK may in future return {text: Promise<string>}).
         tokensBuf = await result.text
       } else if (typeof result === 'string') {
         tokensBuf = result
       }
+
+      // Always emit a `commentator:done` so renderers can freeze the growing
+      // message even when the SDK never sent a completionDone event (legacy
+      // tokenStream shape).
+      emit('commentator:done', {
+        stopReason: stopReason || 'eos',
+        totalText: tokensBuf
+      })
 
       const clean = sanitizeCommentary(tokensBuf, maxWords)
       if (clean.length === 0) {

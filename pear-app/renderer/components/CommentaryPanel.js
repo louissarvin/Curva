@@ -80,6 +80,21 @@ export function mountCommentaryPanel({ container, curva, roomState } = {}) {
   header.appendChild(pulse)
   header.appendChild(chip)
   header.appendChild(sttBadge)
+  // Semifinal QVAC depth: tokens-per-second badge (from completionStats event).
+  const tpsBadge = document.createElement('span')
+  tpsBadge.className = 'curva-commentary__tps-badge'
+  tpsBadge.textContent = ''
+  tpsBadge.hidden = true
+  tpsBadge.setAttribute('aria-live', 'polite')
+  tpsBadge.title = 'Tokens per second (on-device QVAC completion)'
+  header.appendChild(tpsBadge)
+  // Semifinal QVAC depth: thinking indicator, hidden until first thinkingDelta.
+  const thinkBadge = document.createElement('span')
+  thinkBadge.className = 'curva-commentary__thinking-badge'
+  thinkBadge.textContent = 'thinking…'
+  thinkBadge.hidden = true
+  thinkBadge.setAttribute('aria-live', 'polite')
+  header.appendChild(thinkBadge)
   container.appendChild(header)
 
   // Body: last-line preview + controls.
@@ -240,6 +255,45 @@ export function mountCommentaryPanel({ container, curva, roomState } = {}) {
     state.streaming = false
     pulse.classList.remove('curva-commentary__pulse--active')
   }))
+
+  // Semifinal QVAC depth: subscribe to the SDK's completion-event stream.
+  // These handlers are additive — existing onTokens/onEmitted stay wired so
+  // pre-semifinal renderers do not regress.
+  if (typeof curva.commentator.onToken === 'function') {
+    offs.push(curva.commentator.onToken((p) => {
+      if (typeof p?.text !== 'string') return
+      // Hide the "thinking" indicator once real tokens flow.
+      thinkBadge.hidden = true
+      state.streamingBuffer += p.text
+      lastLine.textContent = state.streamingBuffer.slice(0, 400)
+    }))
+  }
+  if (typeof curva.commentator.onThinking === 'function') {
+    offs.push(curva.commentator.onThinking((p) => {
+      if (typeof p?.text !== 'string') return
+      thinkBadge.hidden = false
+    }))
+  }
+  if (typeof curva.commentator.onStats === 'function') {
+    offs.push(curva.commentator.onStats((p) => {
+      const tps = Number(p?.tokensPerSecond)
+      if (Number.isFinite(tps) && tps > 0) {
+        tpsBadge.hidden = false
+        tpsBadge.textContent = tps.toFixed(1) + ' tok/s'
+      }
+    }))
+  }
+  if (typeof curva.commentator.onDone === 'function') {
+    offs.push(curva.commentator.onDone((p) => {
+      thinkBadge.hidden = true
+      state.streaming = false
+      pulse.classList.remove('curva-commentary__pulse--active')
+      lastLine.classList.remove('curva-commentary__line--streaming')
+      if (p && typeof p.totalText === 'string' && p.totalText.length > 0) {
+        lastLine.textContent = p.totalText.slice(0, 400)
+      }
+    }))
+  }
 
   // Wave 14: `system:caption` renderer. The chat bridge fans every reduced
   // message through onChatMessage; we filter for STT captions and render a

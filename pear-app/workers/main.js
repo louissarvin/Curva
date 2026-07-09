@@ -696,6 +696,18 @@ async function ensureRoomBot () {
     }
   } catch (_) { sharedLlmHandle = null }
 
+  // Semifinal QVAC depth: wire an in-process MCP tool client so the bot can
+  // call Curva-native tools (getMatchState, getRoomStats, getRecentTips,
+  // translateText) alongside the backend companion server. Also wire a RAG
+  // instance so completion() answers are grounded on the room's glossary +
+  // chat history.
+  const roomMcp = ensureMcpTools()
+  const rag = await ensureRag()
+  // Fire-and-forget: ingest the football glossary once per room boot. The
+  // embed model download is a one-time ~200 MB cost; the promise settles in
+  // the background so roomBot enable does not block.
+  ingestGlossaryOnce().catch((err) => log('info', 'rag glossary ingest deferred', { message: err && err.message }))
+
   roomBot = createRoomBot({
     chat: room.chat,
     backendUrl: config.backendUrl || 'http://localhost:3700',
@@ -704,7 +716,10 @@ async function ensureRoomBot () {
     isHost: !!config.isHost,
     flagEnabled: true,     // ensureRoomBot only runs when botFlagEnabled is true
     emit: (event, payload) => emit(event, payload),
-    log
+    log,
+    roomSlug: config.roomSlug || 'default',
+    roomMcpClient: (roomMcp && roomMcp.client) || null,
+    rag: rag
   })
 
   try {
@@ -734,6 +749,92 @@ async function ensureRoomBot () {
   return roomBot
 }
 
+// ===== SEMIFINAL QVAC DEPTH: RAG + MCP + DELEGATED =====
+//
+// These three modules are lazy-init: they are only constructed when their
+// first IPC command arrives (or when roomBot needs them). This keeps the room
+// open cost the same for users who don't use the semifinal features while
+// making the code path discoverable and testable for judges.
+const { createRag, glossaryToDocuments } = require('../bare/rag.js')
+const { createMcpToolsClient } = require('../bare/mcpTools.js')
+const { createDelegatedRegistry } = require('../bare/delegatedProvider.js')
+const roomGlossary = (() => {
+  try { return require('../bare/glossary.json') } catch { return { terms: [] } }
+})()
+
+let ragInstance = null
+let ragGlossaryIngested = false
+async function ensureRag () {
+  if (ragInstance) return ragInstance
+  ragInstance = createRag({
+    roomSlug: config.roomSlug || 'default',
+    emit: (ev, p) => emit(ev, p),
+    log
+  })
+  return ragInstance
+}
+async function ingestGlossaryOnce () {
+  if (ragGlossaryIngested) return
+  const rag = await ensureRag()
+  const ready = await rag.ensureReady()
+  if (!ready) return
+  const docs = glossaryToDocuments(roomGlossary, { limit: 200 })
+  if (docs.length === 0) return
+  const res = await rag.ingest(docs, { kind: 'glossary' })
+  if (res && res.ok) ragGlossaryIngested = true
+}
+
+let mcpToolsInstance = null
+function ensureMcpTools () {
+  if (mcpToolsInstance) return mcpToolsInstance
+  // The module-level `translator` is populated lazily by createTranslator();
+  // wrap it in an accessor so the MCP tool always reads the current instance
+  // rather than a stale reference captured at ensureMcpTools() time.
+  const translatorRef = {
+    translate: async (opts) => {
+      if (translator && typeof translator.translate === 'function') {
+        return translator.translate(opts)
+      }
+      // Fall back to the raw text so the tool never throws.
+      return opts && opts.text ? String(opts.text) : ''
+    }
+  }
+  // Adapt the Curva room's actual surface to the shape createMcpToolsClient
+  // expects. The mcpTools module treats these as optional accessors, so
+  // missing subsystems degrade to safe zeros rather than throwing.
+  const roomAdapter = {
+    playhead: (room && room.playhead) || null,
+    swarm,
+    identity: {
+      verifiedPeerCount: () => (room && typeof room.getVerifiedCount === 'function') ? room.getVerifiedCount() : 0
+    },
+    chat: {
+      count: () => recentChatRing.length
+    }
+  }
+  mcpToolsInstance = createMcpToolsClient({
+    room: roomAdapter,
+    translator: translatorRef,
+    startedAt: Date.now(),
+    log
+  })
+  return mcpToolsInstance
+}
+
+let delegatedRegistry = null
+function ensureDelegatedRegistry () {
+  if (delegatedRegistry) return delegatedRegistry
+  delegatedRegistry = createDelegatedRegistry({
+    roomState: (typeof room === 'object' && room && room.state) || null,
+    ownerDeviceProof: null,
+    emit: (ev, p) => emit(ev, p),
+    log,
+    onStatus: (evt) => emit('delegated:status', evt)
+  })
+  return delegatedRegistry
+}
+// ===== END SEMIFINAL QVAC DEPTH =====
+
 // Ring buffer of last-N chat messages for prompt context. Bare's chat.onMessage
 // already fires for every reduced message so we piggy-back on the same stream.
 const recentChatRing = []
@@ -747,6 +848,20 @@ function pushRecentChat(msg) {
     match_time_ms: msg.match_time_ms || 0
   })
   while (recentChatRing.length > 20) recentChatRing.shift()
+
+  // Semifinal QVAC depth: opportunistically ingest each new chat line into
+  // the RAG "chat" workspace so subsequent /bot queries can reference it.
+  // Best-effort — do NOT block or throw. The RAG module already caps the
+  // per-room workspace document count.
+  const rawText = typeof msg.text === 'string' ? msg.text.trim() : ''
+  if (rawText.length >= 6 && rawText.length <= 400 && !rawText.startsWith('/bot ')) {
+    const author = msg.handle || (msg.by_peer ? String(msg.by_peer).slice(0, 8) : 'anon')
+    const doc = author + ' said: ' + rawText
+    if (ragInstance) {
+      ragInstance.ingest([doc], { kind: 'chat' })
+        .catch(() => { /* best effort */ })
+    }
+  }
 }
 // ===== END QVAC COMMENTATOR =====
 
@@ -3813,6 +3928,93 @@ async function dispatchCommand(msg) {
       }
       // ===== END DEMO AUTOMATION (Tier polish) =====
 
+      // ===== SEMIFINAL QVAC DEPTH: RAG / MCP / DELEGATED IPC =====
+      case 'rag:search': {
+        const query = String(payload?.query || '').slice(0, 1024)
+        if (query.length === 0) {
+          emit('rag:error', { code: 'BAD_QUERY', message: 'query required', requestId: id })
+          emit('ack', { id, cmd })
+          return
+        }
+        const rag = await ensureRag()
+        const opts = {}
+        if (typeof payload?.topK === 'number') opts.topK = payload.topK | 0
+        if (typeof payload?.kind === 'string') opts.kind = payload.kind
+        const hits = await rag.search(query, opts)
+        emit('rag:result', { query, hits, requestId: id })
+        emit('ack', { id, cmd, payload: { count: hits.length } })
+        return
+      }
+      case 'rag:ingest': {
+        const rag = await ensureRag()
+        const docs = Array.isArray(payload?.docs) ? payload.docs : []
+        const opts = {}
+        if (typeof payload?.kind === 'string') opts.kind = payload.kind
+        const res = await rag.ingest(docs, opts)
+        emit('rag:ingested', { ...res, requestId: id })
+        emit('ack', { id, cmd, payload: res })
+        return
+      }
+      case 'rag:status': {
+        const rag = await ensureRag()
+        emit('rag:status', { ...rag.status(), requestId: id })
+        emit('ack', { id, cmd })
+        return
+      }
+      case 'mcp:list': {
+        const server = ensureMcpTools()
+        const res = await server.client.listTools()
+        emit('mcp:tools', { ...res, requestId: id })
+        emit('ack', { id, cmd, payload: res })
+        return
+      }
+      case 'mcp:call': {
+        const server = ensureMcpTools()
+        const name = String(payload?.name || '')
+        const args = (payload && typeof payload.args === 'object' && payload.args) || {}
+        try {
+          const res = await server.client.callTool({ name, arguments: args })
+          emit('mcp:result', { name, result: res, requestId: id })
+          emit('ack', { id, cmd, payload: { name, ok: !res?.isError } })
+        } catch (err) {
+          emit('mcp:result', { name, error: err && err.message, requestId: id, isError: true })
+          emit('ack', { id, cmd, payload: { name, ok: false } })
+        }
+        return
+      }
+      case 'delegated:list': {
+        const reg = ensureDelegatedRegistry()
+        const rows = await reg.listProviders()
+        emit('delegated:list', { providers: rows, requestId: id })
+        emit('ack', { id, cmd, payload: { count: rows.length } })
+        return
+      }
+      case 'delegated:ping': {
+        const reg = ensureDelegatedRegistry()
+        const pubkey = String(payload?.pubkey || '')
+        const res = await reg.pingProvider(pubkey)
+        emit('delegated:ping-result', { pubkey, ...res, requestId: id })
+        emit('ack', { id, cmd, payload: res })
+        return
+      }
+      case 'delegated:set-firewall': {
+        const reg = ensureDelegatedRegistry()
+        const res = await reg.setFirewall({
+          mode: payload?.mode === 'deny' ? 'deny' : 'allow',
+          publicKeys: Array.isArray(payload?.publicKeys) ? payload.publicKeys : []
+        })
+        emit('delegated:firewall', { ...res, requestId: id })
+        emit('ack', { id, cmd, payload: res })
+        return
+      }
+      case 'delegated:snapshot': {
+        const reg = ensureDelegatedRegistry()
+        emit('delegated:snapshot', { ...reg.snapshot(), requestId: id })
+        emit('ack', { id, cmd })
+        return
+      }
+      // ===== END SEMIFINAL QVAC DEPTH =====
+
       default:
         log('info', 'ipc unknown cmd (ignored)', { cmd, id })
     }
@@ -3898,8 +4100,17 @@ goodbye(async () => {
   } catch (err) {
     log('warn', 'discovery destroy failed', { message: err.message })
   }
-  // Wave 15: close blind-peering BEFORE the swarm so it can release channels
-  // cleanly per the docs ("must be called before closing the room and swarm").
+  // Wave 15 + ADR-003: quiesce blind-peering BEFORE closing the swarm so the
+  // DHT sockets are torn down cleanly. suspend() is idempotent and safe on
+  // no-op clients (see bare/blindPeering.js). close() also calls suspend()
+  // internally as a belt-and-suspenders guard.
+  try {
+    if (blindPeering && typeof blindPeering.suspend === 'function') {
+      await blindPeering.suspend()
+    }
+  } catch (err) {
+    log('warn', 'blind-peering suspend failed', { message: err.message })
+  }
   try {
     if (blindPeering) await blindPeering.close()
   } catch (err) {

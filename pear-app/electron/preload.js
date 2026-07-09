@@ -337,6 +337,15 @@ contextBridge.exposeInMainWorld('curva', {
   onError:          (cb) => onEvent('error', cb),
   onPeerConnected:  (cb) => onEvent('peer:connected', cb),
   onPeerDisconnected: (cb) => onEvent('peer:disconnected', cb),
+  // ADR-002: verified-peer presence. Bare emits `peer:verified` when a peer's
+  // identity proof succeeds, and `peer:verified-count` on any change. Payload:
+  //   peer:verified        { peerId, identityPublicKeyHex, devicePublicKeyHex }
+  //   peer:verified-count  { verified: number, total: number }
+  // Renderer uses these to paint the "N verified" subheader + optional shield
+  // glyph next to sender names. The verify result itself is computed in bare
+  // (workers/main.js -> room.registerPeerProof); the renderer NEVER re-verifies.
+  onPeerVerified:       (cb) => onEvent('peer:verified', cb),
+  onPeerVerifiedCount:  (cb) => onEvent('peer:verified-count', cb),
 
   // -- Supertonic TTS goal announcer (Tier 4) ---
   // Multilingual on-device goal announcements. The Bare worker owns model
@@ -900,7 +909,12 @@ contextBridge.exposeInMainWorld('curva', {
     onTrigger:   (cb) => onEvent('commentary:trigger', cb),
     onTokens:    (cb) => onEvent('commentary:tokens', cb),
     onEmitted:   (cb) => onEvent('commentary:emitted', cb),
-    onError:     (cb) => onEvent('commentary:error', cb)
+    onError:     (cb) => onEvent('commentary:error', cb),
+    // Semifinal QVAC depth: full completion-event stream from bare/commentator.js.
+    onToken:     (cb) => onEvent('commentator:token', cb),
+    onThinking:  (cb) => onEvent('commentator:thinking', cb),
+    onStats:     (cb) => onEvent('commentator:stats', cb),
+    onDone:      (cb) => onEvent('commentator:done', cb)
   },
   // ===== END QVAC COMMENTATOR =====
 
@@ -1118,7 +1132,67 @@ contextBridge.exposeInMainWorld('curva', {
 
   // Feature 3 (HUD overlay): emitted on room open + on every addWriter.
   // Payload: { writerCount } (total Autobase writer slots; divide by 2 for peer count).
-  onWritersUpdate(cb) { return onEvent('room:writers-update', cb) }
+  onWritersUpdate(cb) { return onEvent('room:writers-update', cb) },
+
+  // ===== SEMIFINAL QVAC DEPTH =====
+  //
+  // Delegated inference (bare/delegatedProvider.js).
+  delegated: {
+    list() { return writeMain('delegated:list', {}) },
+    ping(pubkey) {
+      if (typeof pubkey !== 'string' || !/^[0-9a-f]{64}$/i.test(pubkey)) {
+        throw new RangeError('pubkey must be 64-char hex')
+      }
+      return writeMain('delegated:ping', { pubkey: pubkey.toLowerCase() })
+    },
+    setFirewall(cfg) {
+      const mode = cfg && cfg.mode === 'deny' ? 'deny' : 'allow'
+      const publicKeys = Array.isArray(cfg && cfg.publicKeys)
+        ? cfg.publicKeys.filter((k) => typeof k === 'string' && /^[0-9a-f]{64}$/i.test(k))
+        : []
+      return writeMain('delegated:set-firewall', { mode, publicKeys })
+    },
+    snapshot() { return writeMain('delegated:snapshot', {}) },
+    onList:     (cb) => onEvent('delegated:list', cb),
+    onPinged:   (cb) => onEvent('delegated:pinged', cb),
+    onStarted:  (cb) => onEvent('delegated:started', cb),
+    onError:    (cb) => onEvent('delegated:error', cb)
+  },
+
+  // RAG bridge (bare/rag.js).
+  rag: {
+    search(query, opts) {
+      if (typeof query !== 'string' || query.length === 0 || query.length > 1024) {
+        throw new RangeError('query must be 1-1024 chars')
+      }
+      const clean = { query }
+      if (opts && typeof opts.topK === 'number') clean.topK = Math.max(1, Math.min(10, opts.topK | 0))
+      if (opts && typeof opts.kind === 'string') clean.kind = opts.kind.slice(0, 32)
+      return writeMain('rag:search', clean)
+    },
+    ingest(docs, opts) {
+      const arr = Array.isArray(docs) ? docs.filter((d) => typeof d === 'string') : []
+      if (arr.length === 0) throw new RangeError('docs must be non-empty string array')
+      const clean = { docs: arr.slice(0, 128) }
+      if (opts && typeof opts.kind === 'string') clean.kind = opts.kind.slice(0, 32)
+      return writeMain('rag:ingest', clean)
+    },
+    status() { return writeMain('rag:status', {}) },
+    onReady:    (cb) => onEvent('rag:ready', cb),
+    onError:    (cb) => onEvent('rag:error', cb),
+    onProgress: (cb) => onEvent('rag:progress', cb)
+  },
+
+  // MCP tools bridge (bare/mcpTools.js).
+  mcp: {
+    listTools() { return writeMain('mcp:list', {}) },
+    callTool(name, args) {
+      if (typeof name !== 'string' || name.length === 0) {
+        throw new RangeError('name required')
+      }
+      return writeMain('mcp:call', { name: name.slice(0, 64), args: args || {} })
+    }
+  }
 })
 
 // Allowlist for openExternal. Enforced on BOTH sides — the renderer preload

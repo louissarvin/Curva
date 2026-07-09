@@ -19,7 +19,8 @@ export type QvacModelFamily =
   | 'llama'
   | 'parakeet'
   | 'silero-vad'
-  | 'tts-supertonic';
+  | 'tts-supertonic'
+  | 'embeddings';
 export type QvacModelStatus = 'ready' | 'pending-upstream' | 'deprecated';
 
 export interface QvacModel {
@@ -64,6 +65,7 @@ const KNOWN_FAMILIES: ReadonlySet<QvacModelFamily> = new Set([
   'parakeet',
   'silero-vad',
   'tts-supertonic',
+  'embeddings',
 ]);
 const KNOWN_STATUSES: ReadonlySet<QvacModelStatus> = new Set([
   'ready',
