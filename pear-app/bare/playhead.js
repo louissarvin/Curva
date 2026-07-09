@@ -272,6 +272,12 @@ async function createPlayhead(store, { isHost, myPubkey = 'local', hostPubkeyHex
     // reducer will accept because isHost is true (it can call ackWriter on
     // itself; Autobase treats a host's local writer as already-writable).
     await base.append(event, { optimistic: true })
+    // ADR-004: immediate foreground ack after a local append. Only fires on
+    // indexer-writers (base.ackable is a getter that checks localWriter's
+    // isActiveIndexer state — see node_modules/autobase/index.js:246). Post-
+    // append ack matters more here than for chat because playhead events
+    // drive video sync — every 100ms of ack delay is a frame of drift.
+    try { if (base.ackable) await base.ack(false) } catch { /* noop */ }
   }
 
   async function getState() {

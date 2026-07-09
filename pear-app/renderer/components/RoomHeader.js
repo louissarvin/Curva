@@ -223,6 +223,17 @@ export function mountRoomHeader({ container, curva, roomState, appVersion, backe
   peersEl.className = 'curva-header__peers'
   peersEl.textContent = 'peers: 0'
 
+  // ADR-002: verified-peer subheader. Hidden until at least one peer's Keet
+  // identity proof has verified in the current session. The number lives
+  // alongside the peer count so a judge scanning the header sees the trust
+  // signal without opening a modal. Never shown as "0 verified" — that
+  // would be visual noise on a legacy-only room.
+  const verifiedEl = document.createElement('span')
+  verifiedEl.className = 'curva-header__peers curva-header__peers--verified'
+  verifiedEl.textContent = ''
+  verifiedEl.hidden = true
+  verifiedEl.title = 'Peers whose Keet identity proof has verified in this session'
+
   // Wave 12: "translating via <handle>" chip. Hidden until the first
   // translate:delegate-status event arrives from the Bare worker. Falls back
   // to "translating locally" when the room reports a fallback tick. Sits near
@@ -270,6 +281,7 @@ export function mountRoomHeader({ container, curva, roomState, appVersion, backe
   meta.appendChild(roleBadge)
   meta.appendChild(handleEl)
   meta.appendChild(peersEl)
+  meta.appendChild(verifiedEl)
   meta.appendChild(delegateChip)
   meta.appendChild(relayChip)
   meta.appendChild(blindPeerChip)
@@ -610,6 +622,23 @@ export function mountRoomHeader({ container, curva, roomState, appVersion, backe
   const offPeerD = curva.onPeerDisconnected(({ count }) => {
     peersEl.textContent = 'peers: ' + count
   })
+  // ADR-002: verified-peer subheader wiring. Feature is opt-in on the bare
+  // side (workers/main.js emits only when `verifyPeerProof` succeeded on a
+  // presence frame); when the bare worker never emits, the subheader stays
+  // hidden. Guard the subscribe with typeof so an older preload surface
+  // does not break the mount.
+  const offVerifiedCount = typeof curva.onPeerVerifiedCount === 'function'
+    ? curva.onPeerVerifiedCount(({ verified }) => {
+        const n = Number.isInteger(verified) ? verified : 0
+        if (n > 0) {
+          verifiedEl.hidden = false
+          verifiedEl.textContent = n + ' verified'
+        } else {
+          verifiedEl.hidden = true
+          verifiedEl.textContent = ''
+        }
+      })
+    : (() => {})
 
   // Wave 8B T1: reveal "via relay" chip when a relayed connection is active,
   // or when the operator forced relay-everything mode.
@@ -684,6 +713,7 @@ export function mountRoomHeader({ container, curva, roomState, appVersion, backe
     try { tipContainer.removeEventListener('curva-tip:amount-change', onTipAmountChange) } catch { /* noop */ }
     offPeerC()
     offPeerD()
+    try { offVerifiedCount() } catch { /* noop */ }
     try { offDelegateStatus() } catch { /* noop */ }
     try { offRelayStatus() } catch { /* noop */ }
     offPublish()

@@ -26,7 +26,7 @@ const fs = require('fs')
 
 const b4a = require('b4a')
 
-const { createKeetIdentity, FLAG_ENV } = require('../bare/keetIdentity.js')
+const { createKeetIdentity, verifyPeerProof, FLAG_ENV } = require('../bare/keetIdentity.js')
 
 // Per-storage-dir persistent map. Two instances that share the same storage dir
 // (as in "restart the app with the same passcode") see the same blob.
@@ -245,3 +245,55 @@ test('verify contract: source returns null|{...}; wrapper coerces to boolean', w
 
   t.is(h.verify(proofHex, payload, r.identityPublicKeyHex), true, 'wrapper coerces to true')
 }))
+
+// ADR-002: verifyPeerProof is stateless. Give it (proofHex, attestedData) and
+// it returns identityPublicKeyHex + devicePublicKeyHex on success, {ok:false}
+// on any failure. Backs the room presence "verified peer" badge in Chat.js.
+test('verifyPeerProof: returns identity + device pubkey hex on success', withFlagOn(async (t) => {
+  const dir = tmpDir('verify-peer-ok')
+  const h = createKeetIdentity({ SecretManager, storageDir: dir })
+  const r = await h.loadOrGenerate({ passphrase: PASSPHRASE })
+  const payload = {
+    type: 'presence',
+    by_peer: 'peer-badge',
+    wall_clock_ms: 1700000000000
+  }
+  const proofHex = h.attest(payload)
+  t.ok(typeof proofHex === 'string' && proofHex.length > 0)
+  const attestedData = h.canonicalize(payload)
+  const res = verifyPeerProof(proofHex, attestedData)
+  t.is(res.ok, true, 'ok:true on valid proof')
+  t.is(res.identityPublicKeyHex, r.identityPublicKeyHex,
+    'identity pubkey matches the loaded identity')
+  t.is(typeof res.devicePublicKeyHex, 'string')
+  t.is(res.devicePublicKeyHex.length, 64, 'device pubkey is 32 bytes hex')
+}))
+
+test('verifyPeerProof: tampered proof (single-byte flip) returns ok:false', withFlagOn(async (t) => {
+  const dir = tmpDir('verify-peer-tamper')
+  const h = createKeetIdentity({ SecretManager, storageDir: dir })
+  await h.loadOrGenerate({ passphrase: PASSPHRASE })
+  const payload = {
+    type: 'presence',
+    by_peer: 'peer-badge',
+    wall_clock_ms: 1700000000001
+  }
+  const proofHex = h.attest(payload)
+  const attestedData = h.canonicalize(payload)
+
+  // Flip one byte deep in the proof so we perturb the chain, not the framing.
+  const buf = b4a.from(proofHex, 'hex')
+  const mid = Math.floor(buf.length / 2)
+  buf[mid] = (buf[mid] ^ 0xff) & 0xff
+  const tamperedHex = b4a.toString(buf, 'hex')
+  const res = verifyPeerProof(tamperedHex, attestedData)
+  t.is(res.ok, false, 'tampered proof rejected')
+}))
+
+test('verifyPeerProof: bad inputs (null, non-hex, empty) yield ok:false', (t) => {
+  t.is(verifyPeerProof(null, b4a.from('x')).ok, false)
+  t.is(verifyPeerProof('deadbeef', null).ok, false)
+  t.is(verifyPeerProof('', b4a.from('x')).ok, false)
+  t.is(verifyPeerProof('not-hex-!@#', b4a.from('x')).ok, false)
+  t.is(verifyPeerProof(123, b4a.from('x')).ok, false)
+})

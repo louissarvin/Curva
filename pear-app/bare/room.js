@@ -22,6 +22,7 @@ const {
   verifyInvitationWithTier
 } = require('./writerInvitation.js')
 const { attachTacticalChannel } = require('./tacticalChannel.js')
+const { verifyPeerProof: keetVerifyPeerProof } = require('./keetIdentity.js')
 const { topicForSlug } = require('./topics.js')
 const { createDemoTimeline, timelineFlagEnabled } = require('./demoTimeline.js')
 
@@ -41,6 +42,68 @@ const LEGACY_INVITATION_ENV = 'CURVA_LEGACY_INVITATION_KEY'
 // racing addWriter cannot flood the base with writer promotions.
 const ADD_WRITER_LIMIT = 20
 const ADD_WRITER_WINDOW_MS = 60 * 60 * 1000 // 1 hour
+
+// ADR-004: base.ack() cadence for indexer writers.
+//
+// Docs (verified 2026-07-10):
+//   https://docs.pears.com/reference/building-blocks/autobase/
+//   pear-app/node_modules/autobase/index.js:934
+//     "await base.ack(bg = false)" — bg=true schedules via the internal timer,
+//     bg=false appends immediately. Only indexers can ack. An ack appends a
+//     null node referencing known heads so peers converge faster.
+//
+// We fire base.ack(true) every ACK_INTERVAL_MS on any base for which we are
+// an active indexer, PLUS a base.ack(false) immediately after every local
+// append so the head reference is not delayed by the timer window.
+const ACK_INTERVAL_MS = 2500
+
+/**
+ * Schedule periodic acks for an autobase local indexer writer. Returns a
+ * disposer that clears the interval. Safe to call on non-indexer bases: the
+ * interval body checks `base.ackable` on every tick so a peer that becomes
+ * an indexer mid-flight starts acking without a restart.
+ *
+ * @param {object} base   Autobase instance (chat or playhead)
+ * @param {string} label  human-readable tag for debug logs
+ */
+function startAckLoop(base, label) {
+  if (!base) return () => {}
+  const timer = setInterval(async () => {
+    try {
+      if (!base.ackable) return
+      await base.ack(true)
+      // Debug-only. Structured logger routes through workers/main.js `log`;
+      // room.js does not have a direct handle so we route via console.log at
+      // debug prefix, which matches every other room.js log call.
+      console.log('[Curva][Room][ack]', label, 'bg')
+    } catch (err) {
+      console.log('[Curva][Room][ack] scheduled ack failed', label, err?.message)
+    }
+  }, ACK_INTERVAL_MS)
+  // Best-effort: keep the process alive only as long as the interval is
+  // needed. Bare's setInterval returns a plain handle; unref is optional and
+  // absent on some runtimes, so we probe defensively.
+  try { if (typeof timer.unref === 'function') timer.unref() } catch { /* noop */ }
+  return () => clearInterval(timer)
+}
+
+/**
+ * Fire a single foreground ack immediately after a local append. Wrap the
+ * caller's append() call: `await appendThenAck(base, () => base.append(msg))`.
+ * The ack is best-effort; a failed ack does NOT roll back the append.
+ */
+async function appendThenAck(base, appendFn, label) {
+  const res = await appendFn()
+  try {
+    if (base && base.ackable) {
+      await base.ack(false)
+      console.log('[Curva][Room][ack]', label, 'post-append')
+    }
+  } catch (err) {
+    console.log('[Curva][Room][ack] post-append ack failed', label, err?.message)
+  }
+  return res
+}
 
 // Spectator tier feature flag. When false (rollout default) every invitation
 // is treated as `tier: 'writer'` even if the payload explicitly requests
@@ -117,6 +180,13 @@ async function openRoom(store, opts) {
 
   const playhead = await createPlayhead(roomStore, { isHost, myPubkey, bootstrap: playheadBootstrap })
   const chat = await createChat(roomStore, { myPubkey, bootstrap: chatBootstrap })
+
+  // ADR-004: start ack loops on both bases. The loop is a cheap
+  // clearInterval-owned handle; the body no-ops when the local writer is not
+  // an active indexer. See top-of-file docs block for the verified API and
+  // rationale.
+  const stopChatAck = startAckLoop(chat.getBase?.(), 'chat')
+  const stopPlayheadAck = startAckLoop(playhead.getBase?.(), 'playhead')
 
   // T2 (Final Fix Wave): if this peer is host, publish its own writer key as
   // the trusted addWriter authority to BOTH bases so the reducers can gate
@@ -948,6 +1018,63 @@ async function openRoom(store, opts) {
     return () => tacticalSubs[kind].delete(cb)
   }
 
+  // ADR-002: verified-peer presence cache. Keyed by hex peer id (Hyperswarm
+  // remote pubkey OR autobase writer core hex — the caller decides). Values
+  // are the resolved result of keetVerifyPeerProof, cached so we do not walk
+  // the identity chain on every presence tick. Emptied on close.
+  //
+  // Invalidation policy: entries are removed by the caller when a peer
+  // disconnects, OR overwritten wholesale when a peer sends a fresh proof.
+  // We do NOT expire entries by wall-clock time because the identity chain
+  // itself is time-invariant (epoch-based rekeys are handled by keet-identity).
+  // Code review fix (High): cap verifiedPeerCache to prevent unbounded growth
+  // from a malicious peer churning through fresh peer IDs or a long-lived room
+  // with heavy natural churn. Map preserves insertion order so evicting the
+  // first key gives us naive-LRU-on-write behavior (good enough — a hostile
+  // actor cannot pin themselves in the cache without our forgetPeer contract).
+  const verifiedPeerCache = new Map()
+  const VERIFIED_PEER_CACHE_MAX = 1024
+
+  /**
+   * Register a peer's identity proof + attested data. Returns the verify
+   * result immediately so the caller can flow it into the same emission that
+   * carried the proof. Fails gracefully — a bad proof yields ok:false and
+   * caches nothing so a retry from the peer can still land.
+   *
+   * @param {string} peerId  hex string identifying the peer
+   * @param {string|Buffer} proof
+   * @param {string|Buffer} attestedData
+   * @returns {{ok:true, identityPublicKeyHex:string, devicePublicKeyHex:string}|{ok:false}}
+   */
+  function registerPeerProof(peerId, proof, attestedData) {
+    if (typeof peerId !== 'string' || peerId.length === 0) return { ok: false }
+    const res = keetVerifyPeerProof(proof, attestedData)
+    if (res.ok) {
+      const key = peerId.toLowerCase()
+      // Refresh insertion order on repeat verify from same peer.
+      if (verifiedPeerCache.has(key)) verifiedPeerCache.delete(key)
+      verifiedPeerCache.set(key, res)
+      // LRU eviction: drop the oldest entry when we exceed the cap. Prevents
+      // unbounded memory growth on adversarial churn or long room sessions.
+      if (verifiedPeerCache.size > VERIFIED_PEER_CACHE_MAX) {
+        const oldest = verifiedPeerCache.keys().next().value
+        if (oldest != null) verifiedPeerCache.delete(oldest)
+      }
+    }
+    return res
+  }
+  function getVerifiedPeer(peerId) {
+    if (typeof peerId !== 'string' || peerId.length === 0) return null
+    return verifiedPeerCache.get(peerId.toLowerCase()) || null
+  }
+  function forgetPeer(peerId) {
+    if (typeof peerId !== 'string' || peerId.length === 0) return false
+    return verifiedPeerCache.delete(peerId.toLowerCase())
+  }
+  function getVerifiedCount() {
+    return verifiedPeerCache.size
+  }
+
   // Per-connection tactical channel handles. Keyed by the connection object
   // so `detachTacticalForConn(conn)` can be called from the swarm's
   // 'close' callback. Values are the handle returned by attachTacticalChannel.
@@ -1063,6 +1190,10 @@ async function openRoom(store, opts) {
     if (closed) return
     closed = true
     const errs = []
+    // ADR-004: stop periodic ack loops FIRST so we don't race a fresh ack
+    // against the base close call below.
+    try { stopChatAck() } catch (err) { errs.push(err) }
+    try { stopPlayheadAck() } catch (err) { errs.push(err) }
     // Detach the demo playhead subscription first so no more auto-fire
     // callbacks can queue behind the close.
     for (const off of demoPlayheadUnsubs) {
@@ -1075,6 +1206,8 @@ async function openRoom(store, opts) {
     }
     tacticalHandles.clear()
     for (const set of Object.values(tacticalSubs)) set.clear()
+    // ADR-002: drop the presence cache; identity data is per-session.
+    verifiedPeerCache.clear()
     // Wave 15: unregister blind-peering entries FIRST so the client stops
     // making addAutobase attempts against a base that is about to close. This
     // keeps close() idempotent even if the blind peer is unreachable.
@@ -1170,6 +1303,14 @@ async function openRoom(store, opts) {
     handleWriterRequest,
     signMyWriterInvitations,
     getWriterRoster,
+    // ADR-002: verified-peer presence surface. workers/main.js consumes these
+    // when the peer_presence frame includes an identityProof + attestedData
+    // pair. The renderer reads getVerifiedCount() to paint the "N verified"
+    // subheader in RoomHeader.
+    registerPeerProof,
+    getVerifiedPeer,
+    forgetPeer,
+    getVerifiedCount,
     // Tactical drawing channel surface. Callers wire per-connection channels
     // by invoking `attachTacticalToStream(stream, conn)` in the swarm's
     // 'connection' handler and `detachTacticalForConn(conn)` on close.

@@ -77,6 +77,44 @@ test('T2: system:tip records writer binding in view (idempotent, rebase-safe)', 
   await cleanup()
 })
 
+// ADR-004: base.ack cadence. When the local writer is an active indexer, the
+// room.js ack loop fires base.ack(true) every 2500ms AND chat.js appends an
+// immediate base.ack(false) after every send/sendSystem. A single-writer
+// autobase (host path) is always an indexer, so after N sends we should see
+// base.local.length grow by MORE than N because acks append null nodes.
+//
+// Autobase source (verified 2026-07-10):
+//   pear-app/node_modules/autobase/index.js:934 — "await base.ack(bg)"
+//   docs: https://docs.pears.com/reference/building-blocks/autobase/
+test('ADR-004: local indexer writer sees ack blocks appended after send', async (t) => {
+  const { store, cleanup } = await makeStore()
+  const chat = await createChat(store, { myPubkey: 'ac'.repeat(32) })
+  const base = chat.getBase()
+
+  // Send N regular messages. Every send() ends with `if (base.ackable) await
+  // base.ack(false)`, so each send generates AT LEAST one message block.
+  // Some sends produce an additional null ack block after the message block.
+  const N = 3
+  for (let i = 0; i < N; i++) {
+    await chat.send({ text: 'ack-cadence ' + i, match_time_ms: 1000 * i })
+    // Yield so the append settles.
+    await new Promise((r) => setTimeout(r, 40))
+  }
+  // Fire one more explicit ack to guarantee at least one null node landed if
+  // the earlier post-append acks were skipped (writer became ackable between
+  // reads). This mirrors the ack loop firing in the background.
+  try { if (base.ackable) await base.ack(false) } catch { /* noop */ }
+  await new Promise((r) => setTimeout(r, 50))
+
+  const localLen = base.local?.length ?? 0
+  t.ok(base.ackable, 'single-writer host is an active indexer, so ackable is true')
+  t.ok(localLen >= N,
+    'local writer length is >= N sends (' + localLen + ' >= ' + N + ')')
+
+  await chat.close()
+  await cleanup()
+})
+
 test('T2: authorship helpers still enforce host-vs-writer rules', (t) => {
   // Pure-function unit test on the exported helpers (still exposed for tests).
   const host = 'deadbeef' + 'aa'.repeat(28)

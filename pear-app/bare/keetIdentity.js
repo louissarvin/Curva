@@ -343,9 +343,64 @@ function createKeetIdentity({ SecretManager, storageDir, log } = {}) {
   }
 }
 
+/**
+ * ADR-002: stateless verifier for a peer's identity proof. Given a proof
+ * buffer (or hex string) and the attested data bytes, ecrecover-style walk
+ * the identity chain via `IdentityKey.verify` and return the derived
+ * identity + device public keys. Returns `{ ok: false }` on ANY failure so
+ * the caller cannot leak a partial result.
+ *
+ * This is a MODULE-LEVEL export, not on the createKeetIdentity handle, so
+ * the room presence pipeline can call it without holding an identity load.
+ * The verifier is stateless by design: presence messages carry the exact
+ * (proof, attestedData) pair produced by the peer's attest() call.
+ *
+ * Verified against source:
+ *   pear-app/node_modules/keet-identity-key/index.js:138-193
+ *   returns null | { receipt, identityPublicKey, devicePublicKey }
+ *
+ * @param {string|Buffer} proof         proof bytes (hex string or Buffer)
+ * @param {string|Buffer} attestedData  canonical attested bytes
+ * @returns {{ok:true, identityPublicKeyHex:string, devicePublicKeyHex:string} | {ok:false}}
+ */
+function verifyPeerProof(proof, attestedData) {
+  try {
+    if (proof === undefined || proof === null) return { ok: false }
+    if (attestedData === undefined || attestedData === null) return { ok: false }
+    let proofBuf
+    if (typeof proof === 'string') {
+      if (proof.length === 0) return { ok: false }
+      if (!/^[0-9a-fA-F]+$/.test(proof)) return { ok: false }
+      proofBuf = b4a.from(proof, 'hex')
+    } else if (b4a.isBuffer(proof) || proof instanceof Uint8Array) {
+      proofBuf = proof
+    } else {
+      return { ok: false }
+    }
+    let dataBuf
+    if (typeof attestedData === 'string') {
+      dataBuf = b4a.from(attestedData, 'utf8')
+    } else if (b4a.isBuffer(attestedData) || attestedData instanceof Uint8Array) {
+      dataBuf = attestedData
+    } else {
+      return { ok: false }
+    }
+    const res = IdentityKey.verify(proofBuf, dataBuf, {})
+    if (!res || !res.identityPublicKey || !res.devicePublicKey) return { ok: false }
+    return {
+      ok: true,
+      identityPublicKeyHex: b4a.toString(res.identityPublicKey, 'hex'),
+      devicePublicKeyHex: b4a.toString(res.devicePublicKey, 'hex')
+    }
+  } catch {
+    return { ok: false }
+  }
+}
+
 module.exports = {
   createKeetIdentity,
   featureEnabled,
+  verifyPeerProof,
   FLAG_ENV,
   MNEMONIC_KEY,
   DEVICE_SEED_KEY,

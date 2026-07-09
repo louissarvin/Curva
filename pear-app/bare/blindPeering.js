@@ -148,15 +148,35 @@ function createBlindPeeringClient({
     return makeNoop(state, { reason: 'init-failed', error: state.lastError })
   }
 
+  // Code review fix (High): evict rate-limit entries that have been idle for
+  // longer than the eviction TTL. Prevents unbounded growth of
+  // state.registrations across a long session that opens/closes many bases.
+  const RATE_LIMIT_EVICT_TTL_MS = 10 * 60 * 1000 // 10 min
+  const RATE_LIMIT_MAX_ENTRIES = 512
+
   function ratelimitOk(baseKey) {
     const now = Date.now()
     let entry = state.registrations.get(baseKey)
     if (!entry) {
-      entry = { attempts: [] }
+      entry = { attempts: [], addedAt: now }
       state.registrations.set(baseKey, entry)
+    } else {
+      entry.addedAt = entry.addedAt || now
     }
-    // Trim outside window.
+    // Trim attempts outside the rate-limit window.
     entry.attempts = entry.attempts.filter((t) => now - t < RATE_LIMIT_WINDOW_MS)
+    // Opportunistic eviction: whenever we touch the map, drop other entries
+    // whose most recent attempt is older than the eviction TTL. Cheap because
+    // it only iterates when we cross the max-entries threshold.
+    if (state.registrations.size > RATE_LIMIT_MAX_ENTRIES) {
+      for (const [k, e] of state.registrations) {
+        if (k === baseKey) continue
+        const lastAttempt = e.attempts.length > 0 ? e.attempts[e.attempts.length - 1] : (e.addedAt || 0)
+        if (now - lastAttempt > RATE_LIMIT_EVICT_TTL_MS) {
+          state.registrations.delete(k)
+        }
+      }
+    }
     if (entry.attempts.length >= RATE_LIMIT_MAX) return { ok: false, entry }
     entry.attempts.push(now)
     return { ok: true, entry }
@@ -187,11 +207,25 @@ function createBlindPeeringClient({
     }
 
     try {
-      // Docs-native: addAutobase with default opts registers via the base's
-      // wakeupCapability.key. Curva does not override `target` because we want
-      // the blind peer to seed the canonical wakeup key, which is what late
-      // joiners discover through swarm.join anyway.
-      await bp.addAutobase(base, extra)
+      // ADR-003: pass an EXPLICIT per-base target so we do not rely on the
+      // blind-peering default. Docs-native default is
+      // `auto.wakeupCapability.key` (see node_modules/blind-peering/index.js:145);
+      // we set the same value explicitly so an autobase whose shape drifts in
+      // a future package version still gets the correct target instead of
+      // silently registering under `undefined`. Callers may override via
+      // `extra.target`.
+      const explicitTarget = extra.target
+        || base.wakeupCapability?.key
+        || base.discoveryKey
+        || base.key
+      const forwarded = { ...extra, target: explicitTarget }
+      log.info('blind-peering registerAutobase', {
+        discoveryKey: shortKey(discoveryKeyHex),
+        targetShort: shortKey(b4a.isBuffer(explicitTarget)
+          ? b4a.toString(explicitTarget, 'hex')
+          : String(explicitTarget || ''))
+      })
+      await bp.addAutobase(base, forwarded)
       rl.entry.base = base
       rl.entry.addedAt = Date.now()
       log.info('blind-peering registered autobase', {
@@ -202,6 +236,55 @@ function createBlindPeeringClient({
       state.lastError = err?.message || String(err)
       log.warn('blind-peering register failed', {
         discoveryKey: shortKey(discoveryKeyHex),
+        message: state.lastError
+      })
+      return { ok: false, reason: 'register-failed:' + state.lastError }
+    }
+  }
+
+  /**
+   * ADR-003: register a raw Hypercore with the blind peer. Some Curva
+   * subsystems (clip index, tactical drawings) live outside Autobase; this
+   * gives them the same seeding guarantee. Target defaults to `core.key`
+   * exactly (documented default per node_modules/blind-peering/index.js:198).
+   */
+  async function registerCore(core, extra = {}) {
+    if (state.closed) return { ok: false, reason: 'closed' }
+    if (!core) return { ok: false, reason: 'no-core' }
+    let coreKeyHex = null
+    try {
+      const k = core.key
+      if (!k) return { ok: false, reason: 'no-core-key' }
+      coreKeyHex = b4a.isBuffer(k) ? b4a.toString(k, 'hex') : String(k)
+    } catch (err) {
+      return { ok: false, reason: 'core-key-read-failed:' + (err?.message || 'unknown') }
+    }
+    const rl = ratelimitOk(coreKeyHex)
+    if (!rl.ok) {
+      log.warn('blind-peering rate limited (core)', {
+        coreKey: shortKey(coreKeyHex),
+        window: RATE_LIMIT_WINDOW_MS,
+        max: RATE_LIMIT_MAX
+      })
+      return { ok: false, reason: 'rate-limited' }
+    }
+    try {
+      const explicitTarget = extra.target || core.key
+      const forwarded = { ...extra, target: explicitTarget }
+      log.info('blind-peering registerCore', {
+        coreKey: shortKey(coreKeyHex),
+        targetShort: shortKey(b4a.isBuffer(explicitTarget)
+          ? b4a.toString(explicitTarget, 'hex')
+          : String(explicitTarget || ''))
+      })
+      await bp.addCore(core, forwarded)
+      rl.entry.core = core
+      rl.entry.addedAt = Date.now()
+      return { ok: true, coreKey: coreKeyHex }
+    } catch (err) {
+      state.lastError = err?.message || String(err)
+      log.warn('blind-peering registerCore failed', {
+        coreKey: shortKey(coreKeyHex),
         message: state.lastError
       })
       return { ok: false, reason: 'register-failed:' + state.lastError }
@@ -240,9 +323,43 @@ function createBlindPeeringClient({
     }
   }
 
+  /**
+   * ADR-003: expose suspend/resume so the workers/main.js Pear teardown path
+   * can quiesce the DHT sockets before we close them. Also lets a background-
+   * mode Pear runtime free peer connections without tearing down bookkeeping.
+   * The docs and installed source (node_modules/blind-peering/index.js:82,93)
+   * confirm these are top-level BlindPeering methods, not per-peer.
+   */
+  async function suspend() {
+    if (state.closed) return
+    try {
+      if (bp && typeof bp.suspend === 'function') await bp.suspend()
+      log.info('blind-peering suspended')
+    } catch (err) {
+      log.warn('blind-peering suspend failed', { message: err?.message })
+    }
+  }
+  async function resume() {
+    if (state.closed) return
+    try {
+      if (bp && typeof bp.resume === 'function') await bp.resume()
+      log.info('blind-peering resumed')
+    } catch (err) {
+      log.warn('blind-peering resume failed', { message: err?.message })
+    }
+  }
+
   async function close() {
     if (state.closed) return
     state.closed = true
+    // ADR-003: quiesce BEFORE close so open peer sockets are torn down cleanly
+    // (per the installed source: suspend() drops the DHT sockets, close()
+    // then gc's the peer table).
+    try {
+      if (bp && typeof bp.suspend === 'function') await bp.suspend()
+    } catch (err) {
+      log.warn('blind-peering pre-close suspend failed', { message: err?.message })
+    }
     try {
       if (bp) await bp.close()
     } catch (err) {
@@ -252,7 +369,7 @@ function createBlindPeeringClient({
     state.active = false
   }
 
-  return { registerAutobase, unregisterAutobase, status, close }
+  return { registerAutobase, unregisterAutobase, registerCore, suspend, resume, status, close }
 }
 
 function makeNoop(state, { reason }) {
@@ -267,6 +384,9 @@ function makeNoop(state, { reason }) {
   return {
     async registerAutobase() { return { ok: false, reason } },
     async unregisterAutobase() { return { ok: true } },
+    async registerCore() { return { ok: false, reason } },
+    async suspend() {},
+    async resume() {},
     status,
     async close() {}
   }

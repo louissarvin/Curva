@@ -499,6 +499,11 @@ async function createChat(store, { myPubkey = 'local', hostPubkeyHex = null, boo
     } else {
       await base.append(enriched, { optimistic: true })
     }
+    // ADR-004: immediate foreground ack after a local writer append so the
+    // head reference is not delayed by the 2500ms background timer. No-op on
+    // non-indexers (base.ackable is false). Best-effort — a failed ack does
+    // not roll back the append.
+    try { if (base.ackable) await base.ack(false) } catch { /* noop */ }
     return enriched
   }
 
@@ -547,6 +552,9 @@ async function createChat(store, { myPubkey = 'local', hostPubkeyHex = null, boo
     } else {
       await base.append(msg, { optimistic: true })
     }
+    // ADR-004: post-append immediate ack so a live indexer converges peers
+    // without waiting for the periodic timer.
+    try { if (base.ackable) await base.ack(false) } catch { /* noop */ }
     return msg
   }
 
@@ -635,6 +643,10 @@ async function createChat(store, { myPubkey = 'local', hostPubkeyHex = null, boo
     } else {
       await base.append(enriched, { optimistic: true })
     }
+    // ADR-004: immediate post-append ack. Goals are host-authoritative and
+    // low-frequency; converging peers as fast as possible on a goal event is
+    // the whole point of the F3 shard.
+    try { if (base.ackable) await base.ack(false) } catch { /* noop */ }
     return enriched
   }
 
