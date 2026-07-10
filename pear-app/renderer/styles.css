@@ -6331,6 +6331,112 @@ h2::after {
 }
 
 /* -------------------------------------------------------------------------
+ * Wave 4 F2 addendum: per-model log tail drawer for the Models tab.
+ * One drawer at a time, inserted directly under its owning row. Reuses the
+ * existing .curva-diagnostics-loglist look and feel with additive .tail-*
+ * classes for the header + filter chips.
+ * ------------------------------------------------------------------------- */
+.curva-model-actions {
+  display: flex;
+  gap: var(--sp-1);
+  align-items: center;
+}
+.curva-model-tail {
+  background: var(--curva-panel);
+  color: var(--curva-text);
+  border: 1px solid var(--curva-border);
+  border-radius: 3px;
+  padding: 2px 6px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.curva-model-tail:disabled {
+  color: var(--curva-muted);
+  cursor: default;
+}
+.curva-model-tail-drawer-row td {
+  padding: 0;
+  background: rgba(255, 255, 255, 0.02);
+}
+.curva-diagnostics-tail-drawer {
+  padding: var(--sp-2);
+  border-top: 1px solid var(--curva-border);
+  border-bottom: 1px solid var(--curva-border);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+.curva-diagnostics-tail-header {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: center;
+}
+.curva-diagnostics-tail-title {
+  font-size: 11px;
+  color: var(--curva-text);
+  font-family: var(--curva-mono);
+}
+.curva-diagnostics-tail-counters {
+  font-size: 11px;
+  color: var(--curva-muted);
+  flex: 1 1 auto;
+}
+.curva-diagnostics-tail-stop {
+  background: var(--curva-panel);
+  color: var(--curva-text);
+  border: 1px solid var(--curva-border);
+  border-radius: 3px;
+  padding: 2px 6px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.curva-diagnostics-tail-filters {
+  display: flex;
+  gap: var(--sp-1);
+}
+.curva-diagnostics-tail-filter {
+  background: transparent;
+  color: var(--curva-muted);
+  border: 1px solid var(--curva-border);
+  border-radius: 3px;
+  padding: 1px 6px;
+  font-size: 10px;
+  cursor: pointer;
+  text-transform: uppercase;
+}
+.curva-diagnostics-tail-filter.is-active {
+  color: var(--curva-text);
+  background: var(--curva-panel);
+}
+.curva-diagnostics-tail-log {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  font-family: var(--curva-mono);
+  font-size: 10px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+.curva-diagnostics-tail-item {
+  padding: 2px 6px;
+  background: rgba(255, 255, 255, 0.02);
+  border-radius: 2px;
+  display: flex;
+  gap: var(--sp-1);
+  color: var(--curva-text);
+  overflow-wrap: anywhere;
+}
+.curva-diagnostics-tail-item-warn { color: var(--curva-warn); }
+.curva-diagnostics-tail-item-error { color: var(--curva-bad); }
+.curva-tail-ts { color: var(--curva-muted); }
+.curva-tail-level { color: var(--curva-muted); text-transform: uppercase; }
+.curva-tail-ns { color: var(--curva-muted); }
+.curva-tail-msg { color: inherit; }
+
+/* -------------------------------------------------------------------------
  * Cup Final: system:coach / system:vlm-caption / system:ocr-read pills.
  * Match the commentary pill discipline (italic + left border) but each type
  * gets its own accent color so a skimming judge can tell the flow at a

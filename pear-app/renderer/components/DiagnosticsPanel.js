@@ -326,7 +326,7 @@ export function mountDiagnosticsPanel (opts = {}) {
   modelsTable.className = 'curva-diagnostics-table curva-diagnostics-models-table'
   const modelsThead = document.createElement('thead')
   const modelsHeadRow = document.createElement('tr')
-  for (const h of ['Model', 'Addon', 'Loaded', 'Cached', 'Size', 'Handlers', 'Delegated', 'Last log', '']) {
+  for (const h of ['Model', 'Addon', 'Loaded', 'Cached', 'Size', 'Handlers', 'Delegated', 'Last log', 'Actions']) {
     const th = document.createElement('th')
     th.textContent = h
     modelsHeadRow.appendChild(th)
@@ -390,8 +390,26 @@ export function mountDiagnosticsPanel (opts = {}) {
     // wave-final QVAC depth F2: last generated report JSON. Held so the
     // Copy button has something to write to the clipboard without re-fetching.
     lastReportJson: '',
-    reportInFlight: false
+    reportInFlight: false,
+    // Wave 4 F2 addendum: single-drawer state for the per-model log tail. Only
+    // one drawer may be open at a time — opening a second drawer closes the
+    // first (both server-side stream and DOM). See models:tail-logs IPC.
+    tail: {
+      modelId: null,        // model id currently being tailed (null if closed)
+      drawer: null,         // drawer DOM element
+      logList: null,        // <ul> element inside the drawer
+      buffer: [],           // log entries in insertion order (cap MAX_TAIL_LINES)
+      counters: {},         // { info: n, warn: n, error: n, debug: n, off: n }
+      levelFilter: 'all',   // 'all' | 'error' | 'warn' | 'info' | 'debug'
+      counterLabel: null,   // <span> for header level counters
+      unsubLog: null,       // curva.models.onTailLog unsub
+      unsubStopped: null    // curva.models.onTailStopped unsub
+    }
   }
+  // Cap of log lines held in the drawer buffer. Per spec: drop oldest on
+  // overflow. Kept below the wrapper's default maxLines (500) so the drawer
+  // usually renders every line the server delivers before the tail auto-stops.
+  const MAX_TAIL_LINES = 200
 
   function tabButton (label) {
     const b = document.createElement('button')
@@ -415,6 +433,12 @@ export function mountDiagnosticsPanel (opts = {}) {
     // Report tab is a manual snapshot — deliberately no auto-refresh.
     stopPolling()
     stopModelsPolling()
+    // Wave 4 F2 addendum: switching away from Models auto-closes any open
+    // per-model log tail. This mirrors how startPolling / stopModelsPolling
+    // are gated on the active tab.
+    if (name !== 'models' && state.tail.modelId) {
+      closeTailDrawer({ silent: true })
+    }
     if (state.destroyed) return
     if (name === 'metrics') startPolling()
     if (name === 'models') startModelsPolling()
@@ -619,8 +643,11 @@ export function mountDiagnosticsPanel (opts = {}) {
       }
       tr.appendChild(tdLog)
 
-      // Actions column (unload button — only for loaded local models)
+      // Actions column: [Unload] [Tail logs] — Unload only for loaded local
+      // models; Tail logs for any row with a valid model id (delegated or
+      // local, loaded or not). The Bare worker enforces its own guards.
       const tdActions = document.createElement('td')
+      tdActions.className = 'curva-model-actions'
       if (row.isLoaded && !row.isDelegated && idSafe) {
         const unloadBtn = document.createElement('button')
         unloadBtn.type = 'button'
@@ -651,10 +678,271 @@ export function mountDiagnosticsPanel (opts = {}) {
         })
         tdActions.appendChild(unloadBtn)
       }
+      if (idSafe && typeof curva?.models?.tailLogs === 'function') {
+        const tailBtn = document.createElement('button')
+        tailBtn.type = 'button'
+        tailBtn.className = 'curva-model-tail'
+        const isActive = state.tail.modelId === idSafe
+        tailBtn.textContent = isActive ? 'Tailing…' : 'Tail logs'
+        tailBtn.disabled = isActive
+        tailBtn.addEventListener('click', () => {
+          openTailDrawer(idSafe, row.name || idSafe, tr)
+        })
+        tdActions.appendChild(tailBtn)
+      }
       tr.appendChild(tdActions)
 
       modelsTbody.appendChild(tr)
+
+      // Re-attach the drawer to its owning row when a refresh replaces the DOM.
+      if (state.tail.modelId === idSafe && state.tail.drawer) {
+        // The tbody was cleared above; re-insert the drawer directly under the
+        // row so the drilldown stays visually anchored across refreshes.
+        const drawerRow = document.createElement('tr')
+        drawerRow.className = 'curva-model-tail-drawer-row'
+        const drawerCell = document.createElement('td')
+        drawerCell.colSpan = 9
+        drawerCell.appendChild(state.tail.drawer)
+        drawerRow.appendChild(drawerCell)
+        modelsTbody.appendChild(drawerRow)
+      }
     }
+  }
+
+  // ---- Wave 4 F2 addendum: per-model log tail drawer -------------------
+  // Only ONE drawer open at a time. Opening a second drawer closes the first
+  // (both server stream and DOM). textContent-only for every log field so a
+  // hostile addon cannot inject HTML via the log message body.
+
+  function openTailDrawer (modelId, displayName, ownerRow) {
+    if (state.destroyed) return
+    // Guard: if the tail bridge disappeared between render and click, no-op.
+    if (typeof curva?.models?.tailLogs !== 'function' ||
+        typeof curva?.models?.stopTail !== 'function' ||
+        typeof curva?.models?.onTailLog !== 'function') {
+      status.textContent = 'model log tail bridge unavailable'
+      return
+    }
+    // If a previous drawer is open, close it first so we do not leak the
+    // upstream stream. The Bare worker's ALREADY_TAILING guard also protects
+    // against a race, but closing first keeps the UX predictable.
+    if (state.tail.modelId && state.tail.modelId !== modelId) {
+      closeTailDrawer({ silent: true })
+    } else if (state.tail.modelId === modelId) {
+      // Same model already tailed — treat click as a no-op.
+      return
+    }
+
+    const drawer = document.createElement('div')
+    drawer.className = 'curva-diagnostics-tail-drawer'
+
+    const header = document.createElement('div')
+    header.className = 'curva-diagnostics-tail-header'
+    const title = document.createElement('span')
+    title.className = 'curva-diagnostics-tail-title'
+    const shortId = modelId.length > 24 ? modelId.slice(0, 12) + '…' + modelId.slice(-6) : modelId
+    title.textContent = 'Tailing ' + shortId
+    header.appendChild(title)
+    const counterLabel = document.createElement('span')
+    counterLabel.className = 'curva-diagnostics-tail-counters'
+    counterLabel.textContent = ''
+    header.appendChild(counterLabel)
+    const stopBtn = document.createElement('button')
+    stopBtn.type = 'button'
+    stopBtn.className = 'curva-diagnostics-tail-stop'
+    stopBtn.textContent = 'Stop tail'
+    stopBtn.addEventListener('click', () => closeTailDrawer())
+    header.appendChild(stopBtn)
+    drawer.appendChild(header)
+
+    const filterBar = document.createElement('div')
+    filterBar.className = 'curva-diagnostics-tail-filters'
+    for (const lvl of ['all', 'error', 'warn', 'info', 'debug']) {
+      const b = document.createElement('button')
+      b.type = 'button'
+      b.className = 'curva-diagnostics-tail-filter'
+      b.textContent = lvl
+      if (lvl === 'all') b.classList.add('is-active')
+      b.addEventListener('click', () => {
+        state.tail.levelFilter = lvl
+        for (const other of filterBar.querySelectorAll('.curva-diagnostics-tail-filter')) {
+          other.classList.toggle('is-active', other.textContent === lvl)
+        }
+        rerenderTailBuffer()
+      })
+      filterBar.appendChild(b)
+    }
+    drawer.appendChild(filterBar)
+
+    const logList = document.createElement('ul')
+    logList.className = 'curva-diagnostics-tail-log'
+    drawer.appendChild(logList)
+
+    state.tail.modelId = modelId
+    state.tail.drawer = drawer
+    state.tail.logList = logList
+    state.tail.counterLabel = counterLabel
+    state.tail.buffer = []
+    state.tail.counters = { error: 0, warn: 0, info: 0, debug: 0, off: 0 }
+    state.tail.levelFilter = 'all'
+
+    // Subscribe to log events BEFORE calling tailLogs so we do not miss the
+    // first entry the worker fires.
+    try {
+      const ret = curva.models.onTailLog((payload) => {
+        if (!payload || typeof payload !== 'object') return
+        if (payload.modelId !== state.tail.modelId) return
+        const entry = payload.entry
+        if (!entry || typeof entry !== 'object') return
+        appendTailEntry(entry)
+      })
+      if (typeof ret === 'function') state.tail.unsubLog = ret
+    } catch { /* ignore */ }
+    if (typeof curva.models.onTailStopped === 'function') {
+      try {
+        const ret = curva.models.onTailStopped((payload) => {
+          if (!payload || typeof payload !== 'object') return
+          if (payload.modelId !== state.tail.modelId) return
+          // Server-side confirmed stop — tear down the DOM if we did not
+          // initiate. Idempotent with the local close below.
+          if (state.tail.modelId) closeTailDrawer({ silent: true })
+        })
+        if (typeof ret === 'function') state.tail.unsubStopped = ret
+      } catch { /* ignore */ }
+    }
+
+    // Insert the drawer row directly under its owner in the table.
+    const drawerRow = document.createElement('tr')
+    drawerRow.className = 'curva-model-tail-drawer-row'
+    const drawerCell = document.createElement('td')
+    drawerCell.colSpan = 9
+    drawerCell.appendChild(drawer)
+    drawerRow.appendChild(drawerCell)
+    if (ownerRow && ownerRow.parentNode === modelsTbody) {
+      ownerRow.parentNode.insertBefore(drawerRow, ownerRow.nextSibling)
+    } else {
+      modelsTbody.appendChild(drawerRow)
+    }
+
+    // Start the tail on the Bare worker side.
+    try {
+      const p = curva.models.tailLogs(modelId)
+      if (p && typeof p.catch === 'function') {
+        p.catch((err) => {
+          status.textContent = 'tail error: ' + safeMessage(err)
+          // Server refused (SDK_UNAVAILABLE / ALREADY_TAILING / STREAM_UNAVAILABLE)
+          closeTailDrawer({ silent: true })
+        })
+      }
+    } catch (err) {
+      status.textContent = 'tail error: ' + safeMessage(err)
+      closeTailDrawer({ silent: true })
+    }
+  }
+
+  function closeTailDrawer (opts = {}) {
+    const modelId = state.tail.modelId
+    if (!modelId) return
+    // Best-effort stop on the Bare side. Fire-and-forget; the goodbye() handler
+    // also stops every tail at shutdown.
+    try {
+      if (typeof curva?.models?.stopTail === 'function') {
+        const p = curva.models.stopTail(modelId)
+        if (p && typeof p.catch === 'function') p.catch(() => { /* noop */ })
+      }
+    } catch { /* noop */ }
+    try { if (typeof state.tail.unsubLog === 'function') state.tail.unsubLog() } catch { /* noop */ }
+    try { if (typeof state.tail.unsubStopped === 'function') state.tail.unsubStopped() } catch { /* noop */ }
+    const drawer = state.tail.drawer
+    if (drawer && drawer.parentNode) {
+      // The drawer sits inside a <tr>. Remove the row.
+      const row = drawer.parentNode.parentNode
+      if (row && row.parentNode) row.parentNode.removeChild(row)
+    }
+    state.tail.modelId = null
+    state.tail.drawer = null
+    state.tail.logList = null
+    state.tail.counterLabel = null
+    state.tail.buffer = []
+    state.tail.counters = {}
+    state.tail.unsubLog = null
+    state.tail.unsubStopped = null
+    if (!opts.silent) status.textContent = 'tail stopped ' + modelId
+  }
+
+  function appendTailEntry (entry) {
+    if (!entry || typeof entry !== 'object') return
+    const level = typeof entry.level === 'string' ? entry.level.slice(0, 16) : 'info'
+    const message = typeof entry.message === 'string' ? entry.message.slice(0, 2048) : ''
+    const namespace = typeof entry.namespace === 'string' ? entry.namespace.slice(0, 64) : ''
+    const timestamp = Number.isFinite(entry.timestamp) ? entry.timestamp
+      : Number.isFinite(entry.ts) ? entry.ts
+        : Date.now()
+    const norm = { level, message, namespace, timestamp }
+    state.tail.buffer.push(norm)
+    while (state.tail.buffer.length > MAX_TAIL_LINES) state.tail.buffer.shift()
+    if (!Number.isFinite(state.tail.counters[level])) state.tail.counters[level] = 0
+    state.tail.counters[level] += 1
+    updateCounterLabel()
+    // Only append to the DOM when the entry passes the current filter — a
+    // filter change re-renders the whole buffer.
+    if (state.tail.levelFilter === 'all' || state.tail.levelFilter === level) {
+      appendTailLi(norm)
+      trimDomToBufferCap()
+    }
+  }
+
+  function appendTailLi (entry) {
+    if (!state.tail.logList) return
+    const li = document.createElement('li')
+    li.className = 'curva-diagnostics-tail-item curva-diagnostics-tail-item-' + entry.level.replace(/[^a-z0-9-]/gi, '')
+    const ts = document.createElement('span'); ts.className = 'curva-tail-ts'
+    ts.textContent = formatHms(entry.timestamp)
+    const lv = document.createElement('span'); lv.className = 'curva-tail-level'
+    lv.textContent = '[' + entry.level + ']'
+    const ns = document.createElement('span'); ns.className = 'curva-tail-ns'
+    ns.textContent = entry.namespace + ':'
+    const msg = document.createElement('span'); msg.className = 'curva-tail-msg'
+    // XSS discipline: peer model log messages are untrusted — textContent only.
+    msg.textContent = entry.message
+    li.appendChild(ts); li.appendChild(lv); li.appendChild(ns); li.appendChild(msg)
+    state.tail.logList.appendChild(li)
+  }
+
+  function trimDomToBufferCap () {
+    if (!state.tail.logList) return
+    while (state.tail.logList.childElementCount > MAX_TAIL_LINES) {
+      state.tail.logList.removeChild(state.tail.logList.firstElementChild)
+    }
+  }
+
+  function rerenderTailBuffer () {
+    if (!state.tail.logList) return
+    state.tail.logList.textContent = ''
+    for (const entry of state.tail.buffer) {
+      if (state.tail.levelFilter === 'all' || state.tail.levelFilter === entry.level) {
+        appendTailLi(entry)
+      }
+    }
+  }
+
+  function updateCounterLabel () {
+    if (!state.tail.counterLabel) return
+    const c = state.tail.counters
+    const parts = []
+    for (const lvl of ['error', 'warn', 'info', 'debug']) {
+      if (c[lvl]) parts.push(lvl + ':' + c[lvl])
+    }
+    state.tail.counterLabel.textContent = parts.length > 0 ? parts.join(' · ') : ''
+  }
+
+  function formatHms (ts) {
+    const d = new Date(ts)
+    const hh = String(d.getHours()).padStart(2, '0')
+    const mm = String(d.getMinutes()).padStart(2, '0')
+    const ss = String(d.getSeconds()).padStart(2, '0')
+    const ms = String(d.getMilliseconds()).padStart(3, '0')
+    return hh + ':' + mm + ':' + ss + '.' + ms
   }
 
   function startModelsPolling () {
@@ -768,6 +1056,9 @@ export function mountDiagnosticsPanel (opts = {}) {
       state.destroyed = true
       stopPolling()
       stopModelsPolling()
+      if (state.tail.modelId) {
+        try { closeTailDrawer({ silent: true }) } catch { /* noop */ }
+      }
       if (state.unsubLogs) { try { state.unsubLogs() } catch {} }
       container.textContent = ''
       container.classList.remove('curva-diagnostics')

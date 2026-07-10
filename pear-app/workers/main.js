@@ -957,7 +957,8 @@ const {
   subscribeToServerLogs,
   registerHypercoreStats,
   registerHyperswarmStats,
-  getModelSnapshot
+  getModelSnapshot,
+  startModelLogTail
 } = require('../bare/observability.js')
 // Security audit fix (C1): startPrometheus is now async because it binds its
 // own loopback-only HTTP server. Hold a Promise-typed placeholder synchronously
@@ -1390,6 +1391,12 @@ const KNOWN_MODELS = [
   'GGML_CLASSIFICATION'
 ]
 const MODEL_ID_REGEX = /^[A-Za-z0-9_-]{1,128}$/
+// Wave 4 F2 addendum: per-model log tail handles, keyed by modelId. The value
+// is the { stop, status } handle returned by startModelLogTail. The `models:
+// tail-logs` IPC refuses to open a second tail against the same modelId so
+// duplicate delivery events cannot cross-fire on the renderer.
+const activeModelLogTails = new Map()
+const MODEL_LOG_TAIL_MAX_LINES = 500
 // ===== END MODEL REGISTRY =====
 
 // ===== BLIND PEERING (Wave 15) =====
@@ -5059,6 +5066,77 @@ async function dispatchCommand(msg) {
         }
         return
       }
+      // Wave 4 F2 addendum: per-model log tail via sdk.loggingStream({id}).
+      // Docs: node_modules/@qvac/sdk/dist/client/api/logging-stream.d.ts:23
+      // Wrapped by bare/observability.js startModelLogTail — see that module
+      // for cancellation + multiplex semantics.
+      case 'models:tail-logs': {
+        const modelId = typeof payload?.modelId === 'string' ? payload.modelId : ''
+        if (!MODEL_ID_REGEX.test(modelId)) {
+          emit('models:error', { code: 'VALIDATION_ERROR', message: 'modelId must match ^[A-Za-z0-9_-]{1,128}$', requestId: id })
+          emit('ack', { id, cmd })
+          return
+        }
+        if (activeModelLogTails.has(modelId)) {
+          emit('models:error', { code: 'ALREADY_TAILING', message: 'a tail for this modelId is already active', modelId, requestId: id })
+          emit('ack', { id, cmd, payload: { ok: false, code: 'ALREADY_TAILING', modelId, requestId: id } })
+          return
+        }
+        try {
+          const sdkImpl = await import('@qvac/sdk').catch(() => null)
+          if (!sdkImpl) {
+            emit('models:error', { code: 'SDK_UNAVAILABLE', message: '@qvac/sdk not available', modelId, requestId: id })
+            emit('ack', { id, cmd })
+            return
+          }
+          const tail = startModelLogTail(sdkImpl, {
+            modelId,
+            maxLines: MODEL_LOG_TAIL_MAX_LINES,
+            logger: { warn: (m, e) => log('warn', 'models: ' + m, e) },
+            onLog: (entry) => {
+              // Fire-and-forget: never throw upward or the async-generator
+              // loop breaks. emit() already swallows pipe-write errors.
+              try { emit('models:tail-log', { modelId, entry }) } catch { /* noop */ }
+            }
+          })
+          const st = tail.status()
+          if (st.ok === false && st.code === 'STREAM_UNAVAILABLE') {
+            emit('models:error', { code: 'STREAM_UNAVAILABLE', message: 'sdk.loggingStream unavailable', modelId, requestId: id })
+            emit('ack', { id, cmd, payload: { ok: false, code: 'STREAM_UNAVAILABLE', modelId, requestId: id } })
+            return
+          }
+          activeModelLogTails.set(modelId, tail)
+          emit('models:tail-started', { modelId, requestId: id })
+          emit('ack', { id, cmd, payload: { ok: true, modelId, requestId: id } })
+        } catch (err) {
+          emit('models:error', {
+            code: err?.code || 'MODELS_TAIL_FAILED',
+            message: err?.message || 'tail failed',
+            modelId,
+            requestId: id
+          })
+          emit('ack', { id, cmd })
+        }
+        return
+      }
+      case 'models:stop-tail': {
+        const modelId = typeof payload?.modelId === 'string' ? payload.modelId : ''
+        if (!MODEL_ID_REGEX.test(modelId)) {
+          emit('models:error', { code: 'VALIDATION_ERROR', message: 'modelId must match ^[A-Za-z0-9_-]{1,128}$', requestId: id })
+          emit('ack', { id, cmd })
+          return
+        }
+        const tail = activeModelLogTails.get(modelId)
+        if (tail) {
+          try { tail.stop() } catch (err) {
+            log('warn', 'models: tail stop threw', { modelId, message: err && err.message })
+          }
+          activeModelLogTails.delete(modelId)
+        }
+        emit('models:tail-stopped', { modelId, requestId: id })
+        emit('ack', { id, cmd, payload: { ok: true, modelId, requestId: id } })
+        return
+      }
       // ===== END MODEL REGISTRY =====
 
       // ===== GOAL PIPELINE (Wave 4A) =====
@@ -5327,6 +5405,16 @@ goodbye(async () => {
   // Cup Final: observability teardown. Prometheus.stop() closes the HTTP
   // server + clears the global hypertrace trace function.
   try { if (typeof observabilityLogUnsub === 'function') observabilityLogUnsub() } catch { /* noop */ }
+  // Wave 4 F2 addendum: stop every per-model log tail so the async-generator
+  // loops close cleanly before the SDK worker exits.
+  try {
+    for (const [modelId, tail] of activeModelLogTails) {
+      try { tail.stop() } catch (err) {
+        log('warn', 'models: tail stop on shutdown failed', { modelId, message: err && err.message })
+      }
+    }
+    activeModelLogTails.clear()
+  } catch { /* noop */ }
   try {
     // Await the async promHandle bootstrap so we don't skip stop() during a
     // fast shutdown that races the loopback listen() call.

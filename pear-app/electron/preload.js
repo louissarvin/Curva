@@ -1631,9 +1631,29 @@ contextBridge.exposeInMainWorld('curva', {
       }
       return writeMainAwait('models:unload', { modelId })
     },
-    onList:     (cb) => onEvent('models:list', cb),
-    onUnloaded: (cb) => onEvent('models:unloaded', cb),
-    onError:    (cb) => onEvent('models:error', cb)
+    // Wave 4 F2 addendum: per-model log tail. Opens sdk.loggingStream({id: modelId})
+    // in the Bare worker (see workers/main.js models:tail-logs handler) and pipes
+    // every entry back over the models:tail-log event stream. The DiagnosticsPanel
+    // Models tab drilldown drawer consumes these events.
+    // Docs: node_modules/@qvac/sdk/dist/client/api/logging-stream.d.ts:23
+    tailLogs(modelId) {
+      if (typeof modelId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(modelId)) {
+        throw new RangeError('modelId must match ^[A-Za-z0-9_-]{1,128}$')
+      }
+      return writeMainAwait('models:tail-logs', { modelId })
+    },
+    stopTail(modelId) {
+      if (typeof modelId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(modelId)) {
+        throw new RangeError('modelId must match ^[A-Za-z0-9_-]{1,128}$')
+      }
+      return writeMainAwait('models:stop-tail', { modelId })
+    },
+    onList:        (cb) => onEvent('models:list', cb),
+    onUnloaded:    (cb) => onEvent('models:unloaded', cb),
+    onError:       (cb) => onEvent('models:error', cb),
+    onTailLog:     (cb) => onEvent('models:tail-log', cb),
+    onTailStarted: (cb) => onEvent('models:tail-started', cb),
+    onTailStopped: (cb) => onEvent('models:tail-stopped', cb)
   },
 
   // ===== WAVE 4A: GOAL PIPELINE =====

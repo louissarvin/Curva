@@ -785,6 +785,219 @@ function normalizeModelLogEntry (log) {
   }
 }
 
+// -----------------------------------------------------------------------------
+// Wave 4 F2 addendum: per-model log tail via sdk.loggingStream({id}).
+//
+// Verified against installed source (fetched 2026-07-10):
+//   node_modules/@qvac/sdk/dist/client/api/logging-stream.d.ts:23
+//     loggingStream(params: LoggingParams): AsyncGenerator<LoggingStreamResponse>
+//   node_modules/@qvac/sdk/dist/schemas/logging-stream.d.ts
+//     LoggingParams = { id: string }
+//     LoggingStreamResponse = { type:'loggingStream', id, level, namespace,
+//                               message, timestamp }
+//   node_modules/@qvac/sdk/dist/logging/namespaces.d.ts:1
+//     SDK_LOG_ID = "__sdk__"     // reserved id for SDK server logs
+//
+// Design invariants:
+//   1. Robust to SDK missing loggingStream — returns a { STREAM_UNAVAILABLE }
+//      handle whose .stop() is a no-op.
+//   2. Multiplex: two callers requesting the same modelId share ONE upstream
+//      async iterator via a per-id subscription record. Each caller keeps its
+//      own onLog callback + cap; when the last caller stops, the underlying
+//      iterator is closed.
+//   3. Cancellation: stop() flips a cancellation flag that breaks the
+//      `for await` loop on the next iteration. We also call .return() on the
+//      iterator when available so a stuck upstream RPC hangs at most one tick.
+//   4. maxLines cap: per-caller counter; when the caller has received N lines
+//      the tail auto-stops even if other callers on the same modelId are still
+//      consuming.
+//   5. Untrusted content: message strings are clipped to 2 KB before delivery
+//      so a runaway addon cannot exhaust renderer memory via the callback.
+//
+// SDK_LOG_ID is exported for consumers that want to tail the SDK server logs
+// via this seam instead of subscribeServerLogs — both surfaces are supported.
+// -----------------------------------------------------------------------------
+
+const SDK_LOG_ID_CONST = '__sdk__' // mirrors namespaces.d.ts:1
+const DEFAULT_MODEL_LOG_TAIL_MAX = 500
+const MODEL_LOG_MESSAGE_CLIP = 2048
+
+// Map<modelId, {iter, callers: Set<callerRec>, cancelled, upstream: Promise}>
+const _activeTailSubscriptions = new Map()
+
+function _normalizeTailEntry (raw) {
+  if (!raw || typeof raw !== 'object') return null
+  const message = typeof raw.message === 'string' ? raw.message
+    : typeof raw.text === 'string' ? raw.text
+      : typeof raw.msg === 'string' ? raw.msg : ''
+  if (!message) return null
+  const level = typeof raw.level === 'string' ? raw.level.slice(0, 16) : 'info'
+  const namespace = typeof raw.namespace === 'string' ? raw.namespace.slice(0, 64) : ''
+  const ts = Number.isFinite(raw.timestamp) ? raw.timestamp
+    : Number.isFinite(raw.ts) ? raw.ts
+      : Date.now()
+  const id = typeof raw.id === 'string' ? raw.id.slice(0, 128) : ''
+  return {
+    type: 'loggingStream',
+    id,
+    level,
+    namespace,
+    message: message.slice(0, MODEL_LOG_MESSAGE_CLIP),
+    timestamp: ts
+  }
+}
+
+/**
+ * Start tailing per-model logs via sdk.loggingStream({id: modelId}).
+ *
+ * @param {object} sdk       @qvac/sdk-shaped object with .loggingStream(...)
+ * @param {{
+ *   modelId: string,
+ *   onLog: (entry: object) => void,
+ *   maxLines?: number,
+ *   logger?: object
+ * }} opts
+ * @returns {{
+ *   stop: () => void,
+ *   status: () => { ok: boolean, code?: string, delivered?: number, modelId?: string }
+ * }}
+ */
+function startModelLogTail (sdk, opts = {}) {
+  const log = normalizeLogger(opts.logger)
+  const modelId = typeof opts.modelId === 'string' ? opts.modelId : ''
+  const onLog = typeof opts.onLog === 'function' ? opts.onLog : () => {}
+  const maxLines = Number.isFinite(opts.maxLines) && opts.maxLines > 0
+    ? Math.floor(opts.maxLines)
+    : DEFAULT_MODEL_LOG_TAIL_MAX
+
+  if (!modelId) {
+    return {
+      stop () {},
+      status: () => ({ ok: false, code: 'INVALID_MODEL_ID' })
+    }
+  }
+  if (!sdk || typeof sdk.loggingStream !== 'function') {
+    return {
+      stop () {},
+      status: () => ({ ok: false, code: 'STREAM_UNAVAILABLE', modelId })
+    }
+  }
+
+  // Per-caller record. Owns its own cap counter + cancellation flag so a
+  // second caller on the same modelId does not pull down the shared iterator
+  // prematurely.
+  const caller = {
+    stopped: false,
+    delivered: 0,
+    maxLines,
+    onLog
+  }
+
+  let sub = _activeTailSubscriptions.get(modelId)
+  if (!sub) {
+    sub = {
+      modelId,
+      cancelled: false,
+      iter: null,
+      callers: new Set(),
+      upstream: null
+    }
+    // Register BEFORE starting the async loop so a synchronous second call
+    // with the same modelId multiplexes onto this record rather than opening
+    // a fresh upstream iterator.
+    _activeTailSubscriptions.set(modelId, sub)
+    // Kick off the upstream async-iterator loop. Any per-line failure is
+    // caught and re-emitted as an error entry so the consumer sees the
+    // failure; the loop terminates after emitting the error.
+    sub.upstream = (async () => {
+      let iter = null
+      try {
+        iter = sdk.loggingStream({ id: modelId })
+        sub.iter = iter
+        for await (const raw of iter) {
+          if (sub.cancelled) break
+          const entry = _normalizeTailEntry(raw)
+          if (!entry) continue
+          for (const c of sub.callers) {
+            if (c.stopped) continue
+            try { c.onLog(entry) } catch (err) {
+              log.warn('modelLogTail onLog threw', { modelId, message: err && err.message })
+            }
+            c.delivered += 1
+            if (c.delivered >= c.maxLines) {
+              c.stopped = true
+              sub.callers.delete(c)
+            }
+          }
+          if (sub.callers.size === 0) {
+            sub.cancelled = true
+            break
+          }
+        }
+      } catch (err) {
+        // Async-generator throw mid-stream: fan out one synthetic error entry
+        // to every live caller then close.
+        const errEntry = {
+          type: 'loggingStream',
+          id: modelId,
+          level: 'error',
+          namespace: 'observability.modelLogTail',
+          message: ('loggingStream failed: ' + (err && err.message || String(err))).slice(0, MODEL_LOG_MESSAGE_CLIP),
+          timestamp: Date.now()
+        }
+        for (const c of sub.callers) {
+          if (c.stopped) continue
+          try { c.onLog(errEntry) } catch { /* swallow */ }
+          c.delivered += 1
+        }
+      } finally {
+        // Best-effort iterator drain: async-generator .return() breaks
+        // upstream `for await` even if a promise is pending.
+        try { if (iter && typeof iter.return === 'function') await iter.return() } catch { /* noop */ }
+        _activeTailSubscriptions.delete(modelId)
+      }
+    })()
+  }
+
+  sub.callers.add(caller)
+
+  return {
+    stop () {
+      if (caller.stopped) return
+      caller.stopped = true
+      sub.callers.delete(caller)
+      if (sub.callers.size === 0) {
+        sub.cancelled = true
+        // Force the async iterator to unblock its pending `.next()` if we can
+        // reach it. The upstream loop's finally will still drain via .return().
+        try { if (sub.iter && typeof sub.iter.return === 'function') sub.iter.return() } catch { /* noop */ }
+      }
+    },
+    status () {
+      return {
+        ok: !caller.stopped,
+        modelId,
+        delivered: caller.delivered,
+        code: caller.stopped ? 'STOPPED' : 'ACTIVE'
+      }
+    }
+  }
+}
+
+/**
+ * Test-only: force-close every active tail subscription. Called by unit tests
+ * between cases so the module-level Map does not leak across files.
+ */
+function _resetModelLogTails () {
+  for (const sub of _activeTailSubscriptions.values()) {
+    sub.cancelled = true
+    try { if (sub.iter && typeof sub.iter.return === 'function') sub.iter.return() } catch { /* noop */ }
+    for (const c of sub.callers) c.stopped = true
+    sub.callers.clear()
+  }
+  _activeTailSubscriptions.clear()
+}
+
 function makeNoopPrometheusHandle (reason) {
   return {
     started: false,
@@ -820,7 +1033,11 @@ module.exports = {
   getModelSnapshot,
   startModelLogRing,
   DEFAULT_MODEL_LOG_RING_SIZE,
-  _internal: { normalizeModelLogEntry, mergeSnapshotEntry },
+  // Wave 4 F2 addendum: per-model log tail
+  startModelLogTail,
+  DEFAULT_MODEL_LOG_TAIL_MAX,
+  SDK_LOG_ID: SDK_LOG_ID_CONST,
+  _internal: { normalizeModelLogEntry, mergeSnapshotEntry, normalizeTailEntry: _normalizeTailEntry, activeTailSubscriptions: _activeTailSubscriptions },
   NOOP_TRACER,
   DEFAULT_PROMETHEUS_PORT,
   // Test-only reset. Clears cached modules + handle map so unit tests can
@@ -830,6 +1047,7 @@ module.exports = {
       try { h.stop() } catch {}
     }
     _prometheusHandles.clear()
+    _resetModelLogTails()
     _hypertraceMod = null
     _hypertracePromMod = null
     _hypertraceLoadError = null
