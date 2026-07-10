@@ -359,6 +359,10 @@ contextBridge.exposeInMainWorld('curva', {
   onAnnouncerProgress: (cb) => onEvent('announcer:progress', cb),
   onAnnouncerReady:    (cb) => onEvent('announcer:ready', cb),
   onAnnouncerError:    (cb) => onEvent('announcer:error', cb),
+  // Wave 3 F1: pipelined streaming TTS. `tts-first-chunk` carries latencyMs.
+  onAnnouncerTtsFirstChunk: (cb) => onEvent('announcer:tts-first-chunk', cb),
+  onAnnouncerStreamOpen:    (cb) => onEvent('announcer:stream-open', cb),
+  onAnnouncerStreamEnd:     (cb) => onEvent('announcer:stream-end', cb),
   // -- End Supertonic TTS goal announcer ---
 
   // Phase 2 events.
@@ -880,7 +884,40 @@ contextBridge.exposeInMainWorld('curva', {
       if (typeof toAddress !== 'string' || !/^0x[0-9a-fA-F]{40}$/.test(toAddress)) throw new RangeError('toAddress required')
       if (typeof amountAtomic !== 'string' || !/^[0-9]+$/.test(amountAtomic)) throw new RangeError('amountAtomic required')
       return writeMain('predictions:announce-payout', { matchId, txHash, toAddress, amountAtomic })
-    }
+    },
+    // ---- Wave 3 F3: sealed predictions ----
+    // Any-role: write a hypercore-encrypted sealed pick that peers can only
+    // decode once the host publishes the encryption key. `encryptionKey` is
+    // hex-encoded 32-byte value derived out-of-band (see bare/predictions.js
+    // deriveSealKey).
+    createSealed({ epoch, prediction, encryptionKey } = {}) {
+      const epochStr = typeof epoch === 'number' ? String(epoch) : epoch
+      if (typeof epochStr !== 'string' || epochStr.length === 0 || epochStr.length > 64) {
+        throw new RangeError('epoch required (<=64 chars)')
+      }
+      if (typeof encryptionKey !== 'string' || !/^[0-9a-fA-F]{64}$/.test(encryptionKey)) {
+        throw new RangeError('encryptionKey must be 64-hex chars (32 bytes)')
+      }
+      if (!prediction || typeof prediction !== 'object') {
+        throw new RangeError('prediction object required')
+      }
+      return writeMainAwait('predictions:create-sealed', { epoch: epochStr, prediction, encryptionKey })
+    },
+    // Host-only: broadcast the epoch's encryption key so every peer can open
+    // the sealed cores it has already replicated. Worker rejects with NOT_HOST
+    // when the local peer is not the room host.
+    reveal({ epoch, encryptionKey } = {}) {
+      const epochStr = typeof epoch === 'number' ? String(epoch) : epoch
+      if (typeof epochStr !== 'string' || epochStr.length === 0 || epochStr.length > 64) {
+        throw new RangeError('epoch required (<=64 chars)')
+      }
+      if (typeof encryptionKey !== 'string' || !/^[0-9a-fA-F]{64}$/.test(encryptionKey)) {
+        throw new RangeError('encryptionKey must be 64-hex chars (32 bytes)')
+      }
+      return writeMainAwait('predictions:reveal', { epoch: epochStr, encryptionKey })
+    },
+    onSealedCreated: (cb) => onEvent('predictions:sealed-created', cb),
+    onRevealed:      (cb) => onEvent('predictions:revealed', cb)
   },
   // ===== END PREDICTIONS =====
 
@@ -914,7 +951,12 @@ contextBridge.exposeInMainWorld('curva', {
     onToken:     (cb) => onEvent('commentator:token', cb),
     onThinking:  (cb) => onEvent('commentator:thinking', cb),
     onStats:     (cb) => onEvent('commentator:stats', cb),
-    onDone:      (cb) => onEvent('commentator:done', cb)
+    onDone:      (cb) => onEvent('commentator:done', cb),
+    // Wave 3 F1: streaming TTS output events. `tts-chunk` payload has base64
+    // PCM (`pcm` field); consumer can decode + feed to a Web Audio buffer.
+    onTtsChunk:  (cb) => onEvent('commentator:tts-chunk', cb),
+    onTtsDone:   (cb) => onEvent('commentator:tts-done', cb),
+    onTtsError:  (cb) => onEvent('commentator:tts-error', cb)
   },
   // ===== END QVAC COMMENTATOR =====
 
@@ -1305,16 +1347,47 @@ contextBridge.exposeInMainWorld('curva', {
   // system:* type must continue to be authored by its owning subsystem inside
   // the worker so this bridge never widens the trust surface.
   chat: {
+    // Wave 3: Autobase checkpoint helpers. `getVersions` returns the last N
+    // version markers; `historyAt` reads chat history rewound to a specific
+    // version. Both are read-only surfaces on top of `chat.checkoutAt(...)`.
+    getVersions({ limit = 32 } = {}) {
+      const l = Math.min(200, Math.max(1, Number(limit) || 32))
+      return writeMainAwait('chat:versions', { limit: l })
+    },
+    historyAt({ from = 0, limit = 100, at } = {}) {
+      const f = Number.isFinite(Number(from)) && from >= 0 ? Number(from) : 0
+      const lim = Math.min(500, Math.max(1, Number(limit) || 100))
+      if (at === undefined || at === null) {
+        return writeMainAwait('chat:history-at', { from: f, limit: lim })
+      }
+      const a = Number(at)
+      if (!Number.isFinite(a) || a < 0) {
+        throw new RangeError('at must be a non-negative number')
+      }
+      return writeMainAwait('chat:history-at', { from: f, limit: lim, at: a })
+    },
+    onVersionMarker: (cb) => onEvent('chat:version-marker', cb),
+
     async sendSystem(msg) {
       if (!msg || typeof msg !== 'object') throw new TypeError('msg required')
-      const ALLOWED = new Set(['system:coach', 'system:vlm-caption', 'system:ocr-read'])
+      const ALLOWED = new Set([
+        'system:coach', 'system:vlm-caption', 'system:ocr-read',
+        // Wave 3: ask-the-frame answer + goal-card structured extract.
+        'system:ask-frame-answer', 'system:goal-card'
+      ])
       if (!ALLOWED.has(msg.type)) {
         throw new RangeError('chat.sendSystem: type not in allowlist')
       }
       if (typeof msg.text !== 'string' || msg.text.length === 0) {
         throw new RangeError('text required')
       }
-      const caps = { 'system:coach': 800, 'system:vlm-caption': 800, 'system:ocr-read': 500 }
+      const caps = {
+        'system:coach': 800,
+        'system:vlm-caption': 800,
+        'system:ocr-read': 500,
+        'system:ask-frame-answer': 800,
+        'system:goal-card': 800
+      }
       if (msg.text.length > caps[msg.type]) {
         throw new RangeError('text exceeds cap for ' + msg.type)
       }
@@ -1341,6 +1414,242 @@ contextBridge.exposeInMainWorld('curva', {
       }
       return writeMain('chat:send-system', clean)
     }
+  },
+
+  // ===== WAVE 3: VOICE CLONE =====
+  // Chatterbox voice-cloned commentator. Enroll a reference WAV once, then
+  // speak() in EN or IT with the enrolled voice. Feature-flag gated behind
+  // CURVA_VOICE_CLONE_ENABLED. Every method returns { ok, ... } shapes.
+  voiceClone: {
+    // Accept either { pcmBase64: string } OR { audioPath: string }. For the
+    // renderer the PCM path is the primary path; audioPath is left in for
+    // local dev tools and stays behind the same worker-side sanitizer.
+    enroll(pcmOrPath) {
+      if (pcmOrPath == null) throw new TypeError('pcm bytes or path required')
+      const payload = {}
+      if (typeof pcmOrPath === 'string') {
+        // Treat as a filesystem path; the worker validates it lives in its dir.
+        if (pcmOrPath.length === 0 || pcmOrPath.length > 1024) {
+          throw new RangeError('audioPath length 1-1024 chars')
+        }
+        payload.audioPath = pcmOrPath
+      } else if (pcmOrPath instanceof ArrayBuffer) {
+        payload.pcmBase64 = toBase64(new Uint8Array(pcmOrPath))
+      } else if (pcmOrPath instanceof Uint8Array || (Buffer.isBuffer && Buffer.isBuffer(pcmOrPath))) {
+        payload.pcmBase64 = toBase64(pcmOrPath)
+      } else {
+        throw new TypeError('unsupported pcm type')
+      }
+      // 4 MiB reference cap mirrors bare/voiceClone.js MAX_REFERENCE_BYTES.
+      if (payload.pcmBase64 && payload.pcmBase64.length > 6 * 1024 * 1024) {
+        throw new RangeError('reference audio too large')
+      }
+      return writeMainAwait('voice-clone:enroll', payload)
+    },
+    speak({ text, locale = 'en' } = {}) {
+      if (typeof text !== 'string' || text.length === 0) {
+        throw new RangeError('text required')
+      }
+      if (text.length > 800) throw new RangeError('text too long (max 800)')
+      const loc = String(locale).toLowerCase().slice(0, 2)
+      // Chatterbox subset enforced worker-side; we allowlist EN/IT here for a
+      // fast fail on obvious mistakes. Non-supported locales still return
+      // { ok: false, code } from the worker for robustness.
+      if (!['en', 'it'].includes(loc)) {
+        throw new RangeError('locale must be en or it')
+      }
+      return writeMainAwait('voice-clone:speak', { text, locale: loc })
+    },
+    status() { return writeMainAwait('voice-clone:status', {}) },
+    onEnrolled:   (cb) => onEvent('voiceClone:enrolled', cb),
+    onSpeakStart: (cb) => onEvent('voiceClone:speak-start', cb),
+    onSpeakDone:  (cb) => onEvent('voiceClone:speak-done', cb),
+    onError:      (cb) => onEvent('voiceClone:error', cb)
+  },
+
+  // ===== WAVE 3: GOAL CARD =====
+  // LLM structured extraction (json_schema mode). Feed a scoreboard blob,
+  // receive a { minute, scorer, team, assist } card. Feature-flag:
+  // CURVA_GOAL_CARD_ENABLED.
+  goalCard: {
+    parse(text) {
+      if (typeof text !== 'string' || text.length === 0) {
+        throw new RangeError('text required')
+      }
+      if (text.length > 2000) throw new RangeError('text too long (max 2000)')
+      return writeMainAwait('goal-card:parse', { text })
+    },
+    status() { return writeMainAwait('goal-card:status', {}) },
+    onParsed: (cb) => onEvent('goalcard:parsed', cb),
+    onError:  (cb) => onEvent('goalcard:error', cb)
+  },
+
+  // ===== WAVE 3: LANG DETECT =====
+  // langdetect-text auto-routing over EN/IT/ID with a 0.6 confidence floor.
+  // Feature-flag: CURVA_LANGDETECT_ENABLED.
+  langDetect: {
+    detect(text) {
+      if (typeof text !== 'string' || text.length === 0) {
+        throw new RangeError('text required')
+      }
+      if (text.length > 4000) throw new RangeError('text too long (max 4000)')
+      return writeMainAwait('lang-detect:detect', { text })
+    },
+    status()   { return writeMainAwait('lang-detect:status', {}) },
+    onDetected: (cb) => onEvent('langdetect:detected', cb)
+  },
+
+  // ===== WAVE 3: ASK THE FRAME =====
+  // Combined VLM + RAG + LLM + optional TTS/MCP orchestration. `ask()` accepts
+  // a data-URL / base64 image plus a question and returns the composed answer.
+  // Feature-flag: CURVA_ASK_FRAME_ENABLED.
+  askFrame: {
+    ask({ image, question, matchTimeMs } = {}) {
+      if (typeof image !== 'string' || image.length === 0) {
+        throw new RangeError('image (data URL or base64) required')
+      }
+      if (image.length > 14 * 1024 * 1024) {
+        throw new RangeError('image payload too large')
+      }
+      if (typeof question !== 'string' || question.length === 0) {
+        throw new RangeError('question required')
+      }
+      if (question.length > 500) throw new RangeError('question too long (max 500)')
+      const mtm = Number(matchTimeMs)
+      const cleanMtm = Number.isFinite(mtm) && mtm >= 0 ? mtm : 0
+      return writeMainAwait('ask-frame:ask', { image, question, matchTimeMs: cleanMtm })
+    },
+    status()      { return writeMainAwait('ask-frame:status', {}) },
+    onStarted:    (cb) => onEvent('askframe:start', cb),
+    onCaption:    (cb) => onEvent('askframe:caption', cb),
+    onToken:      (cb) => onEvent('askframe:token', cb),
+    onToolCall:   (cb) => onEvent('askframe:tool-call', cb),
+    onDone:       (cb) => onEvent('askframe:done', cb),
+    onError:      (cb) => onEvent('askframe:error', cb)
+  },
+
+  // ===== WAVE 3: DIARIZATION =====
+  // Parakeet Sortformer streaming diarized STT. Push PCM chunks, receive
+  // per-turn speaker tags. Feature-flag: CURVA_DIARIZE_ENABLED.
+  diarize: {
+    start(opts) {
+      const resetTable = !!(opts && opts.resetTable)
+      return writeMainAwait('diarize:start', { resetTable })
+    },
+    push(pcm) {
+      if (pcm == null) throw new TypeError('pcm chunk required')
+      let bytes = null
+      if (pcm instanceof ArrayBuffer) bytes = new Uint8Array(pcm)
+      else if (pcm instanceof Uint8Array) bytes = pcm
+      else if (pcm instanceof Int16Array || pcm instanceof Float32Array) {
+        bytes = new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength)
+      } else if (Buffer.isBuffer && Buffer.isBuffer(pcm)) bytes = pcm
+      else throw new TypeError('unsupported pcm chunk type')
+      // Same 128 KB envelope as voiceCoach.pushAudio; ~2s of 16 kHz f32 mono.
+      if (bytes.byteLength > 128 * 1024) {
+        throw new RangeError('pcm chunk too large (>128KB)')
+      }
+      return writeMainAwait('diarize:push', { pcm: toBase64(bytes) })
+    },
+    end()   { return writeMainAwait('diarize:end', {}) },
+    table() { return writeMainAwait('diarize:table', {}) },
+    onTurn:         (cb) => onEvent('diarize:turn', cb),
+    onSpeakerAdded: (cb) => onEvent('diarize:speaker-added', cb),
+    onSessionDone:  (cb) => onEvent('diarize:session-ended', cb),
+    onError:        (cb) => onEvent('diarize:error', cb)
+  },
+
+  // ===== WAVE 3: SEMANTIC SEARCH =====
+  // In-memory embed()-backed vector search. Feature-flag: CURVA_SEMSEARCH_ENABLED.
+  semSearch: {
+    index({ id, text } = {}) {
+      if (typeof id !== 'string' || id.length === 0) {
+        throw new RangeError('id required')
+      }
+      if (id.length > 128) throw new RangeError('id too long (max 128)')
+      if (typeof text !== 'string' || text.length === 0) {
+        throw new RangeError('text required')
+      }
+      if (text.length > 4000) throw new RangeError('text too long (max 4000)')
+      return writeMainAwait('semsearch:index', { id, text })
+    },
+    search({ query, topK } = {}) {
+      if (typeof query !== 'string' || query.length === 0) {
+        throw new RangeError('query required')
+      }
+      if (query.length > 500) throw new RangeError('query too long (max 500)')
+      const payload = { query }
+      if (topK !== undefined) {
+        const k = Number(topK)
+        if (!Number.isFinite(k) || k < 1 || k > 50) {
+          throw new RangeError('topK must be 1-50')
+        }
+        payload.topK = k | 0
+      }
+      return writeMainAwait('semsearch:search', payload)
+    },
+    remove({ id } = {}) {
+      if (typeof id !== 'string' || id.length === 0) {
+        throw new RangeError('id required')
+      }
+      return writeMainAwait('semsearch:remove', { id })
+    },
+    onIndexed:  (cb) => onEvent('semsearch:indexed', cb),
+    onSearched: (cb) => onEvent('semsearch:searched', cb),
+    onError:    (cb) => onEvent('semsearch:error', cb)
+  },
+
+  // ===== WAVE 4B: MODEL REGISTRY =====
+  // Bridge to bare/observability.js getModelSnapshot + sdk.unloadModel.
+  // list() returns the current snapshot of every known model (KNOWN_MODELS in
+  // workers/main.js). unload(modelId) sends the SDK a targeted unload; the
+  // worker validates the id is currently loaded before calling.
+  models: {
+    list() { return writeMainAwait('models:list', {}) },
+    unload(modelId) {
+      if (typeof modelId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(modelId)) {
+        throw new RangeError('modelId must match ^[A-Za-z0-9_-]{1,128}$')
+      }
+      return writeMainAwait('models:unload', { modelId })
+    },
+    onList:     (cb) => onEvent('models:list', cb),
+    onUnloaded: (cb) => onEvent('models:unloaded', cb),
+    onError:    (cb) => onEvent('models:error', cb)
+  },
+
+  // ===== WAVE 4A: GOAL PIPELINE =====
+  // Bridge to bare/goalPipeline.js. `trigger` runs OCR -> goalCard -> MCP
+  // update -> translate -> streaming TTS -> chat append against a captured
+  // frame. Feature-flag: CURVA_GOAL_PIPELINE_ENABLED. Every dep (ocr,
+  // goalCard, mcp, translator, announcer, chat) must be available on the
+  // worker side or the handler emits NOT_READY.
+  goalPipeline: {
+    trigger({ image, currentScore } = {}) {
+      if (typeof image !== 'string' || image.length === 0) {
+        throw new RangeError('image (data URL or base64) required')
+      }
+      // Match the VLM/OCR bridge cap: 14 MB base64 body (~10 MB raw). The
+      // bare-side handlers also enforce this via decodeImagePayload upstream.
+      if (image.length > 14 * 1024 * 1024) {
+        throw new RangeError('image payload too large (max ~14 MB base64)')
+      }
+      const payload = { image }
+      if (currentScore !== undefined && currentScore !== null) {
+        if (typeof currentScore !== 'string' || currentScore.length > 128) {
+          throw new RangeError('currentScore must be string (<=128 chars)')
+        }
+        payload.currentScore = currentScore
+      }
+      return writeMainAwait('goal-pipeline:trigger', payload)
+    },
+    status() { return writeMainAwait('goal-pipeline:status', {}) },
+    onParsed:       (cb) => onEvent('goalpipe:parsed', cb),
+    onTranslated:   (cb) => onEvent('goalpipe:translated', cb),
+    onTtsOpen:      (cb) => onEvent('goalpipe:tts-open', cb),
+    onTtsEnd:       (cb) => onEvent('goalpipe:tts-end', cb),
+    onChatAppended: (cb) => onEvent('goalpipe:chat-append', cb),
+    onError:        (cb) => onEvent('goalpipe:error', cb),
+    onResult:       (cb) => onEvent('goalpipe:result', cb)
   }
 })
 

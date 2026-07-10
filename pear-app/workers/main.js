@@ -622,11 +622,18 @@ function ensureCommentator() {
   // path does not need tools by itself, so we only pass the flag when the
   // roomBot piggy-backs on the load.
   const modelConfig = botFlagEnabled ? { tools: true } : null
+  // Wave 3 F1: forward contentDelta chunks into the Supertonic streaming TTS
+  // pipeline when an announcer instance exists. When the announcer flag is
+  // off, ensureAnnouncer() returns null and this path is a no-op (commentator
+  // treats a missing `announcer` opt as "no streaming TTS").
+  const streamingAnnouncer = announcerFlagEnabled ? ensureAnnouncer() : null
   commentator = createCommentator({
     storageDir: config.dir,
     isHost: !!config.isHost,
     chat: room.chat,
     modelConfig,
+    announcer: streamingAnnouncer,
+    announcerLocale: announcerDefaultLocale,
     getMatchTimeMs: () => {
       try {
         const st = room?.playhead?.state?.() || {}
@@ -945,7 +952,13 @@ log('info', 'demo mode flags', {
 // bare/observability.js returns no-op handles when CURVA_OBSERVABILITY_ENABLED
 // != 'true' or the hypertrace packages are not installed. Also bridges the
 // @qvac/sdk server-log stream so DiagnosticsPanel can render a unified tail.
-const { startPrometheus, subscribeToServerLogs } = require('../bare/observability.js')
+const {
+  startPrometheus,
+  subscribeToServerLogs,
+  registerHypercoreStats,
+  registerHyperswarmStats,
+  getModelSnapshot
+} = require('../bare/observability.js')
 // Security audit fix (C1): startPrometheus is now async because it binds its
 // own loopback-only HTTP server. Hold a Promise-typed placeholder synchronously
 // so downstream code can `await promHandleReady` before touching .stop/.port/
@@ -968,6 +981,16 @@ const promHandleReady = (async () => {
     port: promHandle.port || null,
     reason: promHandle.reason || null
   })
+  // Wave 3 F1: attach corestore + swarm stats once Prometheus is up. Both are
+  // no-op when CURVA_OBSERVABILITY_ENABLED != 'true' (see bare/observability.js).
+  // hyperswarm-stats registers the DHT surface too — do NOT also call
+  // registerHyperdhtStats (per the module docstring, would double-register).
+  try { registerHypercoreStats(store) } catch (err) {
+    log('warn', 'registerHypercoreStats failed', { message: err && err.message })
+  }
+  try { registerHyperswarmStats(swarm) } catch (err) {
+    log('warn', 'registerHyperswarmStats failed', { message: err && err.message })
+  }
   return promHandle
 })()
 // SDK server-log bridge: forwards @qvac/sdk internal logs to renderer via
@@ -1066,6 +1089,258 @@ async function ensureVoiceCoach () {
   return voiceCoachInflight
 }
 // ===== END VOICE COACH =====
+
+// ===== WAVE 3 QVAC MODULES =====
+// Six Wave 3 modules glue in behind the same lazy-init + in-flight-guarded
+// pattern used for voiceCoach: voiceClone, goalCard, langDetect, askTheFrame,
+// diarization, semanticSearch. Each is feature-flagged inside its own factory
+// (voiceCloneFlagEnabled etc.) so the ensure* helper simply constructs and
+// caches. Modules that need a shared LLM handle (goalCard, askTheFrame) short
+// out to null when the commentator has not loaded yet — the IPC handler
+// reports STATUS_NOT_READY via the emitted status payload.
+const { createVoiceClone } = require('../bare/voiceClone.js')
+const { createGoalCard } = require('../bare/goalCard.js')
+const { createLangDetectRouter } = require('../bare/langDetectRouter.js')
+const { createAskTheFrame } = require('../bare/askTheFrame.js')
+const { createDiarization } = require('../bare/diarization.js')
+const { createSemanticSearch } = require('../bare/semanticSearch.js')
+
+let voiceCloneInstance = null
+let voiceCloneInflight = null
+async function ensureVoiceClone () {
+  if (voiceCloneInstance) return voiceCloneInstance
+  if (voiceCloneInflight) return voiceCloneInflight
+  voiceCloneInflight = (async () => {
+    let sdk = null
+    try { sdk = await import('@qvac/sdk') } catch { sdk = null }
+    // Hyperblobs is optional: the room may not expose one, in which case
+    // enroll() returns NO_HYPERBLOBS and the caller is informed. We probe
+    // room.clips.hyperblobs first (clips uses one) then fall back to null.
+    let hyperblobs = null
+    try {
+      hyperblobs = (room && room.clips && room.clips._hyperblobs) || null
+    } catch { hyperblobs = null }
+    try {
+      voiceCloneInstance = createVoiceClone({
+        sdk,
+        hyperblobs,
+        corestore: store,
+        emit: (ev, p) => emit(ev, p),
+        log
+      })
+    } catch (err) {
+      log('warn', 'voiceClone construct failed', { message: err && err.message })
+      voiceCloneInstance = null
+    }
+    return voiceCloneInstance
+  })().finally(() => { voiceCloneInflight = null })
+  return voiceCloneInflight
+}
+
+let goalCardInstance = null
+let goalCardInflight = null
+async function ensureGoalCard () {
+  if (goalCardInstance) return goalCardInstance
+  if (goalCardInflight) return goalCardInflight
+  goalCardInflight = (async () => {
+    let sharedLlmHandle = null
+    try {
+      if (commentator && typeof commentator.getSharedLlmHandle === 'function') {
+        sharedLlmHandle = commentator.getSharedLlmHandle()
+      }
+    } catch { sharedLlmHandle = null }
+    let sdk = null
+    try { sdk = await import('@qvac/sdk') } catch { sdk = null }
+    try {
+      goalCardInstance = createGoalCard({
+        sdk,
+        sharedLlmHandle,
+        emit: (ev, p) => emit(ev, p),
+        log
+      })
+    } catch (err) {
+      log('warn', 'goalCard construct failed', { message: err && err.message })
+      goalCardInstance = null
+    }
+    return goalCardInstance
+  })().finally(() => { goalCardInflight = null })
+  return goalCardInflight
+}
+
+let langDetectInstance = null
+function ensureLangDetect () {
+  if (langDetectInstance) return langDetectInstance
+  try {
+    langDetectInstance = createLangDetectRouter({
+      emit: (ev, p) => emit(ev, p),
+      log
+    })
+  } catch (err) {
+    log('warn', 'langDetect construct failed', { message: err && err.message })
+    langDetectInstance = null
+  }
+  return langDetectInstance
+}
+
+let askTheFrameInstance = null
+let askTheFrameInflight = null
+async function ensureAskTheFrame () {
+  if (askTheFrameInstance) return askTheFrameInstance
+  if (askTheFrameInflight) return askTheFrameInflight
+  askTheFrameInflight = (async () => {
+    let sharedLlmHandle = null
+    try {
+      if (commentator && typeof commentator.getSharedLlmHandle === 'function') {
+        sharedLlmHandle = commentator.getSharedLlmHandle()
+      }
+    } catch { sharedLlmHandle = null }
+    if (!sharedLlmHandle) return null
+    const vlm = ensureVlm()
+    if (!vlm || typeof vlm.caption !== 'function') return null
+    const rag = await ensureRag().catch(() => null)
+    const mcpBundle = ensureMcpTools()
+    let sdk = null
+    try { sdk = await import('@qvac/sdk') } catch { sdk = null }
+    try {
+      askTheFrameInstance = createAskTheFrame({
+        vlm,
+        rag,
+        sharedLlmHandle,
+        sdk,
+        announcer,
+        chat: (room && room.chat) || null,
+        mcpClient: null,
+        roomMcpClient: (mcpBundle && mcpBundle.client) || null,
+        roomSlug: (room && room.slug) || (config.roomSlug || 'default'),
+        emit: (ev, p) => emit(ev, p),
+        log
+      })
+    } catch (err) {
+      log('warn', 'askTheFrame construct failed', { message: err && err.message })
+      askTheFrameInstance = null
+    }
+    return askTheFrameInstance
+  })().finally(() => { askTheFrameInflight = null })
+  return askTheFrameInflight
+}
+
+let diarizationInstance = null
+let diarizationInflight = null
+async function ensureDiarization () {
+  if (diarizationInstance) return diarizationInstance
+  if (diarizationInflight) return diarizationInflight
+  diarizationInflight = (async () => {
+    let sdk = null
+    try { sdk = await import('@qvac/sdk') } catch { sdk = null }
+    try {
+      diarizationInstance = createDiarization({
+        sdk,
+        emit: (ev, p) => emit(ev, p),
+        log
+      })
+    } catch (err) {
+      log('warn', 'diarization construct failed', { message: err && err.message })
+      diarizationInstance = null
+    }
+    return diarizationInstance
+  })().finally(() => { diarizationInflight = null })
+  return diarizationInflight
+}
+
+let semSearchInstance = null
+let semSearchInflight = null
+async function ensureSemanticSearch () {
+  if (semSearchInstance) return semSearchInstance
+  if (semSearchInflight) return semSearchInflight
+  semSearchInflight = (async () => {
+    let sdk = null
+    try { sdk = await import('@qvac/sdk') } catch { sdk = null }
+    try {
+      semSearchInstance = createSemanticSearch({
+        sdk,
+        emit: (ev, p) => emit(ev, p),
+        log
+      })
+    } catch (err) {
+      log('warn', 'semanticSearch construct failed', { message: err && err.message })
+      semSearchInstance = null
+    }
+    return semSearchInstance
+  })().finally(() => { semSearchInflight = null })
+  return semSearchInflight
+}
+// ===== END WAVE 3 QVAC MODULES =====
+
+// ===== WAVE 4 GOAL PIPELINE =====
+// Chained OCR -> goalCard -> MCP -> translate -> streaming TTS -> chat append.
+// Requires: ocrHandle (wave 2), goalCard (wave 3), mcp.client (wave 2),
+// translator (Phase 3.5), announcer (Tier 4), and room.chat. If ANY dep is
+// missing (or CURVA_GOAL_PIPELINE_ENABLED != 'true'), ensureGoalPipeline
+// returns null and the IPC handler emits NOT_READY. Lazy-init + in-flight
+// guard mirrors ensureVoiceCoach.
+const { createGoalPipeline } = require('../bare/goalPipeline.js')
+const goalPipelineFlagEnabled = (() => {
+  try {
+    const v = (typeof process !== 'undefined' && process.env && process.env.CURVA_GOAL_PIPELINE_ENABLED) || ''
+    return String(v).toLowerCase() === 'true'
+  } catch { return false }
+})()
+log('info', 'goal pipeline feature flag', { enabled: goalPipelineFlagEnabled })
+
+let goalPipelineInstance = null
+let goalPipelineInflight = null
+async function ensureGoalPipeline () {
+  if (goalPipelineInstance) return goalPipelineInstance
+  if (goalPipelineInflight) return goalPipelineInflight
+  if (!goalPipelineFlagEnabled) return null
+  if (!room?.chat) return null
+  goalPipelineInflight = (async () => {
+    const ocr = ensureOcr()
+    if (!ocr) return null
+    const gc = await ensureGoalCard()
+    if (!gc) return null
+    const mcpBundle = ensureMcpTools()
+    try {
+      goalPipelineInstance = createGoalPipeline({
+        ocr,
+        goalCard: gc,
+        mcp: (mcpBundle && mcpBundle.client) || null,
+        translate: translator || null,
+        announcer: announcer || null,
+        chat: room.chat,
+        roomSlug: (room && room.slug) || (config.roomSlug || 'default'),
+        log: (msg, extra) => log('info', 'goal-pipeline: ' + msg, extra),
+        emit: (ev, p) => emit(ev, p)
+      })
+    } catch (err) {
+      log('warn', 'goalPipeline construct failed', { message: err && err.message })
+      goalPipelineInstance = null
+    }
+    return goalPipelineInstance
+  })().finally(() => { goalPipelineInflight = null })
+  return goalPipelineInflight
+}
+// ===== END WAVE 4 GOAL PIPELINE =====
+
+// ===== MODEL REGISTRY (Wave 4B) =====
+// Bridges bare/observability.js `getModelSnapshot` + sdk.unloadModel over IPC.
+// Allowlist of known model names covers the models the app currently loads +
+// the delegated-provider surface. Names outside this list are ignored on
+// list; unload validates the modelId shape (alphanumeric + _ + -, ≤128 chars)
+// and requires the model to be in the loaded set before calling sdk.unloadModel.
+const KNOWN_MODELS = [
+  'QWEN3_600M_INST_Q4',
+  'LLAMA_3_2_1B_INST_Q4_0',
+  'WHISPER_TINY',
+  'SMOLVLM2_500M_MULTIMODAL_Q8_0',
+  'MMPROJ_SMOLVLM2_500M_MULTIMODAL_Q8_0',
+  'OCR_LATIN',
+  'EMBEDDINGGEMMA_300M_Q4_0',
+  'SUPERTONIC_MULTILINGUAL',
+  'GGML_CLASSIFICATION'
+]
+const MODEL_ID_REGEX = /^[A-Za-z0-9_-]{1,128}$/
+// ===== END MODEL REGISTRY =====
 
 // ===== BLIND PEERING (Wave 15) =====
 // Docs: https://docs.pears.com/how-to/blind-peering/add-blind-peering-to-a-chat-app/
@@ -1272,6 +1547,19 @@ async function openRoomFor(slug, isHost, { chatBootstrap = null, playheadBootstr
     emit('chat:goal-cluster', payload)
   })
   roomUnsubs = [offPh, offMsg, offCluster]
+  // Wave 3: chat version-marker subscription (Autobase checkpoint stream). The
+  // handler is optional — older chat builds without version markers no-op the
+  // subscribe. `onVersionMarker` returns an unsubscribe function.
+  if (typeof room.chat.onVersionMarker === 'function') {
+    try {
+      const offVer = room.chat.onVersionMarker((mark) => {
+        emit('chat:version-marker', mark)
+      })
+      if (typeof offVer === 'function') roomUnsubs.push(offVer)
+    } catch (err) {
+      log('warn', 'chat version-marker subscribe failed', { message: err && err.message })
+    }
+  }
 
   // Tier 4: Supertonic announcer also reacts to host-broadcast `system:goal`
   // chat rows so peers hear a synthesized announcement even when the goal
@@ -4302,6 +4590,238 @@ async function dispatchCommand(msg) {
       }
       // ===== END DIAGNOSTICS =====
 
+      // ===== WAVE 3 QVAC MODULES =====
+      // Every case here lazy-constructs its module on first hit. Errors are
+      // surfaced via typed events (voiceClone:error / goalcard:error / etc.)
+      // AND folded into the ack payload so writeMainAwait callers can inspect
+      // { ok, code, reason } without racing the event stream.
+      case 'voice-clone:enroll': {
+        const vc = await ensureVoiceClone()
+        if (!vc) {
+          emit('voiceClone:error', { code: 'NOT_READY', message: 'voiceClone unavailable', requestId: id })
+          emit('ack', { id, cmd, payload: { ok: false, code: 'NOT_READY', requestId: id } })
+          return
+        }
+        let src = null
+        if (typeof payload?.pcmBase64 === 'string' && payload.pcmBase64.length > 0) {
+          src = decodeBase64(payload.pcmBase64)
+        } else if (typeof payload?.audioPath === 'string' && payload.audioPath.length > 0) {
+          src = payload.audioPath
+        }
+        if (!src) {
+          emit('ack', { id, cmd, payload: { ok: false, code: 'BAD_INPUT', requestId: id } })
+          return
+        }
+        const ref = await vc.enroll(src)
+        if (ref) emit('voiceClone:enrolled', { ...ref, requestId: id })
+        emit('ack', { id, cmd, payload: { ok: !!ref, ref, requestId: id } })
+        return
+      }
+      case 'voice-clone:speak': {
+        const vc = await ensureVoiceClone()
+        if (!vc) {
+          emit('ack', { id, cmd, payload: { ok: false, code: 'NOT_READY', requestId: id } })
+          return
+        }
+        const text = String(payload?.text ?? '').slice(0, 800)
+        const locale = typeof payload?.locale === 'string' ? payload.locale.toLowerCase().slice(0, 2) : 'en'
+        emit('voiceClone:speak-start', { locale, requestId: id })
+        const out = await vc.speak(text, locale)
+        if (out) {
+          emit('voiceClone:speak-done', {
+            locale: out.locale,
+            samples: out.samples.length,
+            sampleRate: out.sampleRate,
+            requestId: id
+          })
+        }
+        emit('ack', { id, cmd, payload: { ok: !!out, locale, requestId: id } })
+        return
+      }
+      case 'voice-clone:status': {
+        const vc = voiceCloneInstance
+        const st = vc ? vc.status() : { ready: false, enrolled: false, flagEnabled: false }
+        emit('voiceClone:status', { ...st, requestId: id })
+        emit('ack', { id, cmd })
+        return
+      }
+
+      case 'goal-card:parse': {
+        const gc = await ensureGoalCard()
+        if (!gc) {
+          emit('ack', { id, cmd, payload: { ok: false, code: 'NOT_READY', requestId: id } })
+          return
+        }
+        const text = String(payload?.text ?? '').slice(0, 2000)
+        const res = await gc.parse(text)
+        emit('goal-card:result', { ...res, requestId: id })
+        emit('ack', { id, cmd, payload: { ...res, requestId: id } })
+        return
+      }
+      case 'goal-card:status': {
+        const gc = goalCardInstance
+        const st = gc ? gc.status() : { ready: false, flagEnabled: false }
+        emit('goal-card:status', { ...st, requestId: id })
+        emit('ack', { id, cmd })
+        return
+      }
+
+      case 'lang-detect:detect': {
+        const ld = ensureLangDetect()
+        if (!ld) {
+          emit('ack', { id, cmd, payload: { lang: null, confidence: 0, requestId: id } })
+          return
+        }
+        const text = String(payload?.text ?? '').slice(0, 4000)
+        const res = ld.detect(text)
+        emit('lang-detect:result', { ...res, requestId: id })
+        emit('ack', { id, cmd, payload: { ...res, requestId: id } })
+        return
+      }
+      case 'lang-detect:status': {
+        const ld = langDetectInstance
+        const st = ld ? ld.status() : { ready: false, flagEnabled: false }
+        emit('lang-detect:status', { ...st, requestId: id })
+        emit('ack', { id, cmd })
+        return
+      }
+
+      case 'ask-frame:ask': {
+        const af = await ensureAskTheFrame()
+        if (!af) {
+          emit('askframe:error', { code: 'NOT_READY', message: 'ask-the-frame unavailable', requestId: id })
+          emit('ack', { id, cmd, payload: { ok: false, code: 'NOT_READY', requestId: id } })
+          return
+        }
+        const image = decodeImagePayload(payload?.image)
+        if (!image) {
+          emit('ack', { id, cmd, payload: { ok: false, code: 'NO_IMAGE', requestId: id } })
+          return
+        }
+        const question = String(payload?.question ?? '').slice(0, 500)
+        const matchTimeMs = Number(payload?.matchTimeMs ?? payload?.match_time_ms ?? 0)
+        const res = await af.ask({ image, question, matchTimeMs })
+        emit('ack', { id, cmd, payload: { ...res, requestId: id } })
+        return
+      }
+      case 'ask-frame:status': {
+        const af = askTheFrameInstance
+        const st = af ? af.status() : { hasVlm: false, closed: true }
+        emit('ask-frame:status', { ...st, requestId: id })
+        emit('ack', { id, cmd })
+        return
+      }
+
+      case 'diarize:start': {
+        const d = await ensureDiarization()
+        if (!d) {
+          emit('ack', { id, cmd, payload: { ok: false, code: 'NOT_READY', requestId: id } })
+          return
+        }
+        const res = await d.startSession({ resetTable: !!payload?.resetTable })
+        emit('ack', { id, cmd, payload: { ...res, requestId: id } })
+        return
+      }
+      case 'diarize:push': {
+        const d = diarizationInstance
+        if (!d) {
+          emit('ack', { id, cmd, payload: { ok: false, code: 'NOT_READY', requestId: id } })
+          return
+        }
+        const b64 = typeof payload?.pcm === 'string' ? payload.pcm : ''
+        const bytes = b64 ? decodeBase64(b64) : null
+        if (!bytes) {
+          emit('ack', { id, cmd, payload: { ok: false, code: 'BAD_AUDIO', requestId: id } })
+          return
+        }
+        const res = await d.pushAudio(bytes)
+        emit('ack', { id, cmd, payload: { ...res, requestId: id } })
+        return
+      }
+      case 'diarize:end': {
+        const d = diarizationInstance
+        if (!d) {
+          emit('ack', { id, cmd, payload: { ok: false, code: 'NOT_READY', requestId: id } })
+          return
+        }
+        const res = await d.endSession()
+        emit('ack', { id, cmd, payload: { ...res, requestId: id } })
+        return
+      }
+      case 'diarize:table': {
+        const d = diarizationInstance
+        const table = d ? d.getSpeakerTable() : []
+        emit('diarize:table', { table, requestId: id })
+        emit('ack', { id, cmd })
+        return
+      }
+
+      case 'semsearch:index': {
+        const s = await ensureSemanticSearch()
+        if (!s) {
+          emit('ack', { id, cmd, payload: { ok: false, code: 'NOT_READY', requestId: id } })
+          return
+        }
+        const idStr = String(payload?.id ?? '').slice(0, 128)
+        const text = String(payload?.text ?? '').slice(0, 4000)
+        const res = await s.index(idStr, text)
+        emit('ack', { id, cmd, payload: { ...res, requestId: id } })
+        return
+      }
+      case 'semsearch:search': {
+        const s = await ensureSemanticSearch()
+        if (!s) {
+          emit('semsearch:searched', { hits: [], requestId: id })
+          emit('ack', { id, cmd, payload: { hits: [], requestId: id } })
+          return
+        }
+        const query = String(payload?.query ?? '').slice(0, 500)
+        const topK = Number(payload?.topK) || undefined
+        const hits = await s.search(query, topK ? { topK } : {})
+        emit('semsearch:searched', { hits, requestId: id })
+        emit('ack', { id, cmd, payload: { hits, requestId: id } })
+        return
+      }
+      case 'semsearch:remove': {
+        const s = semSearchInstance
+        if (!s) {
+          emit('ack', { id, cmd, payload: { ok: false, code: 'NOT_READY', requestId: id } })
+          return
+        }
+        const idStr = String(payload?.id ?? '')
+        const res = s.remove(idStr)
+        emit('ack', { id, cmd, payload: { ...res, requestId: id } })
+        return
+      }
+
+      case 'chat:versions': {
+        if (!room?.chat) throw new RoomNotJoinedError()
+        if (typeof room.chat.getVersions !== 'function') {
+          emit('ack', { id, cmd, payload: { versions: [], requestId: id } })
+          return
+        }
+        const limit = Math.min(200, Math.max(1, Number(payload?.limit) || 32))
+        const versions = room.chat.getVersions({ limit })
+        emit('chat:versions', { versions, requestId: id })
+        emit('ack', { id, cmd, payload: { versions, requestId: id } })
+        return
+      }
+      case 'chat:history-at': {
+        if (!room?.chat) throw new RoomNotJoinedError()
+        if (typeof room.chat.history !== 'function') {
+          emit('ack', { id, cmd, payload: { messages: [], requestId: id } })
+          return
+        }
+        const from = Number(payload?.from ?? 0)
+        const limit = Math.min(500, Math.max(1, Number(payload?.limit ?? 100)))
+        const at = Number.isFinite(Number(payload?.at)) ? Number(payload.at) : undefined
+        const messages = await room.chat.history(at !== undefined ? { from, limit, at } : { from, limit })
+        emit('chat:history-at', { messages, at, requestId: id })
+        emit('ack', { id, cmd, payload: { messages, at, requestId: id } })
+        return
+      }
+      // ===== END WAVE 3 QVAC MODULES =====
+
       // ===== SCOPED CHAT SYSTEM SEND (Cup Final) =====
       // Allowlisted system message pathway for coach + VLM + OCR pills that
       // originate from the LOCAL peer's own on-device model output. Every
@@ -4311,7 +4831,11 @@ async function dispatchCommand(msg) {
       case 'chat:send-system': {
         if (!room?.chat) throw new RoomNotJoinedError()
         const type = payload?.type
-        const ALLOWED = new Set(['system:coach', 'system:vlm-caption', 'system:ocr-read'])
+        const ALLOWED = new Set([
+          'system:coach', 'system:vlm-caption', 'system:ocr-read',
+          // Wave 3 additions: ask-the-frame reply + goal card structured extract.
+          'system:ask-frame-answer', 'system:goal-card'
+        ])
         if (typeof type !== 'string' || !ALLOWED.has(type)) {
           throw new RangeError('system:send: type not in allowlist')
         }
@@ -4338,6 +4862,247 @@ async function dispatchCommand(msg) {
         return
       }
       // ===== END SCOPED CHAT SYSTEM SEND =====
+
+      // ===== MODEL REGISTRY (Wave 4B) =====
+      case 'models:list': {
+        try {
+          const sdkImpl = await import('@qvac/sdk').catch(() => null)
+          if (!sdkImpl) {
+            emit('models:list', { items: [], requestId: id })
+            emit('ack', { id, cmd, payload: { items: [], requestId: id } })
+            return
+          }
+          const items = await getModelSnapshot(sdkImpl, { allNames: KNOWN_MODELS, logger: { warn: (m, e) => log('warn', 'models: ' + m, e) } })
+          emit('models:list', { items, requestId: id })
+          emit('ack', { id, cmd, payload: { items, requestId: id } })
+        } catch (err) {
+          emit('models:error', {
+            code: err?.code || 'MODELS_LIST_FAILED',
+            message: err?.message || 'list failed',
+            requestId: id
+          })
+          emit('ack', { id, cmd })
+        }
+        return
+      }
+      case 'models:unload': {
+        const modelId = typeof payload?.modelId === 'string' ? payload.modelId : ''
+        if (!MODEL_ID_REGEX.test(modelId)) {
+          emit('models:error', { code: 'VALIDATION_ERROR', message: 'modelId must match ^[A-Za-z0-9_-]{1,128}$', requestId: id })
+          emit('ack', { id, cmd })
+          return
+        }
+        try {
+          const sdkImpl = await import('@qvac/sdk').catch(() => null)
+          if (!sdkImpl) {
+            emit('models:error', { code: 'SDK_UNAVAILABLE', message: '@qvac/sdk not available', requestId: id })
+            emit('ack', { id, cmd })
+            return
+          }
+          // Confirm modelId is in loaded set via getLoadedModelInfo BEFORE
+          // calling unloadModel — surfaces MODEL_NOT_LOADED with a clean error
+          // instead of a raw ModelNotFoundError from the SDK.
+          if (typeof sdkImpl.getLoadedModelInfo === 'function') {
+            try {
+              const info = await sdkImpl.getLoadedModelInfo({ modelId })
+              if (!info) {
+                emit('models:error', { code: 'MODEL_NOT_LOADED', message: 'modelId not currently loaded', modelId, requestId: id })
+                emit('ack', { id, cmd })
+                return
+              }
+            } catch (err) {
+              emit('models:error', { code: 'MODEL_NOT_LOADED', message: err?.message || 'not loaded', modelId, requestId: id })
+              emit('ack', { id, cmd })
+              return
+            }
+          }
+          if (typeof sdkImpl.unloadModel !== 'function') {
+            emit('models:error', { code: 'UNLOAD_UNSUPPORTED', message: 'sdk.unloadModel unavailable', requestId: id })
+            emit('ack', { id, cmd })
+            return
+          }
+          await sdkImpl.unloadModel({ modelId })
+          emit('models:unloaded', { modelId, requestId: id })
+          emit('ack', { id, cmd, payload: { modelId, requestId: id } })
+        } catch (err) {
+          emit('models:error', {
+            code: err?.code || 'MODELS_UNLOAD_FAILED',
+            message: err?.message || 'unload failed',
+            modelId,
+            requestId: id
+          })
+          emit('ack', { id, cmd })
+        }
+        return
+      }
+      // ===== END MODEL REGISTRY =====
+
+      // ===== GOAL PIPELINE (Wave 4A) =====
+      case 'goal-pipeline:trigger': {
+        if (!goalPipelineFlagEnabled) {
+          emit('goalpipe:error', { code: 'FEATURE_DISABLED', message: 'goal pipeline disabled', requestId: id })
+          emit('ack', { id, cmd })
+          return
+        }
+        const pipeline = await ensureGoalPipeline()
+        if (!pipeline) {
+          emit('goalpipe:error', { code: 'NOT_READY', message: 'goal pipeline unavailable (missing dep)', requestId: id })
+          emit('ack', { id, cmd, payload: { ok: false, code: 'NOT_READY', requestId: id } })
+          return
+        }
+        const image = decodeImagePayload(payload?.image)
+        if (!image) {
+          emit('goalpipe:error', { code: 'NO_IMAGE', message: 'image required', requestId: id })
+          emit('ack', { id, cmd, payload: { ok: false, code: 'NO_IMAGE', requestId: id } })
+          return
+        }
+        const currentScore = typeof payload?.currentScore === 'string'
+          ? payload.currentScore.slice(0, 128)
+          : null
+        try {
+          const res = await pipeline.trigger({ image, currentScore })
+          emit('goalpipe:result', { ...res, requestId: id })
+          emit('ack', { id, cmd, payload: { ...res, requestId: id } })
+        } catch (err) {
+          emit('goalpipe:error', {
+            code: err?.code || 'GOAL_PIPELINE_FAILED',
+            message: err?.message || 'trigger failed',
+            requestId: id
+          })
+          emit('ack', { id, cmd })
+        }
+        return
+      }
+      case 'goal-pipeline:status': {
+        const pipeline = goalPipelineInstance
+        const st = pipeline ? pipeline.status() : {
+          busy: false, triggerCount: 0, successCount: 0,
+          lastScore: null, lastError: null, destroyed: false,
+          flagEnabled: goalPipelineFlagEnabled
+        }
+        emit('goalpipe:status', { ...st, flagEnabled: goalPipelineFlagEnabled, requestId: id })
+        emit('ack', { id, cmd, payload: { ...st, flagEnabled: goalPipelineFlagEnabled, requestId: id } })
+        return
+      }
+      // ===== END GOAL PIPELINE =====
+
+      // ===== SEALED PREDICTIONS (Wave 3 F3) =====
+      // Wire bare/predictions.js sealed-prediction helpers (createSealedPrediction
+      // / revealPredictions) to the renderer. `encryptionKey` is a 32-byte value
+      // encoded as 64-hex over the wire; the renderer is expected to derive it
+      // out-of-band (e.g. via deriveSealKey with a host-supplied secret).
+      case 'predictions:create-sealed': {
+        if (!predictionsFlagEnabled) {
+          emit('predictions:error', { code: 'FEATURE_DISABLED', message: 'Predictions feature disabled', requestId: id })
+          emit('ack', { id, cmd })
+          return
+        }
+        if (!room) {
+          emit('predictions:error', { code: 'ROOM_NOT_JOINED', message: 'room not joined', requestId: id })
+          emit('ack', { id, cmd })
+          return
+        }
+        const epoch = typeof payload?.epoch === 'string' ? payload.epoch
+          : (typeof payload?.epoch === 'number' ? String(payload.epoch) : '')
+        const encHex = typeof payload?.encryptionKey === 'string' ? payload.encryptionKey.toLowerCase() : ''
+        if (!epoch || epoch.length > 64) {
+          emit('predictions:error', { code: 'VALIDATION_ERROR', message: 'epoch required (<=64 chars)', requestId: id })
+          emit('ack', { id, cmd })
+          return
+        }
+        if (!/^[0-9a-f]{64}$/.test(encHex)) {
+          emit('predictions:error', { code: 'VALIDATION_ERROR', message: 'encryptionKey must be 64-hex (32 bytes)', requestId: id })
+          emit('ack', { id, cmd })
+          return
+        }
+        const prediction = payload?.prediction
+        if (!prediction || typeof prediction !== 'object') {
+          emit('predictions:error', { code: 'VALIDATION_ERROR', message: 'prediction object required', requestId: id })
+          emit('ack', { id, cmd })
+          return
+        }
+        try {
+          const { createSealedPrediction } = require('../bare/predictions.js')
+          const identity = identityCache || (await getPeerIdentity())
+          const encryptionKey = b4a.from(encHex, 'hex')
+          const res = await createSealedPrediction({
+            store,
+            slug: room.slug || config.roomSlug,
+            epoch,
+            peerPubkey: identity.pubkey,
+            prediction,
+            encryptionKey
+          })
+          emit('predictions:sealed-created', { ...res, epoch, requestId: id })
+          emit('ack', { id, cmd, payload: { ...res, epoch, requestId: id } })
+        } catch (err) {
+          emit('predictions:error', {
+            code: err?.code || (err instanceof RangeError ? 'VALIDATION_ERROR' : 'SEALED_CREATE_FAILED'),
+            message: err?.message || 'sealed create failed',
+            requestId: id
+          })
+          emit('ack', { id, cmd })
+        }
+        return
+      }
+      case 'predictions:reveal': {
+        if (!predictionsFlagEnabled) {
+          emit('predictions:error', { code: 'FEATURE_DISABLED', message: 'Predictions feature disabled', requestId: id })
+          emit('ack', { id, cmd })
+          return
+        }
+        if (!room) {
+          emit('predictions:error', { code: 'ROOM_NOT_JOINED', message: 'room not joined', requestId: id })
+          emit('ack', { id, cmd })
+          return
+        }
+        if (!room.isHost) {
+          emit('predictions:error', { code: 'NOT_HOST', message: 'only the host may reveal', requestId: id })
+          emit('ack', { id, cmd })
+          return
+        }
+        const epoch = typeof payload?.epoch === 'string' ? payload.epoch
+          : (typeof payload?.epoch === 'number' ? String(payload.epoch) : '')
+        const encHex = typeof payload?.encryptionKey === 'string' ? payload.encryptionKey.toLowerCase() : ''
+        if (!epoch || epoch.length > 64) {
+          emit('predictions:error', { code: 'VALIDATION_ERROR', message: 'epoch required (<=64 chars)', requestId: id })
+          emit('ack', { id, cmd })
+          return
+        }
+        if (!/^[0-9a-f]{64}$/.test(encHex)) {
+          emit('predictions:error', { code: 'VALIDATION_ERROR', message: 'encryptionKey must be 64-hex (32 bytes)', requestId: id })
+          emit('ack', { id, cmd })
+          return
+        }
+        try {
+          const { revealPredictions } = require('../bare/predictions.js')
+          const identity = identityCache || (await getPeerIdentity())
+          const encryptionKey = b4a.from(encHex, 'hex')
+          const revealMsg = await revealPredictions({
+            chat: room.chat,
+            slug: room.slug || config.roomSlug,
+            epoch,
+            encryptionKey,
+            myPubkey: identity.pubkey
+          })
+          // NOTE: bare/predictions.js revealPredictions returns the msg shape
+          // WITHOUT sending via chat.sendSystem (the chat reducer does not yet
+          // accept system:reveal). We forward the shape as an IPC event so the
+          // renderer can broadcast it via any transport it owns, and use the
+          // same shape for its local reveal render.
+          emit('predictions:revealed', { ...revealMsg, requestId: id })
+          emit('ack', { id, cmd, payload: { epoch, requestId: id } })
+        } catch (err) {
+          emit('predictions:error', {
+            code: err?.code || (err instanceof RangeError ? 'VALIDATION_ERROR' : 'REVEAL_FAILED'),
+            message: err?.message || 'reveal failed',
+            requestId: id
+          })
+          emit('ack', { id, cmd })
+        }
+        return
+      }
+      // ===== END SEALED PREDICTIONS =====
 
       default:
         log('info', 'ipc unknown cmd (ignored)', { cmd, id })
@@ -4408,6 +5173,26 @@ goodbye(async () => {
   // model unload does not race the swarm teardown.
   try { if (voiceCoach) await voiceCoach.close() } catch (err) {
     log('warn', 'voiceCoach close failed', { message: err && err.message })
+  }
+  // Wave 3: close per-worker QVAC modules ahead of swarm teardown so any
+  // in-flight model unloads finish cleanly.
+  try { if (voiceCloneInstance) await voiceCloneInstance.close() } catch (err) {
+    log('warn', 'voiceClone close failed', { message: err && err.message })
+  }
+  try { if (goalCardInstance) await goalCardInstance.close() } catch (err) {
+    log('warn', 'goalCard close failed', { message: err && err.message })
+  }
+  try { if (langDetectInstance && typeof langDetectInstance.close === 'function') langDetectInstance.close() } catch (err) {
+    log('warn', 'langDetect close failed', { message: err && err.message })
+  }
+  try { if (askTheFrameInstance) await askTheFrameInstance.close() } catch (err) {
+    log('warn', 'askTheFrame close failed', { message: err && err.message })
+  }
+  try { if (diarizationInstance) await diarizationInstance.close() } catch (err) {
+    log('warn', 'diarization close failed', { message: err && err.message })
+  }
+  try { if (semSearchInstance && typeof semSearchInstance.close === 'function') await semSearchInstance.close() } catch (err) {
+    log('warn', 'semanticSearch close failed', { message: err && err.message })
   }
   try { if (vlmCaption) await vlmCaption.close() } catch (err) {
     log('warn', 'vlmCaption close failed', { message: err && err.message })
