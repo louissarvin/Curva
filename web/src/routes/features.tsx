@@ -1,5 +1,5 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { Cpu, ExternalLink, Radio, Zap } from 'lucide-react'
+import { Cpu, ExternalLink, GitBranch, Radio, Zap } from 'lucide-react'
 import AnimateComponent from '@/components/elements/AnimateComponent'
 import { cnm } from '@/utils/style'
 
@@ -388,6 +388,239 @@ function QvacSection() {
   )
 }
 
+// ─── Wave 2-5 section ────────────────────────────────────────────────────────
+
+const ORCHESTRATION_FLOWS = [
+  {
+    name: 'Voice-controlled coach',
+    caps: 5,
+    chain: 'STT (Whisper + Silero VAD) → RAG (EmbeddingGemma) → LLM (Qwen3) → MCP tools → TTS (Supertonic streaming)',
+    trigger: 'Push-to-talk button; Cancel button calls sdk.cancel barge-in',
+    file: 'pear-app/bare/voiceCoach.js',
+  },
+  {
+    name: 'Ask-the-frame',
+    caps: 5,
+    chain: 'VLM (SmolVLM2 + MobileNetV3 pre-filter) → RAG → LLM → MCP tools → TTS',
+    trigger: 'Pause gesture + question; player gets the frame caption read aloud',
+    file: 'pear-app/bare/askTheFrame.js',
+  },
+  {
+    name: 'Goal pipeline',
+    caps: 6,
+    chain: 'OCR (CRAFT + Latin recogniser) → goalCard (Qwen3 shared handle) → MCP tools → Bergamot → TTS + Autobase system:goal-confirmed',
+    trigger: 'Paused scoreboard frame; result distributed to all peers via Autobase',
+    file: 'pear-app/bare/goalPipeline.js',
+  },
+]
+
+const QVAC_CAPABILITIES = [
+  { n: 1, name: 'Bergamot NMT translation', file: 'bare/translate.js' },
+  { n: 2, name: 'Qwen3 0.6B LLM (sharedLlmHandle)', file: 'bare/commentator.js + voiceCoach.js + askTheFrame.js' },
+  { n: 3, name: 'Whisper Tiny + Silero VAD STT', file: 'bare/voiceCoach.js' },
+  { n: 4, name: 'Supertonic multilingual TTS + streaming', file: 'bare/voiceCoach.js (sdk.textToSpeechStream)' },
+  { n: 5, name: 'Chatterbox voice cloning (EN/IT only)', file: 'bare/voiceCoach.js — honest limitation: EN/IT pairs only' },
+  { n: 6, name: 'Llama-3.2 streaming commentator', file: 'bare/commentator.js (contentDelta + thinkingDelta + completionStats)' },
+  { n: 7, name: 'SmolVLM2 500M multimodal + mmproj', file: 'bare/askTheFrame.js — VLM frame captioning' },
+  { n: 8, name: 'MobileNetV3 pre-filter (@qvac/classification-ggml)', file: 'bare/askTheFrame.js — cheap classifier gates VLM' },
+  { n: 9, name: 'OCR_LATIN two-stage CRAFT + Latin recogniser', file: 'bare/goalPipeline.js (defaultRotationAngles for rotated jerseys)' },
+  { n: 10, name: 'Parakeet CTC 0.6B EN-only fallback STT', file: 'bare/voiceCoach.js — tight-RAM alternative to Whisper' },
+  { n: 11, name: 'EmbeddingGemma 300M Q4 RAG', file: 'bare/ragStore.js (ingest + search + embed + workspace lifecycle)' },
+  { n: 12, name: 'MCP tool calling (in-process McpClient)', file: 'bare/mcpClient.js — 7 backend tools' },
+  { n: 13, name: 'Delegated inference (sdk.startQVACProvider)', file: 'bare/delegatedProvider.js — fail-closed allow-list firewall' },
+  { n: 14, name: 'sdk.cancel barge-in', file: 'bare/voiceCoach.js + bare/askTheFrame.js — Cancel buttons' },
+  { n: 15, name: '@qvac/diagnostics native report', file: 'renderer/components/DiagnosticsPanel.js — Report tab' },
+]
+
+const PEARS_TECHNIQUES = [
+  {
+    name: 'Autobase apply purity + host-only writer gate',
+    detail: 'Pattern B reducers are pure: no side effects inside apply(). Host-only message types verified by writer pubkey before the Hyperbee write.',
+    file: 'bare/chat.js + bare/playhead.js',
+  },
+  {
+    name: 'base.ack() cadence',
+    detail: '2500ms background loop calls base.ack() on indexer writers to advance the Autobase view when no user append is pending. Also called immediately post-append.',
+    file: 'bare/chat.js (ADR 004)',
+  },
+  {
+    name: 'Autobase view.checkout(v) chat scrubber',
+    detail: 'Read-only snapshot of the linearised Autobase view at version v. Enables the match chat history scrubber without corrupting the live head.',
+    file: 'bare/chat.js',
+  },
+  {
+    name: 'Apply middleware chain (koa-style compose)',
+    detail: 'Middleware observes base.on("update") events; it never runs inside apply(). Compose chains are stateless so replay is deterministic.',
+    file: 'bare/middleware.js (ADR 006)',
+  },
+  {
+    name: 'Hyperbee sub() namespacing',
+    detail: 'One Bee on the Autobase view, four sub() buckets: chat, tip-log, writer-roster, reactions. Legacy fallback reads from the root namespace for old rooms.',
+    file: 'bare/chat.js + bare/tip.js',
+  },
+  {
+    name: 'Hypercore block encryption (sealed predictions)',
+    detail: 'Prediction commits use BLAKE2b-256 key derivation on the host mnemonic to encrypt each block. Peers cannot read the plaintext until the host publishes the reveal key.',
+    file: 'bare/prediction.js (ADR 008)',
+  },
+  {
+    name: 'Blind-peering explicit target + suspend/resume',
+    detail: 'Each Autobase discovery key is registered with an explicit target peer so blind replication is deterministic. suspend() / resume() on network change prevents stale DHT registrations.',
+    file: 'bare/blindPeering.js (ADR 003)',
+  },
+  {
+    name: 'Prometheus federation (loopback-only exporter)',
+    detail: 'hypertrace-prometheus runs on 127.0.0.1 only. Federates hypercore-stats + hyperswarm-stats + hyperdht-stats under curva_backend_* counter families. curva_backend_tip_submitted_total tracks every EIP-3009 submission.',
+    file: 'backend/src/lib/metrics.ts (ADR 009)',
+  },
+]
+
+const BACKEND_DEPTH = [
+  {
+    name: 'Match-clip Hyperdrive',
+    detail: 'Backend seeds a shared Hyperdrive of match highlights. Peers resolve clips over DHT without downloading from a CDN.',
+    file: 'backend/src/workers/clipSeedWorker.ts',
+  },
+  {
+    name: '7 MCP tools',
+    detail: 'score.getLive, ref.discipline, stadium.getFixtures, roster.getSquad, venue.getDetails, standings.getTable, broadcast.getRegions — all callable from in-app McpClient.',
+    file: 'backend/src/lib/mcp/tools.ts',
+  },
+  {
+    name: 'Delegated QVAC provider with fail-closed firewall',
+    detail: 'sdk.startQVACProvider exposes the host GPU to guest peers. An explicit capability allow-list denies any capability not in the approved set before the request reaches QVAC.',
+    file: 'backend/src/lib/qvac/delegatedProvider.ts',
+  },
+  {
+    name: 'FIFA 2026 shared RAG corpus',
+    detail: '166 fixtures, full squad lists, venue details, broadcast regions — pre-embedded with EmbeddingGemma and served as a Hyperbee snapshot peers can sync on join.',
+    file: 'backend/src/data/qvac-models.json + ragIngestion.ts',
+  },
+  {
+    name: 'Prometheus federation',
+    detail: 'curva_backend_* counter families (tip_submitted_total, mcp_tool_call_total, qvac_inference_ms_histogram). GET /metrics federates all registered prom-client collectors.',
+    file: 'backend/src/lib/metrics.ts',
+  },
+]
+
+function Wave25Section() {
+  return (
+    <section id="wave25" aria-label="Wave 2-5 depth">
+      {/* Orchestration flows */}
+      <AnimateComponent onScroll entry="fadeInUp">
+        <div className="flex items-center gap-3 mb-6">
+          <div className="w-10 h-10 rounded-lg bg-[rgba(200,16,46,0.12)] border border-[rgba(200,16,46,0.2)] flex items-center justify-center text-[#c8102e]">
+            <GitBranch size={20} aria-hidden="true" />
+          </div>
+          <div>
+            <SectionLabel>Pillar 04</SectionLabel>
+            <h2 className="font-display text-3xl md:text-4xl font-bold text-[#f5f5f0] curva-underline">
+              Wave 2-5 depth
+            </h2>
+          </div>
+        </div>
+        <p className="text-[#8a8a8a] text-base max-w-2xl leading-relaxed mb-12">
+          15 on-device QVAC capabilities, 3 cross-capability orchestration flows
+          (5-6 caps per gesture), 8 advanced Pears techniques, and a backend
+          companion with 7 MCP tools and a FIFA 2026 RAG corpus.
+        </p>
+      </AnimateComponent>
+
+      <AnimateComponent onScroll entry="fadeInUp" delay={40}>
+        <p className="text-xs font-medium tracking-[0.2em] uppercase text-[#8a8a8a] mb-6">
+          Cross-capability orchestration flows
+        </p>
+      </AnimateComponent>
+
+      <div className="grid sm:grid-cols-3 gap-4 mb-16">
+        {ORCHESTRATION_FLOWS.map((flow, i) => (
+          <AnimateComponent key={flow.name} onScroll entry="fadeInUp" delay={i * 60}>
+            <article className="p-5 rounded-lg bg-[#141414] border border-[rgba(255,255,255,0.07)] hover:border-[rgba(255,255,255,0.14)] h-full flex flex-col gap-3 hover:-translate-y-0.5 transition-all duration-200 ease-out">
+              <div className="flex items-start justify-between gap-2">
+                <p className="text-[#f5f5f0] text-sm font-semibold">{flow.name}</p>
+                <span className="flex-shrink-0 font-mono-code text-[10px] px-1.5 py-0.5 rounded bg-[rgba(200,16,46,0.15)] border border-[rgba(200,16,46,0.3)] text-[#c8102e]">
+                  {flow.caps} caps
+                </span>
+              </div>
+              <p className="font-mono-code text-[10px] text-[rgba(212,175,55,0.75)] leading-relaxed flex-1">
+                {flow.chain}
+              </p>
+              <p className="text-[#8a8a8a] text-xs leading-relaxed">{flow.trigger}</p>
+              <p className="font-mono-code text-[9px] text-[rgba(212,175,55,0.5)]">{flow.file}</p>
+            </article>
+          </AnimateComponent>
+        ))}
+      </div>
+
+      {/* QVAC capabilities */}
+      <AnimateComponent onScroll entry="fadeInUp">
+        <p className="text-xs font-medium tracking-[0.2em] uppercase text-[#8a8a8a] mb-6">
+          15 QVAC capabilities on-device
+        </p>
+      </AnimateComponent>
+
+      <AnimateComponent onScroll entry="fadeInUp" delay={40}>
+        <ul className="space-y-2 mb-16">
+          {QVAC_CAPABILITIES.map((cap) => (
+            <li
+              key={cap.n}
+              className="flex items-start gap-3 px-4 py-3 rounded-lg bg-[#141414] border border-[rgba(255,255,255,0.06)] hover:border-[rgba(255,255,255,0.1)] transition-colors"
+            >
+              <span className="flex-shrink-0 font-mono-code text-[10px] text-[#c8102e] w-5 text-right mt-0.5">
+                {String(cap.n).padStart(2, '0')}
+              </span>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm text-[#f5f5f0] font-medium">{cap.name}</p>
+                <p className="font-mono-code text-[9px] text-[rgba(212,175,55,0.6)] mt-0.5 leading-snug">
+                  {cap.file}
+                </p>
+              </div>
+            </li>
+          ))}
+        </ul>
+      </AnimateComponent>
+
+      {/* Pears techniques */}
+      <AnimateComponent onScroll entry="fadeInUp">
+        <p className="text-xs font-medium tracking-[0.2em] uppercase text-[#8a8a8a] mb-6">
+          8 Pears techniques on top of 13 primitives
+        </p>
+      </AnimateComponent>
+
+      <div className="grid sm:grid-cols-2 gap-4 mb-16">
+        {PEARS_TECHNIQUES.map((t, i) => (
+          <AnimateComponent key={t.name} onScroll entry="fadeInUp" delay={i * 50}>
+            <article className="p-5 rounded-lg bg-[#141414] border border-[rgba(255,255,255,0.07)] hover:border-[rgba(255,255,255,0.14)] h-full flex flex-col gap-2 hover:-translate-y-0.5 transition-all duration-200 ease-out">
+              <p className="text-[#f5f5f0] text-sm font-semibold">{t.name}</p>
+              <p className="text-[#8a8a8a] text-xs leading-relaxed flex-1">{t.detail}</p>
+              <p className="font-mono-code text-[9px] text-[rgba(212,175,55,0.6)]">{t.file}</p>
+            </article>
+          </AnimateComponent>
+        ))}
+      </div>
+
+      {/* Backend depth */}
+      <AnimateComponent onScroll entry="fadeInUp">
+        <p className="text-xs font-medium tracking-[0.2em] uppercase text-[#8a8a8a] mb-6">
+          Backend companion depth
+        </p>
+      </AnimateComponent>
+
+      <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+        {BACKEND_DEPTH.map((item, i) => (
+          <AnimateComponent key={item.name} onScroll entry="fadeInUp" delay={i * 50}>
+            <article className="p-5 rounded-lg bg-[#141414] border border-[rgba(255,255,255,0.07)] hover:border-[rgba(255,255,255,0.14)] h-full flex flex-col gap-2 hover:-translate-y-0.5 transition-all duration-200 ease-out">
+              <p className="text-[#f5f5f0] text-sm font-semibold">{item.name}</p>
+              <p className="text-[#8a8a8a] text-xs leading-relaxed flex-1">{item.detail}</p>
+              <p className="font-mono-code text-[9px] text-[rgba(212,175,55,0.6)]">{item.file}</p>
+            </article>
+          </AnimateComponent>
+        ))}
+      </div>
+    </section>
+  )
+}
+
 // ─── Page composition ─────────────────────────────────────────────────────────
 
 function FeaturesPage() {
@@ -425,14 +658,14 @@ function FeaturesPage() {
               className="font-display font-bold text-[#f5f5f0] leading-[1.02] tracking-tight mb-6"
               style={{ fontSize: 'clamp(40px, 5vw, 72px)' }}
             >
-              Nine Pears building blocks,
-              <br className="hidden md:block" /> exercised at runtime.
+              13 Pears primitives + 8 techniques,
+              <br className="hidden md:block" /> 15 QVAC capabilities.
             </h1>
           </AnimateComponent>
           <AnimateComponent entry="fadeInUp" delay={120} duration={600}>
             <p className="text-[#8a8a8a] text-lg max-w-2xl leading-relaxed">
-              Three pillars in one demo. Every claim maps to a file and line
-              number in the codebase.
+              Three pillars, four waves of depth. Every claim maps to a file and
+              line number in the codebase.
             </p>
           </AnimateComponent>
         </div>
@@ -445,6 +678,8 @@ function FeaturesPage() {
         <WdkSection />
         <Divider />
         <QvacSection />
+        <Divider />
+        <Wave25Section />
       </div>
 
       {/* Cross-pillar callout */}

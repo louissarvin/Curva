@@ -26,7 +26,7 @@ const PILLARS: Array<PillarCard> = [
     pillar: 'Pears',
     product: 'Holepunch Pears Stack',
     summary:
-      '13 Holepunch primitives exercised at runtime — Hyperswarm discovery, Autobase Pattern B multi-writer sync, blind-peering unattended replication, keet-identity-key 3.2.0 attested chat, Hyperdrive P2P video reel, pear-updater OTA. Published as a versioned pear:// app link — judges can `pear run pear://...` from any machine.',
+      '13 Holepunch primitives + 8 advanced techniques at runtime — Autobase Pattern B with base.ack() cadence and view.checkout() scrubber, koa-style middleware chain, Hyperbee sub() namespacing, BLAKE2b-256 sealed predictions, blind-peering with explicit target + suspend/resume, Prometheus federation. Published as a versioned pear:// app link.',
     evidence: [
       'pear run pear://0.22823.hcg8oftrk7hps1z4x9pprf4jhk7mitohjort6csfpjwjjo3ynomy',
       'blind peer key: nm5j8618…t1fy (workers/main.js:809)',
@@ -54,7 +54,7 @@ const PILLARS: Array<PillarCard> = [
     pillar: 'QVAC',
     product: 'QVAC Local AI',
     summary:
-      'On-device Bergamot NMT translation via @qvac/sdk@0.14.0 with modelConfig.pivotModel chained pivot. Bahasa Indonesia to Italian goes ID-EN-IT in one SDK call, and the reverse pair works from the same catalog. 12 EN-hub language pairs staged. SHA-256 model integrity verified before load. Zero network calls during translation.',
+      '15 on-device capabilities: Bergamot NMT, Qwen3 LLM (shared handle), Whisper + Silero VAD STT, Supertonic TTS streaming, Chatterbox voice cloning (EN/IT), SmolVLM2 VLM, MobileNetV3 pre-filter, OCR_LATIN, Parakeet CTC fallback STT, EmbeddingGemma RAG, MCP tool calling, delegated inference, sdk.cancel barge-in, @qvac/diagnostics. Three orchestration flows chain 5-6 caps per gesture.',
     evidence: [
       'pear-app/bare/translate.js:208-229 — pivotModel wiring',
       'backend/src/routes/qvacRoutes.ts — SHA-256 catalog endpoint',
@@ -237,7 +237,7 @@ function Divider() {
 // ─── Marquee Ticker ───────────────────────────────────────────────────────────
 
 const MARQUEE_CONTENT =
-  'PEARS + WDK + QVAC · WATCH THE WORLD CUP WITH FRIENDS · BOLA UNTUK SEMUA · COSI IL CALCIO DOVEVA ESSERE · FORZA CURVA · 13 BUILDING BLOCKS · JAKARTA · TORINO · ZERO SERVERS · '
+  'PEARS + WDK + QVAC · WATCH THE WORLD CUP WITH FRIENDS · BOLA UNTUK SEMUA · COSI IL CALCIO DOVEVA ESSERE · FORZA CURVA · 13 PRIMITIVES + 8 TECHNIQUES · 15 QVAC CAPABILITIES · JAKARTA · TORINO · ZERO SERVERS · '
 
 function Marquee() {
   return (
@@ -646,11 +646,13 @@ function ArchitectureGlance() {
         <div className="mt-8 p-4 rounded-lg bg-[#141414] border border-[rgba(255,255,255,0.07)]">
           <p className="text-xs text-[#8a8a8a] leading-relaxed">
             <span className="text-[#f5f5f0] font-medium">
-              13 Holepunch primitives exercised at runtime.
+              13 Holepunch primitives + 8 advanced techniques at runtime.
             </span>{' '}
             Hyperswarm, HyperDHT, Corestore, Hypercore, Hyperbee, Autobase,
             Hyperdrive, Hyperblobs, hypercore-blob-server, blind-peering,
-            keet-identity-key, pear-updater, pear-electron.
+            keet-identity-key, pear-updater, pear-electron. Plus: apply purity,
+            base.ack() cadence, view.checkout() scrubber, middleware chain,
+            sub() namespacing, sealed predictions, blind-peer target, Prometheus.
           </p>
         </div>
       </AnimateComponent>
@@ -770,12 +772,13 @@ function TryCurva() {
           <div className="p-4 rounded-lg bg-[rgba(200,16,46,0.05)] border border-[rgba(200,16,46,0.15)]">
             <p className="text-sm text-[#8a8a8a] leading-relaxed">
               <span className="text-[#f5f5f0] font-medium">Test status:</span>{' '}
-              <span className="font-mono-code text-[#c8102e]">414/414</span>{' '}
-              backend asserts (1,783) +
-              <span className="font-mono-code text-[#c8102e] ml-1">
-                246/246
-              </span>{' '}
-              pear-app asserts (817). Total: 2,600 asserts green.
+              <span className="font-mono-code text-[#c8102e]">500+</span>{' '}
+              tests across backend and pear-app. 10 ADRs. 60+ commit-pinned
+              permalinks in README. HEAD:{' '}
+              <span className="font-mono-code text-[rgba(212,175,55,0.8)]">
+                9723e82
+              </span>
+              .
             </p>
           </div>
         </AnimateComponent>
@@ -788,24 +791,24 @@ function TryCurva() {
 
 const NUMBERS = [
   {
-    value: '802',
+    value: '500+',
     label: 'Tests passing',
-    sub: '414 backend + 246 pear-app + 142 integration',
+    sub: 'backend + pear-app combined',
   },
   {
-    value: '2,600',
-    label: 'Asserts green',
-    sub: '1,783 backend + 817 pear-app',
+    value: '15',
+    label: 'QVAC capabilities',
+    sub: '3 orchestration flows, 5-6 caps per gesture',
   },
   {
-    value: '5 / 5',
-    label: 'Pears idea slots',
-    sub: 'All five track slots filled',
+    value: '13+8',
+    label: 'Pears depth',
+    sub: '13 primitives + 8 advanced techniques',
   },
   {
-    value: '13',
-    label: 'Building blocks',
-    sub: 'All 13 Holepunch primitives at runtime',
+    value: '10',
+    label: 'ADRs',
+    sub: '60+ commit-pinned permalinks in README',
   },
 ]
 

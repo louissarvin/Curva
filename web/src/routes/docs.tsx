@@ -1,4 +1,5 @@
 import { createFileRoute } from '@tanstack/react-router'
+import { ExternalLink } from 'lucide-react'
 import AnimateComponent from '@/components/elements/AnimateComponent'
 
 export const Route = createFileRoute('/docs')({ component: DocsPage })
@@ -340,6 +341,119 @@ function DocsPage() {
               sequence is still fully observable; only the on-chain confirmation
               and Etherscan link are skipped.
             </Para>
+          </AnimateComponent>
+        </section>
+
+        <Divider />
+
+        {/* ADR list */}
+        <section aria-label="Architecture Decision Records">
+          <AnimateComponent onScroll entry="fadeInUp">
+            <SectionLabel>Architecture decisions</SectionLabel>
+            <h2 className="font-display text-3xl font-bold text-[#f5f5f0] mb-4 curva-underline">
+              10 ADRs. Pinned to commit.
+            </h2>
+            <Para>
+              Every significant architectural choice has a decision record.
+              All links are pinned to commit{' '}
+              <span className="font-mono-code text-[rgba(212,175,55,0.8)]">
+                9723e82
+              </span>
+              .
+            </Para>
+          </AnimateComponent>
+
+          <AnimateComponent onScroll entry="fadeInUp" delay={60}>
+            <ul className="space-y-2 mb-6">
+              {[
+                {
+                  id: '001',
+                  slug: 'autobase-pattern-b-multi-writer',
+                  title: 'ADR 001: Autobase Pattern B for Multi-Writer Chat + Playhead',
+                  desc: 'Why Pattern B (addWriter with signed invitation) rather than a single-writer Hypercore per peer.',
+                },
+                {
+                  id: '002',
+                  slug: 'keet-identity-attestation',
+                  title: 'ADR 002: Keet Identity Attestation Attaches to Presence, Not Every Message',
+                  desc: 'Identity attestations are written once on join; messages reference the attestation by pubkey to keep chat compact.',
+                },
+                {
+                  id: '003',
+                  slug: 'blind-peering-target-strategy',
+                  title: 'ADR 003: Blind-Peering Per-Core Target Strategy',
+                  desc: 'Explicit target peer per Autobase discovery key so blind replication is deterministic, with suspend/resume on network change.',
+                },
+                {
+                  id: '004',
+                  slug: 'base-ack-cadence',
+                  title: 'ADR 004: base.ack() Cadence for Indexer Writers',
+                  desc: '2500ms background loop plus post-append ack prevents the Autobase view from stalling when no user append is pending.',
+                },
+                {
+                  id: '005',
+                  slug: 'voice-coach-orchestration',
+                  title: 'ADR 005: Voice Coach Chains Five QVAC Capabilities in One Push-to-Talk Turn',
+                  desc: 'Shared Qwen3 handle, sequential capability dispatch, and sdk.cancel barge-in for the voice coach flow.',
+                },
+                {
+                  id: '006',
+                  slug: 'apply-middleware-observational',
+                  title: 'ADR 006: Apply Middleware Runs Observationally, Not Inside apply()',
+                  desc: 'Middleware observes base.on("update") rather than running inside apply() to preserve reducer purity and deterministic replay.',
+                },
+                {
+                  id: '007',
+                  slug: 'goal-pipeline-fanout',
+                  title: 'ADR 007: Goal Pipeline Fan-Out (OCR to Six Capabilities)',
+                  desc: 'OCR reads the scoreboard, Qwen3 generates the goal card, MCP tools enrich it, Bergamot translates, TTS reads it, Autobase distributes to all peers.',
+                },
+                {
+                  id: '008',
+                  slug: 'hypercore-sealed-predictions',
+                  title: 'ADR 008: Sealed Predictions via Hypercore Block Encryption',
+                  desc: 'BLAKE2b-256 key derivation on host mnemonic encrypts prediction blocks; peers cannot read until the host publishes the reveal key.',
+                },
+                {
+                  id: '009',
+                  slug: 'prometheus-loopback-federation',
+                  title: 'ADR 009: Prometheus Federation on Loopback via Shared prom-client Registry',
+                  desc: 'hypertrace-prometheus on 127.0.0.1 only; federates hypercore-stats + hyperswarm-stats + hyperdht-stats under curva_backend_* families.',
+                },
+                {
+                  id: '010',
+                  slug: 'design-tokens-minimalism',
+                  title: 'ADR 010: Design Tokens Enforce Minimalism and XSS Discipline',
+                  desc: 'All colors, spacing, and typography come from a token set; no dangerouslySetInnerHTML, no inline style interpolation of user input.',
+                },
+              ].map((adr) => (
+                <li key={adr.id}>
+                  <a
+                    href={`https://github.com/louissarvin/Curva/blob/9723e82/docs/adr/${adr.id}-${adr.slug}.md`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="group flex items-start gap-3 p-3 rounded-lg bg-[#141414] border border-[rgba(255,255,255,0.06)] hover:border-[rgba(255,255,255,0.12)] transition-colors curva-focus"
+                  >
+                    <span className="flex-shrink-0 font-mono-code text-[10px] text-[#c8102e] mt-0.5 w-7">
+                      {adr.id}
+                    </span>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-[#f5f5f0] group-hover:text-white transition-colors leading-snug mb-1">
+                        {adr.title}
+                      </p>
+                      <p className="text-xs text-[#8a8a8a] leading-relaxed">
+                        {adr.desc}
+                      </p>
+                    </div>
+                    <ExternalLink
+                      size={11}
+                      className="flex-shrink-0 text-[rgba(138,138,138,0.4)] group-hover:text-[#8a8a8a] transition-colors mt-1"
+                      aria-hidden="true"
+                    />
+                  </a>
+                </li>
+              ))}
+            </ul>
           </AnimateComponent>
         </section>
 

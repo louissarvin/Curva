@@ -54,14 +54,14 @@ const RUBRIC = [
     axis: 'Real use of the chosen platform (Pears)',
     weight: 'Deepest weight',
     evidence:
-      '9 building blocks exercised at runtime, each with file evidence. Pattern B Autobase, ed25519 writer invitations, relayThrough NAT fallback, findingPeers cold-start.',
+      '13 primitives + 8 advanced techniques exercised at runtime, each with file evidence. Pattern B Autobase, ed25519 writer invitations, relayThrough NAT fallback, base.ack() cadence, view.checkout() scrubber, koa-style middleware chain, Hyperbee sub() namespacing, BLAKE2b-256 sealed predictions, Prometheus federation.',
     score: 'Strong',
   },
   {
     axis: 'Technical ambition',
     weight: '',
     evidence:
-      'Cross-pillar demo beat: system:tip, system:tip-congrats (QVAC translated), system:tip-ack (EIP-191 host signed). All three pillars in 15 seconds. Anti-spoofing proved in test/wave8b.test.js.',
+      'Cross-pillar demo beat: system:tip, system:tip-congrats (QVAC translated), system:tip-ack (EIP-191 host signed). All three pillars in 15 seconds. Three orchestration flows chaining 5-6 QVAC capabilities per gesture (voice coach, ask-the-frame, goal pipeline). 10 ADRs. Anti-spoofing proved in test/wave8b.test.js.',
     score: 'Strong',
   },
   {
@@ -177,32 +177,58 @@ function SubmissionPage() {
                 </p>
                 <div className="flex gap-3">
                   <span className="font-mono-code text-[#c8102e] text-sm font-bold">
-                    414/414
+                    500+
                   </span>
                   <span className="text-xs text-[#8a8a8a] self-end mb-0.5">
-                    backend (1,783 asserts)
+                    tests across backend + pear-app
                   </span>
                 </div>
-                <div className="flex gap-3">
+                <div className="flex gap-3 mt-1">
                   <span className="font-mono-code text-[#c8102e] text-sm font-bold">
-                    246/246
+                    15
                   </span>
                   <span className="text-xs text-[#8a8a8a] self-end mb-0.5">
-                    pear-app (817 asserts)
+                    QVAC capabilities + 3 orchestration flows
                   </span>
                 </div>
               </div>
               <div className="self-center h-12 w-px bg-[rgba(255,255,255,0.07)]" />
               <div>
                 <p className="text-[9px] text-[#8a8a8a] uppercase tracking-wider mb-1">
-                  Total
+                  Pears depth
                 </p>
-                <span className="font-mono-code text-[#f5f5f0] text-2xl font-bold">
-                  2,600
-                </span>
-                <span className="text-xs text-[#8a8a8a] ml-2">
-                  asserts green
-                </span>
+                <div className="flex gap-3">
+                  <span className="font-mono-code text-[#f5f5f0] text-2xl font-bold">
+                    13+8
+                  </span>
+                </div>
+                <p className="text-[9px] text-[#8a8a8a] mt-0.5">
+                  primitives + advanced techniques
+                </p>
+              </div>
+              <div className="self-center h-12 w-px bg-[rgba(255,255,255,0.07)]" />
+              <div>
+                <p className="text-[9px] text-[#8a8a8a] uppercase tracking-wider mb-1">
+                  Docs + commit
+                </p>
+                <div className="flex gap-3">
+                  <span className="font-mono-code text-[#f5f5f0] text-sm font-bold">
+                    10 ADRs
+                  </span>
+                  <span className="text-xs text-[#8a8a8a] self-end mb-0.5">
+                    60+ pinned permalinks
+                  </span>
+                </div>
+                <div className="mt-1">
+                  <a
+                    href="https://github.com/louissarvin/Curva/commit/9723e82"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1.5 font-mono-code text-[10px] px-2 py-0.5 rounded bg-[rgba(255,255,255,0.05)] border border-[rgba(255,255,255,0.1)] text-[rgba(212,175,55,0.8)] hover:text-[rgba(212,175,55,1)] transition-colors curva-focus"
+                  >
+                    HEAD 9723e82
+                  </a>
+                </div>
               </div>
             </div>
           </AnimateComponent>
@@ -215,7 +241,7 @@ function SubmissionPage() {
           <AnimateComponent onScroll entry="fadeInUp">
             <SectionLabel>Pears Track</SectionLabel>
             <h2 className="font-display text-3xl font-bold text-[#f5f5f0] mb-8 curva-underline">
-              Nine building blocks. All nine.
+              13 primitives + 8 techniques. All verified.
             </h2>
           </AnimateComponent>
 
