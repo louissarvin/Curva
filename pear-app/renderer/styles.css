@@ -7834,3 +7834,176 @@ textarea:focus-visible,
     transition: none !important;
   }
 }
+
+/* ===== F6: room semantic search bar ===================================== */
+.curva-chat__room-search {
+  display: flex;
+  align-items: center;
+  gap: var(--curva-space-2);
+  padding: var(--curva-space-2) var(--curva-space-3);
+  border-bottom: 1px solid var(--curva-border);
+  background: rgba(0, 0, 0, 0.02);
+  position: relative;
+}
+.curva-chat__room-search-icon {
+  width: 14px;
+  height: 14px;
+  display: inline-block;
+  border: 1.5px solid var(--curva-fg-muted);
+  border-radius: 50%;
+  position: relative;
+  font-size: 0;
+  color: transparent;
+  flex: 0 0 auto;
+}
+.curva-chat__room-search-icon::after {
+  content: '';
+  position: absolute;
+  right: -4px;
+  bottom: -3px;
+  width: 5px;
+  height: 1.5px;
+  background: var(--curva-fg-muted);
+  transform: rotate(45deg);
+  transform-origin: left center;
+}
+.curva-chat__room-search-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 1px solid var(--curva-border);
+  border-radius: var(--curva-radius-sm);
+  padding: 4px 8px;
+  font-family: var(--curva-mono);
+  font-size: var(--curva-text-xs);
+  background: var(--curva-bg);
+  color: var(--curva-fg);
+}
+.curva-chat__room-search-input:focus {
+  outline: none;
+  border-color: var(--curva-accent);
+}
+.curva-chat__room-search-results {
+  position: absolute;
+  top: 100%;
+  left: var(--curva-space-3);
+  right: var(--curva-space-3);
+  z-index: 20;
+  max-height: 320px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 4px 0;
+  list-style: none;
+  background: var(--curva-bg);
+  border: 1px solid var(--curva-border);
+  border-radius: var(--curva-radius-sm);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+}
+.curva-chat__room-search-hit {
+  display: grid;
+  grid-template-columns: minmax(0, 70px) 1fr auto;
+  gap: 8px;
+  padding: 6px 10px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--curva-border);
+  align-items: baseline;
+  font-size: var(--curva-text-xs);
+}
+.curva-chat__room-search-hit:last-child {
+  border-bottom: none;
+}
+.curva-chat__room-search-hit:hover {
+  background: rgba(0, 0, 0, 0.04);
+}
+.curva-chat__room-search-hit-author {
+  font-family: var(--curva-mono);
+  color: var(--curva-accent);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.curva-chat__room-search-hit-snippet {
+  color: var(--curva-fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.curva-chat__room-search-hit-time {
+  color: var(--curva-fg-muted);
+  font-size: 0.85em;
+  font-family: var(--curva-mono);
+}
+.curva-chat__room-search-empty {
+  padding: 8px 10px;
+  color: var(--curva-fg-muted);
+  font-size: var(--curva-text-xs);
+  font-style: italic;
+  list-style: none;
+}
+/* Transient highlight applied to a chat row when a search result is clicked.
+   Uses a 1s fade rather than a hard flash to stay demo-friendly. */
+.curva-chat__msg--room-search-highlight,
+.curva-chat-message-highlighted {
+  animation: curva-chat-room-search-pulse 1s ease-out;
+}
+@keyframes curva-chat-room-search-pulse {
+  0%   { background-color: rgba(200, 16, 46, 0.18); }
+  100% { background-color: transparent; }
+}
+/* ===== END F6 ===== */
+
+/* ===== SHIP 3 F7 AUTO HIGHLIGHT ===== */
+/* Highlight pill for auto-detected match events (red/yellow card, corner,
+   substitution). Distinct border-left color per kind; layout mirrors goal-card
+   with an icon-first row and a summary line below. */
+.curva-chat__msg--highlight {
+  border-left: 4px solid var(--curva-fg-muted, #888);
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.02);
+  border-radius: 4px;
+  margin: 4px 0;
+}
+.curva-chat__highlight-inner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--curva-text-sm, 13px);
+  font-weight: 600;
+}
+.curva-chat__highlight-icon {
+  font-size: 1.2em;
+  line-height: 1;
+}
+.curva-chat__highlight-label {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.curva-chat__highlight-team {
+  color: var(--curva-fg-muted, #999);
+  font-weight: 400;
+  font-family: var(--curva-mono);
+  font-size: 0.9em;
+}
+.curva-chat__highlight-summary {
+  margin-top: 4px;
+  font-size: var(--curva-text-sm, 13px);
+  color: var(--curva-fg, #ddd);
+  line-height: 1.35;
+}
+.curva-chat__msg--highlight-red-card {
+  border-left-color: #d13a3a;
+  background: rgba(209, 58, 58, 0.06);
+}
+.curva-chat__msg--highlight-yellow-card {
+  border-left-color: #e8c93a;
+  background: rgba(232, 201, 58, 0.06);
+}
+.curva-chat__msg--highlight-corner {
+  border-left-color: #3a7ad1;
+  background: rgba(58, 122, 209, 0.06);
+}
+.curva-chat__msg--highlight-substitution {
+  border-left-color: #3ad17a;
+  background: rgba(58, 209, 122, 0.06);
+}
+/* ===== END SHIP 3 F7 ===== */

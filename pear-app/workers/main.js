@@ -627,6 +627,39 @@ function ensureCommentator() {
   // off, ensureAnnouncer() returns null and this path is a no-op (commentator
   // treats a missing `announcer` opt as "no streaming TTS").
   const streamingAnnouncer = announcerFlagEnabled ? ensureAnnouncer() : null
+  // Ship 3 F5: pre-attach the voiceClone handle IF the goal-voice-clone flag
+  // is already on. The commentator internally re-checks status().enrolled +
+  // the CURVA_COMMENTATOR_VOICE_CLONE_ENABLED override before routing, so
+  // handing over a not-yet-enrolled instance is safe (all locales fall back
+  // to announcer until enroll() completes). Fire-and-forget via a shim that
+  // returns the cached instance when it lands; if the ensure* promise rejects
+  // we simply keep null (announcer-only mode). No `await` in this sync fn.
+  const commentatorVoiceCloneFlagOn = (typeof process !== 'undefined' &&
+    process.env && (
+      String(process.env.CURVA_COMMENTATOR_VOICE_CLONE_ENABLED || '').toLowerCase() === 'true' ||
+      String(process.env.CURVA_VOICE_CLONE_GOAL_ENABLED || '').toLowerCase() === 'true'
+    ))
+  let voiceCloneHandle = null
+  if (commentatorVoiceCloneFlagOn && voiceCloneInstance) voiceCloneHandle = voiceCloneInstance
+  if (commentatorVoiceCloneFlagOn && !voiceCloneHandle) {
+    // Kick off async load; the commentator picks it up on the next runTrigger
+    // through the shared voiceCloneInstance reference we replace below.
+    ensureVoiceClone().then((vc) => {
+      if (vc && commentator) {
+        // The commentator holds a captured reference; we mutate the field on
+        // the create opts by re-reading via a getter would be cleaner, but the
+        // simplest safe path is to re-create the tts routing seam at next call
+        // via the module-level voiceCloneInstance. commentator is closed over
+        // the original `voiceClone` value, so this cannot retroactively wire
+        // it in. Callers that want voiceClone from the first tick should have
+        // called ensureVoiceClone() before ensureCommentator(). We log to make
+        // that ordering visible.
+        log('info', 'commentator: voiceClone landed after commentator boot; will apply on next room boot')
+      }
+    }).catch((err) => {
+      log('warn', 'commentator: ensureVoiceClone failed', { message: err && err.message })
+    })
+  }
   commentator = createCommentator({
     storageDir: config.dir,
     isHost: !!config.isHost,
@@ -634,6 +667,7 @@ function ensureCommentator() {
     modelConfig,
     announcer: streamingAnnouncer,
     announcerLocale: announcerDefaultLocale,
+    voiceClone: voiceCloneHandle,
     getMatchTimeMs: () => {
       try {
         const st = room?.playhead?.state?.() || {}
@@ -1332,6 +1366,70 @@ async function ensureSemanticSearch () {
 }
 // ===== END WAVE 3 QVAC MODULES =====
 
+// ===== F6 ROOM SEARCH (Semifinal) =====
+// Peer-local semantic RAG scoped to a single room's chat log. Feature flag:
+// CURVA_ROOM_SEARCH_ENABLED (default ON). The factory is lazy so a room with
+// no search traffic never pays the embed-model load cost, and its lifetime is
+// per-room (torn down + reopened alongside the room autobase). See
+// bare/roomSearch.js head memo for the workspace naming + prompt-injection
+// defense.
+const { createRoomSearch } = require('../bare/roomSearch.js')
+let roomSearchInstance = null
+let roomSearchInflight = null
+let roomSearchChatUnsub = null
+async function ensureRoomSearch () {
+  if (roomSearchInstance) return roomSearchInstance
+  if (roomSearchInflight) return roomSearchInflight
+  if (!room || !room.chat) return null
+  roomSearchInflight = (async () => {
+    let sdk = null
+    try { sdk = await import('@qvac/sdk') } catch { sdk = null }
+    try {
+      roomSearchInstance = createRoomSearch({
+        sdk,
+        chat: room.chat,
+        roomSlug: room.slug || config.roomSlug || 'default',
+        emit: (ev, p) => emit(ev, p),
+        log
+      })
+      // Kick off an async reindex-all pass over the room's history so a
+      // late-joining viewer's search hits the full log. Fire-and-forget so
+      // the ensure call resolves fast.
+      roomSearchInstance.reindexAll().catch((err) => {
+        log('info', 'roomSearch initial reindex threw', { message: err && err.message })
+      })
+      // Subscribe to future applied messages via chat.onMessage. Since chat
+      // already fires listeners after apply lands each message (see
+      // bare/chat.js emitNew loop), this is the docs-verified "message-
+      // applied" hook. We forward user-authored msg rows only; system:* rows
+      // are filtered by roomSearch itself.
+      if (typeof room.chat.onMessage === 'function') {
+        roomSearchChatUnsub = room.chat.onMessage((m) => {
+          if (!m || typeof m !== 'object') return
+          if (m.type && m.type !== 'msg') return
+          const text = typeof m.text === 'string' ? m.text : ''
+          if (text.length === 0) return
+          const msgId = m.wall_clock_ms
+            ? String(m.wall_clock_ms) + '-' + (m.by_peer || '').slice(0, 8)
+            : (m.by_peer || 'anon').slice(0, 8) + '-' + Math.floor(Math.random() * 1e6)
+          roomSearchInstance.ingestMessage({
+            id: msgId,
+            author: m.by_peer || m.handle || null,
+            text,
+            at: m.wall_clock_ms || null
+          }).catch(() => { /* best effort */ })
+        })
+      }
+    } catch (err) {
+      log('warn', 'roomSearch construct failed', { message: err && err.message })
+      roomSearchInstance = null
+    }
+    return roomSearchInstance
+  })().finally(() => { roomSearchInflight = null })
+  return roomSearchInflight
+}
+// ===== END F6 ROOM SEARCH =====
+
 // ===== WAVE 4 GOAL PIPELINE =====
 // Chained OCR -> goalCard -> MCP -> translate -> streaming TTS -> chat append.
 // Requires: ocrHandle (wave 2), goalCard (wave 3), mcp.client (wave 2),
@@ -1398,6 +1496,104 @@ async function ensureGoalPipeline () {
   return goalPipelineInflight
 }
 // ===== END WAVE 4 GOAL PIPELINE =====
+
+// ===== SHIP 3 F7: AUTO HIGHLIGHT DETECTION =====
+// MobileNetV3-Small pre-filter -> SmolVLM2 verify -> Qwen3 summariser ->
+// debounce -> per-locale translate + TTS -> chat append.
+// Feature flag: CURVA_AUTO_HIGHLIGHT_ENABLED (default OFF).
+// Verified against installed @qvac/sdk 0.14.0:
+//   - dist/client/api/classify.d.ts:22 (MobileNetV3 classify surface)
+//   - dist/schemas/completion-stream.d.ts:23-58 (VLM multimodal history shape)
+const { createHighlightPipeline, autoHighlightFlagEnabled } = require('../bare/highlightPipeline.js')
+log('info', 'auto-highlight feature flag', { enabled: autoHighlightFlagEnabled() })
+
+let highlightPipelineInstance = null
+let highlightPipelineInflight = null
+
+// MobileNetV3 handle backed by the same ggml-classification path bare/vlmCaption.js
+// uses in preFilter(). We keep this as a tiny local shim so the highlight
+// pipeline factory takes a uniform { classify } interface without leaking
+// SDK plumbing.
+let mobilenetHandle = null
+let mobilenetInflight = null
+async function ensureMobilenet () {
+  if (mobilenetHandle) return mobilenetHandle
+  if (mobilenetInflight) return mobilenetInflight
+  mobilenetInflight = (async () => {
+    let sdk = null
+    try { sdk = await import('@qvac/sdk') } catch { sdk = null }
+    if (!sdk || typeof sdk.loadModel !== 'function' || typeof sdk.classify !== 'function') {
+      log('info', 'mobilenet: @qvac/sdk classify unavailable')
+      return null
+    }
+    try {
+      const id = await sdk.loadModel({ modelType: 'ggml-classification' })
+      mobilenetHandle = {
+        async classify ({ image, topK = 3 }) {
+          const img = image instanceof Uint8Array
+            ? image
+            : (Buffer.isBuffer(image) ? new Uint8Array(image.buffer, image.byteOffset, image.byteLength) : image)
+          return sdk.classify({ modelId: id, image: img, topK })
+        }
+      }
+      return mobilenetHandle
+    } catch (err) {
+      log('warn', 'mobilenet loadModel failed', { message: err && err.message })
+      return null
+    }
+  })().finally(() => { mobilenetInflight = null })
+  return mobilenetInflight
+}
+
+async function ensureHighlightPipeline () {
+  if (highlightPipelineInstance) return highlightPipelineInstance
+  if (highlightPipelineInflight) return highlightPipelineInflight
+  if (!autoHighlightFlagEnabled()) return null
+  if (!room?.chat) return null
+  highlightPipelineInflight = (async () => {
+    // Shared LLM handle (Qwen3) via the commentator when it exists.
+    let sharedLlmHandle = null
+    try {
+      if (commentator && typeof commentator.getSharedLlmHandle === 'function') {
+        sharedLlmHandle = commentator.getSharedLlmHandle()
+      }
+    } catch { sharedLlmHandle = null }
+
+    const vlm = ensureVlm()
+    const mobilenet = await ensureMobilenet().catch(() => null)
+
+    // voiceClone routing parity with F1/F5: only pass when enrolled + flag on.
+    let voiceClone = null
+    try {
+      const vc = await ensureVoiceClone()
+      if (vc && typeof vc.speak === 'function') {
+        const st = typeof vc.status === 'function' ? vc.status() : null
+        if (st && st.enrolled && st.flagEnabled) voiceClone = vc
+      }
+    } catch { voiceClone = null }
+
+    try {
+      highlightPipelineInstance = createHighlightPipeline({
+        sharedLlmHandle,
+        vlm,
+        mobilenet,
+        chat: room.chat,
+        translate: translator || null,
+        announcer: announcer || null,
+        voiceClone,
+        roomSlug: (room && room.slug) || (config.roomSlug || 'default'),
+        emit: (ev, p) => emit(ev, p),
+        log: (level, msg, extra) => log(level, 'highlight-pipeline: ' + msg, extra)
+      })
+    } catch (err) {
+      log('warn', 'highlightPipeline construct failed', { message: err && err.message })
+      highlightPipelineInstance = null
+    }
+    return highlightPipelineInstance
+  })().finally(() => { highlightPipelineInflight = null })
+  return highlightPipelineInflight
+}
+// ===== END SHIP 3 F7 =====
 
 // ===== QVAC SHIP 3 F3: MATCH RECAP =====
 // Chains SEVEN capabilities: chat + goal + tip reads -> Qwen3 completion ->
@@ -3202,6 +3398,18 @@ async function closeCurrentRoom() {
   if (voiceCoach) {
     try { await voiceCoach.close() } catch { /* noop */ }
     voiceCoach = null
+  }
+  // F6 room-search: unhook the chat subscription and close the workspace so
+  // the next openRoomFor rebinds against the new room's chat handle. The
+  // workspace persists on disk (deleteOnClose is false) so a rejoin restores
+  // embeddings without re-ingesting history.
+  if (roomSearchChatUnsub) {
+    try { roomSearchChatUnsub() } catch { /* noop */ }
+    roomSearchChatUnsub = null
+  }
+  if (roomSearchInstance) {
+    try { await roomSearchInstance.close() } catch { /* noop */ }
+    roomSearchInstance = null
   }
   // F1: clear the dock badge whenever a room closes so the icon doesn't hold
   // a stale score after the user leaves the match.
@@ -5545,6 +5753,113 @@ async function dispatchCommand(msg) {
       }
       // ===== END SEALED PREDICTIONS =====
 
+      // ===== F6 ROOM SEARCH IPC =====
+      // Added at the END of the switch (per concurrent-work notice) so a
+      // second background agent can insert its own cases above without merge
+      // conflicts. The bridge is `curva.roomSearch.*` in the renderer.
+      case 'room-search:search': {
+        const query = typeof payload?.query === 'string' ? payload.query : ''
+        const k = typeof payload?.k === 'number' ? payload.k : undefined
+        if (query.length === 0) {
+          emit('room-search:results', { hits: [], requestId: id, reason: 'EMPTY_QUERY' })
+          emit('ack', { id, cmd, payload: { hits: [], requestId: id } })
+          return
+        }
+        if (query.length > 500) {
+          emit('room-search:results', { hits: [], requestId: id, reason: 'QUERY_TOO_LONG' })
+          emit('ack', { id, cmd, payload: { hits: [], requestId: id } })
+          return
+        }
+        try {
+          const rs = await ensureRoomSearch()
+          if (!rs) {
+            emit('room-search:results', { hits: [], requestId: id, reason: 'NOT_READY' })
+            emit('ack', { id, cmd, payload: { hits: [], requestId: id } })
+            return
+          }
+          const hits = await rs.search({ query, k })
+          emit('room-search:results', { hits, requestId: id })
+          emit('ack', { id, cmd, payload: { hits, requestId: id } })
+        } catch (err) {
+          log('warn', 'room-search:search failed', { message: err && err.message })
+          emit('room-search:results', { hits: [], requestId: id, reason: 'INTERNAL' })
+          emit('ack', { id, cmd, payload: { hits: [], requestId: id } })
+        }
+        return
+      }
+      case 'room-search:status': {
+        try {
+          const rs = roomSearchInstance || (await ensureRoomSearch())
+          const s = rs ? rs.status() : {
+            enabled: (function () {
+              try { return require('../bare/roomSearch.js').flagEnabled() } catch { return false }
+            })(),
+            ready: false,
+            hasSdk: false
+          }
+          emit('room-search:status', { ...s, requestId: id })
+          emit('ack', { id, cmd, payload: { ...s, requestId: id } })
+        } catch (err) {
+          emit('room-search:status', { enabled: false, ready: false, error: err && err.message, requestId: id })
+          emit('ack', { id, cmd, payload: { requestId: id } })
+        }
+        return
+      }
+      // ===== END F6 ROOM SEARCH IPC =====
+
+      // ===== SHIP 3 F7 AUTO-HIGHLIGHT IPC =====
+      case 'highlight-pipeline:tick': {
+        if (!autoHighlightFlagEnabled()) {
+          emit('highlight:error', { code: 'FEATURE_DISABLED', message: 'auto-highlight disabled', requestId: id })
+          emit('ack', { id, cmd, payload: { ok: false, code: 'FEATURE_DISABLED', requestId: id } })
+          return
+        }
+        const pipeline = await ensureHighlightPipeline()
+        if (!pipeline) {
+          emit('highlight:error', { code: 'NOT_READY', message: 'highlight pipeline unavailable', requestId: id })
+          emit('ack', { id, cmd, payload: { ok: false, code: 'NOT_READY', requestId: id } })
+          return
+        }
+        const image = decodeImagePayload(payload?.image)
+        if (!image) {
+          emit('highlight:error', { code: 'NO_IMAGE', message: 'image required', requestId: id })
+          emit('ack', { id, cmd, payload: { ok: false, code: 'NO_IMAGE', requestId: id } })
+          return
+        }
+        const currentScore = typeof payload?.currentScore === 'string'
+          ? payload.currentScore.slice(0, 128)
+          : null
+        const matchTimeMs = Number.isFinite(payload?.matchTimeMs)
+          ? Math.max(0, Number(payload.matchTimeMs))
+          : 0
+        try {
+          const res = await pipeline.tick({ image, currentScore, matchTimeMs })
+          emit('highlight:result', { ...res, requestId: id })
+          emit('ack', { id, cmd, payload: { ...res, requestId: id } })
+        } catch (err) {
+          emit('highlight:error', {
+            code: err?.code || 'HIGHLIGHT_PIPELINE_FAILED',
+            message: err?.message || 'tick failed',
+            requestId: id
+          })
+          emit('ack', { id, cmd })
+        }
+        return
+      }
+      case 'highlight-pipeline:status': {
+        const pipeline = highlightPipelineInstance
+        const st = pipeline ? pipeline.status() : {
+          busy: false, tickCount: 0, detectedCount: 0,
+          lastError: null, destroyed: false,
+          recentHighlights: [],
+          flagEnabled: autoHighlightFlagEnabled()
+        }
+        emit('highlight:status', { ...st, requestId: id })
+        emit('ack', { id, cmd, payload: { ...st, requestId: id } })
+        return
+      }
+      // ===== END SHIP 3 F7 AUTO-HIGHLIGHT IPC =====
+
       default:
         log('info', 'ipc unknown cmd (ignored)', { cmd, id })
     }
@@ -5634,6 +5949,12 @@ goodbye(async () => {
   }
   try { if (semSearchInstance && typeof semSearchInstance.close === 'function') await semSearchInstance.close() } catch (err) {
     log('warn', 'semanticSearch close failed', { message: err && err.message })
+  }
+  try {
+    if (roomSearchChatUnsub) roomSearchChatUnsub()
+    if (roomSearchInstance) await roomSearchInstance.close()
+  } catch (err) {
+    log('warn', 'roomSearch close failed', { message: err && err.message })
   }
   try { if (vlmCaption) await vlmCaption.close() } catch (err) {
     log('warn', 'vlmCaption close failed', { message: err && err.message })

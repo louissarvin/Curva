@@ -1725,7 +1725,125 @@ contextBridge.exposeInMainWorld('curva', {
     onAppended:   (cb) => onEvent('recap:appended', cb),
     onError:      (cb) => onEvent('recap:error', cb),
     onDone:       (cb) => onEvent('recap:done', cb)
+  },
+
+  // ===== F6 ROOM SEARCH =====
+  // Semantic search over the room's own applied chat log. All work runs
+  // on-device via QVAC embed + ragSearch (see bare/roomSearch.js). Every
+  // input is validated + length-capped at the preload boundary; the worker
+  // re-validates as defense in depth.
+  roomSearch: {
+    async search({ query, k } = {}) {
+      if (typeof query !== 'string') throw new TypeError('query must be a string')
+      if (query.length === 0) return { hits: [], reason: 'EMPTY_QUERY' }
+      if (query.length > 500) {
+        throw new RangeError('query max 500 chars')
+      }
+      const payload = { query }
+      if (k !== undefined && k !== null) {
+        if (typeof k !== 'number' || !Number.isFinite(k) || k <= 0 || k > 25) {
+          throw new RangeError('k must be 1..25')
+        }
+        payload.k = Math.floor(k)
+      }
+      const res = await writeMainAwait('room-search:search', payload)
+      return res || { hits: [] }
+    },
+    async status() {
+      return writeMainAwait('room-search:status', {})
+    },
+    onResults: (cb) => onEvent('room-search:results', cb),
+    onStatus:  (cb) => onEvent('room-search:status', cb),
+    onReindexed: (cb) => onEvent('room-search:reindexed', cb)
+  },
+  // ===== END F6 ROOM SEARCH =====
+
+  // ===== F8 NATIVE DESKTOP NOTIFICATIONS =====
+  // Bridge to electron/notifications.js via ipcMain.handle('notify:show').
+  // Renderer triggers a notification when window is unfocused and a
+  // demo-relevant event fires (goal, tip, mention). Click routes back to
+  // the renderer via curva.notifications.onFocusRoom.
+  notifications: {
+    async show({ kind, roomSlug, title, body, silent, urgency } = {}) {
+      if (typeof kind !== 'string' || kind.length === 0 || kind.length > 32) {
+        throw new RangeError('kind must be a non-empty short string')
+      }
+      if (typeof title !== 'string' || title.length === 0) {
+        throw new RangeError('title required')
+      }
+      if (title.length > 200) throw new RangeError('title max 200 chars')
+      if (body !== undefined && body !== null && (typeof body !== 'string' || body.length > 400)) {
+        throw new RangeError('body must be string (max 400 chars)')
+      }
+      if (roomSlug !== undefined && roomSlug !== null) {
+        if (typeof roomSlug !== 'string' || roomSlug.length === 0 || roomSlug.length > 128) {
+          throw new RangeError('roomSlug max 128 chars')
+        }
+      }
+      const payload = { kind, title }
+      if (body) payload.body = body
+      if (roomSlug) payload.roomSlug = roomSlug
+      if (silent === true) payload.silent = true
+      if (typeof urgency === 'string' && urgency.length <= 16) payload.urgency = urgency
+      return ipcRenderer.invoke('notify:show', payload)
+    },
+    async status() {
+      return ipcRenderer.invoke('notify:status')
+    },
+    // Subscribe to focus-room click routing. The Electron main process sends
+    // 'curva:notification:focus-room' when the user clicks a notification.
+    onFocusRoom(cb) {
+      if (typeof cb !== 'function') throw new TypeError('cb must be a function')
+      const wrap = (_evt, payload) => {
+        if (!payload || typeof payload !== 'object') return
+        cb(payload)
+      }
+      ipcRenderer.on('curva:notification:focus-room', wrap)
+      return () => ipcRenderer.removeListener('curva:notification:focus-room', wrap)
+    }
+  },
+  // ===== END F8 NOTIFICATIONS =====
+
+  // ===== SHIP 3 F7 AUTO HIGHLIGHT =====
+  // Bridge to bare/highlightPipeline.js. `tick` runs MobileNetV3 pre-filter
+  // -> SmolVLM2 classify -> Qwen3 summariser -> debounce -> per-locale
+  // translate + TTS -> chat append against a captured frame.
+  // Feature flag: CURVA_AUTO_HIGHLIGHT_ENABLED. Every dep is checked worker-
+  // side or NOT_READY is emitted.
+  highlightPipeline: {
+    tick({ image, currentScore, matchTimeMs } = {}) {
+      if (typeof image !== 'string' || image.length === 0) {
+        throw new RangeError('image (data URL or base64) required')
+      }
+      if (image.length > 14 * 1024 * 1024) {
+        throw new RangeError('image payload too large (max ~14 MB base64)')
+      }
+      const p = { image }
+      if (currentScore !== undefined && currentScore !== null) {
+        if (typeof currentScore !== 'string' || currentScore.length > 128) {
+          throw new RangeError('currentScore must be string (<=128 chars)')
+        }
+        p.currentScore = currentScore
+      }
+      if (matchTimeMs !== undefined && matchTimeMs !== null) {
+        if (typeof matchTimeMs !== 'number' || !Number.isFinite(matchTimeMs) || matchTimeMs < 0) {
+          throw new RangeError('matchTimeMs must be a non-negative number')
+        }
+        p.matchTimeMs = matchTimeMs
+      }
+      return writeMainAwait('highlight-pipeline:tick', p)
+    },
+    status() { return writeMainAwait('highlight-pipeline:status', {}) },
+    onDetected:     (cb) => onEvent('highlight:detected', cb),
+    onTranslated:   (cb) => onEvent('highlight:translated', cb),
+    onTtsOpen:      (cb) => onEvent('highlight:tts-open', cb),
+    onTtsEnd:       (cb) => onEvent('highlight:tts-end', cb),
+    onChatAppended: (cb) => onEvent('highlight:chat-append', cb),
+    onError:        (cb) => onEvent('highlight:error', cb),
+    onResult:       (cb) => onEvent('highlight:result', cb),
+    onDone:         (cb) => onEvent('highlight:done', cb)
   }
+  // ===== END SHIP 3 F7 AUTO HIGHLIGHT =====
 })
 
 // Allowlist for openExternal. Enforced on BOTH sides — the renderer preload

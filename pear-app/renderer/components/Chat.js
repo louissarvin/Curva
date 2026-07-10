@@ -213,6 +213,31 @@ export function mountChat({ container, curva, tier = 'writer' } = {}) {
   readerNote.textContent = 'Spectator view. Chat is invite-only.'
 
   container.appendChild(header)
+  // F6 room-search bar. Distinct from F4 semSearch (which searches VLM clip
+  // captions). This bar hits bare/roomSearch.js which indexes the room's own
+  // applied chat log via QVAC RAG. The bar is hidden entirely when the
+  // roomSearch feature flag is off; feature-flag probe fires once at mount.
+  const roomSearchBar = document.createElement('div')
+  roomSearchBar.className = 'curva-chat__room-search'
+  const roomSearchIcon = document.createElement('span')
+  roomSearchIcon.className = 'curva-chat__room-search-icon'
+  roomSearchIcon.setAttribute('aria-hidden', 'true')
+  roomSearchIcon.textContent = 'q' // magnifying-glass glyph substitute; CSS renders visual
+  const roomSearchInput = document.createElement('input')
+  roomSearchInput.type = 'search'
+  roomSearchInput.className = 'curva-chat__room-search-input'
+  roomSearchInput.placeholder = 'Search chat...'
+  roomSearchInput.maxLength = 500
+  roomSearchInput.setAttribute('aria-label', 'Semantic room chat search')
+  const roomSearchOverlay = document.createElement('ul')
+  roomSearchOverlay.className = 'curva-chat__room-search-results'
+  roomSearchOverlay.hidden = true
+  roomSearchBar.appendChild(roomSearchIcon)
+  roomSearchBar.appendChild(roomSearchInput)
+  roomSearchBar.appendChild(roomSearchOverlay)
+  // Hidden by default until we know the feature flag state; probe async.
+  roomSearchBar.hidden = true
+  container.appendChild(roomSearchBar)
   container.appendChild(scrubberBar)
   container.appendChild(searchBar)
   container.appendChild(translationBar)
@@ -477,6 +502,133 @@ export function mountChat({ container, curva, tier = 'writer' } = {}) {
       runSearch(searchInput.value.trim())
     }, 400)
   })
+
+  // -- F6 room-search wiring -----------------------------------------------
+  // Distinct from F4 semSearch. Uses curva.roomSearch which searches the
+  // room's own applied chat log via QVAC RAG. Feature-flag probe hides the
+  // bar entirely when disabled.
+  let roomSearchDebounce = null
+  function runRoomSearch(rawQuery) {
+    const q = typeof rawQuery === 'string' ? rawQuery.trim() : ''
+    if (q.length === 0) {
+      roomSearchOverlay.hidden = true
+      roomSearchOverlay.textContent = ''
+      return
+    }
+    if (!curva.roomSearch || typeof curva.roomSearch.search !== 'function') {
+      roomSearchOverlay.hidden = false
+      roomSearchOverlay.textContent = ''
+      const na = document.createElement('li')
+      na.className = 'curva-chat__room-search-empty'
+      na.textContent = 'room search unavailable'
+      roomSearchOverlay.appendChild(na)
+      return
+    }
+    const capped = q.slice(0, 500)
+    curva.roomSearch.search({ query: capped, k: 10 }).then((res) => {
+      const hits = Array.isArray(res?.hits) ? res.hits : (Array.isArray(res) ? res : [])
+      roomSearchOverlay.textContent = ''
+      roomSearchOverlay.hidden = false
+      if (hits.length === 0) {
+        const empty = document.createElement('li')
+        empty.className = 'curva-chat__room-search-empty'
+        empty.textContent = 'No matches'
+        roomSearchOverlay.appendChild(empty)
+        return
+      }
+      for (const hit of hits) {
+        const li = document.createElement('li')
+        li.className = 'curva-chat__room-search-hit'
+        const authorEl = document.createElement('span')
+        authorEl.className = 'curva-chat__room-search-hit-author'
+        // textContent-only: every field is untrusted peer input
+        const authorRaw = typeof hit.author === 'string' ? hit.author : ''
+        authorEl.textContent = authorRaw
+          ? (authorRaw.length > 12 ? authorRaw.slice(0, 12) : authorRaw)
+          : 'anon'
+        const snippetEl = document.createElement('span')
+        snippetEl.className = 'curva-chat__room-search-hit-snippet'
+        snippetEl.textContent = typeof hit.snippet === 'string' ? hit.snippet.slice(0, 200) : ''
+        const timeEl = document.createElement('span')
+        timeEl.className = 'curva-chat__room-search-hit-time'
+        if (typeof hit.at === 'number' && Number.isFinite(hit.at) && hit.at > 0) {
+          const deltaMs = Date.now() - hit.at
+          timeEl.textContent = formatRelTime(deltaMs)
+        } else {
+          timeEl.textContent = ''
+        }
+        li.appendChild(authorEl)
+        li.appendChild(snippetEl)
+        li.appendChild(timeEl)
+        // Jump-to-message on click.
+        const targetMsgId = typeof hit.msgId === 'string' ? hit.msgId : ''
+        li.addEventListener('click', () => {
+          // targetMsgId is `<wallClockMs>-<peerHex>` from workers/main.js. The
+          // chat rows are keyed as `${wall_clock_ms}/${by_peer.slice(0,8)}`.
+          // Translate one to the other and scroll the row.
+          const dashIdx = targetMsgId.lastIndexOf('-')
+          if (dashIdx <= 0) return
+          const wallMs = targetMsgId.slice(0, dashIdx)
+          const peer = targetMsgId.slice(dashIdx + 1)
+          const rowKey = wallMs + '/' + peer
+          const row = rowsByKey.get(rowKey)
+          if (row) {
+            row.scrollIntoView({ behavior: 'smooth', block: 'center' })
+            row.classList.add('curva-chat__msg--room-search-highlight')
+            setTimeout(() => {
+              row.classList.remove('curva-chat__msg--room-search-highlight')
+            }, 1500)
+          }
+        })
+        roomSearchOverlay.appendChild(li)
+      }
+    }).catch(() => {
+      roomSearchOverlay.textContent = ''
+      roomSearchOverlay.hidden = false
+      const err = document.createElement('li')
+      err.className = 'curva-chat__room-search-empty'
+      err.textContent = 'search error'
+      roomSearchOverlay.appendChild(err)
+    })
+  }
+
+  function formatRelTime(deltaMs) {
+    if (!Number.isFinite(deltaMs) || deltaMs < 0) return ''
+    if (deltaMs < 60_000) return 'just now'
+    if (deltaMs < 3_600_000) return Math.floor(deltaMs / 60_000) + 'm ago'
+    if (deltaMs < 86_400_000) return Math.floor(deltaMs / 3_600_000) + 'h ago'
+    return Math.floor(deltaMs / 86_400_000) + 'd ago'
+  }
+
+  roomSearchInput.addEventListener('input', () => {
+    const v = roomSearchInput.value
+    if (roomSearchDebounce) clearTimeout(roomSearchDebounce)
+    if (!v || v.trim().length === 0) {
+      roomSearchOverlay.hidden = true
+      roomSearchOverlay.textContent = ''
+      return
+    }
+    roomSearchDebounce = setTimeout(() => runRoomSearch(v), 250)
+  })
+  roomSearchInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      roomSearchInput.value = ''
+      roomSearchOverlay.hidden = true
+      roomSearchOverlay.textContent = ''
+      return
+    }
+    if (e.key === 'Enter') {
+      if (roomSearchDebounce) clearTimeout(roomSearchDebounce)
+      runRoomSearch(roomSearchInput.value)
+    }
+  })
+
+  // Feature-flag probe: only reveal the bar if the worker reports enabled.
+  if (curva.roomSearch && typeof curva.roomSearch.status === 'function') {
+    curva.roomSearch.status().then((st) => {
+      if (st && st.enabled) roomSearchBar.hidden = false
+    }).catch(() => { /* stay hidden */ })
+  }
 
   input.addEventListener('input', () => {
     const len = Math.min(input.value.length, MAX_CHARS)
@@ -931,6 +1083,24 @@ export function mountChat({ container, curva, tier = 'writer' } = {}) {
       return
     }
 
+    // Ship 3 F7: system:highlight — auto-detected match event pill (red card,
+    // yellow card, corner, substitution). Colored variant class per kind.
+    // ALL fields via textContent — model output is untrusted.
+    if (msg?.type === 'system:highlight') {
+      const li = renderSystemHighlight(msg, key)
+      list.appendChild(li)
+      rowsByKey.set(key, li)
+      msgCount++
+      count.textContent = msgCount + ' msg' + (msgCount === 1 ? '' : 's')
+      while (list.children.length > 300) {
+        const first = list.firstChild
+        if (first?.dataset?.key) rowsByKey.delete(first.dataset.key)
+        list.removeChild(first)
+      }
+      if (autoScroll) list.scrollTop = list.scrollHeight
+      return
+    }
+
     const li = document.createElement('li')
     li.className = 'curva-chat__msg'
     li.dataset.key = key
@@ -1311,6 +1481,66 @@ export function mountChat({ container, curva, tier = 'writer' } = {}) {
     attribution.textContent = 'AI parsed · on-device'
 
     li.appendChild(inner)
+    li.appendChild(attribution)
+    return li
+  }
+
+  // Ship 3 F7: `system:highlight` renderer. Icon-first colored pill.
+  // Variant classes:
+  //   .curva-chat__msg--highlight-red-card       (red)
+  //   .curva-chat__msg--highlight-yellow-card    (yellow)
+  //   .curva-chat__msg--highlight-corner         (blue)
+  //   .curva-chat__msg--highlight-substitution   (green)
+  // All fields via textContent — model output is untrusted.
+  function renderSystemHighlight(msg, key) {
+    const li = document.createElement('li')
+    li.className = 'curva-chat__msg curva-chat__msg--system curva-chat__msg--highlight'
+    li.dataset.key = key
+
+    // Whitelist the kind before touching classList — prevents an attacker who
+    // somehow bypasses isValidSystemHighlight from injecting arbitrary CSS
+    // class fragments.
+    const KIND_ALLOWLIST = {
+      'red-card': { cls: 'curva-chat__msg--highlight-red-card', icon: '🟥', label: 'Red card' },
+      'yellow-card': { cls: 'curva-chat__msg--highlight-yellow-card', icon: '🟨', label: 'Yellow card' },
+      'corner': { cls: 'curva-chat__msg--highlight-corner', icon: '⚑', label: 'Corner' },
+      'substitution': { cls: 'curva-chat__msg--highlight-substitution', icon: '⇄', label: 'Substitution' }
+    }
+    const cfg = KIND_ALLOWLIST[msg.kind] || { cls: '', icon: '•', label: String(msg.kind || 'event').slice(0, 24) }
+    if (cfg.cls) li.classList.add(cfg.cls)
+
+    const inner = document.createElement('div')
+    inner.className = 'curva-chat__highlight-inner'
+
+    const iconEl = document.createElement('span')
+    iconEl.className = 'curva-chat__highlight-icon'
+    iconEl.textContent = cfg.icon
+
+    const labelEl = document.createElement('span')
+    labelEl.className = 'curva-chat__highlight-label'
+    labelEl.textContent = cfg.label
+
+    const teamEl = document.createElement('span')
+    teamEl.className = 'curva-chat__highlight-team'
+    const rawTeam = typeof msg.team === 'string' ? msg.team.slice(0, 32) : ''
+    teamEl.textContent = rawTeam
+
+    const summaryEl = document.createElement('div')
+    summaryEl.className = 'curva-chat__highlight-summary'
+    // Model output; textContent + 200-char cap (matches validator).
+    const rawSummary = typeof msg.summaryText === 'string' ? msg.summaryText.slice(0, 200) : ''
+    summaryEl.textContent = rawSummary
+
+    inner.appendChild(iconEl)
+    inner.appendChild(labelEl)
+    if (rawTeam.length > 0) inner.appendChild(teamEl)
+
+    const attribution = document.createElement('div')
+    attribution.className = 'curva-chat__commentary-attribution'
+    attribution.textContent = 'auto-highlight · on-device VLM'
+
+    li.appendChild(inner)
+    li.appendChild(summaryEl)
     li.appendChild(attribution)
     return li
   }
