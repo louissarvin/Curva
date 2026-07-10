@@ -889,9 +889,69 @@ const x402FlagEnabled = (() => {
 })()
 log('info', 'x402 feature flag', { enabled: x402FlagEnabled })
 
-const { createX402Client, X402Error } = require('../bare/x402Client.js')
+const { createX402Client, X402Error, checkVipStatus: x402CheckVipStatus } = require('../bare/x402Client.js')
 const PAYWALL_PROMPT_TTL_MS = 5 * 60 * 1000
 const x402PendingPrompts = new Map()
+
+// ---- VIP slug join gate (Semifinal Wave) -----------------------------------
+// If a user tries to join a swarm topic derived from a `vip-<slug>` room, we
+// consult the backend's /vip/status/:slug endpoint. If the slug is reserved
+// AND the reservation's ownerAddress does NOT match the local peer's wallet
+// ownerAddress, the join is refused with VIP_SLUG_RESERVED_BY_OTHER. If the
+// backend is unreachable OR the feature flag is off (503), we log a warning
+// and let the join proceed — the gate is best-effort discovery, NOT a hard
+// security boundary (a determined peer can always bypass the companion API).
+// The real trust root is the on-chain reservation; the gate is UX polish that
+// tells users "someone else already paid for this slug" before they open the
+// Autobase.
+async function evaluateVipJoinGate(slug) {
+  if (typeof slug !== 'string' || !slug.startsWith('vip-')) {
+    return { allow: true, reason: 'not-vip' }
+  }
+  const bareSlug = slug.slice(4)
+  if (!/^[a-z0-9-]{3,32}$/.test(bareSlug)) {
+    // Malformed VIP slug — the swarm topic derivation would still succeed but
+    // reserving is impossible, so surface a clear error rather than silently
+    // allow.
+    return { allow: false, code: 'VIP_SLUG_MALFORMED', message: 'vip- prefix requires a slug matching ^[a-z0-9-]{3,32}$' }
+  }
+  const baseUrl = config && config.backendUrl
+  if (!baseUrl) {
+    log('warn', 'vip gate: backendUrl missing, allowing join', { slug })
+    return { allow: true, reason: 'backend-unknown' }
+  }
+  let status
+  try {
+    status = await x402CheckVipStatus(bareSlug, { baseUrl })
+  } catch (err) {
+    log('warn', 'vip gate: status probe threw, allowing join', { slug, message: err && err.message })
+    return { allow: true, reason: 'probe-error' }
+  }
+  // status is either a data object OR { ok:false, code, message }
+  if (status && status.ok === false) {
+    // Backend disabled or transient failure. Fail open so the room still opens.
+    log('warn', 'vip gate: status probe non-ok, allowing join', { slug, code: status.code })
+    return { allow: true, reason: 'probe-non-ok', code: status.code }
+  }
+  if (!status || status.reserved !== true) {
+    return { allow: true, reason: 'unreserved' }
+  }
+  // Reserved. Compare against local wallet ownerAddress if known.
+  const localOwner = (typeof wallet !== 'undefined' && wallet && typeof wallet.ownerAddress === 'string')
+    ? wallet.ownerAddress.toLowerCase()
+    : null
+  const resOwner = typeof status.ownerAddress === 'string' ? status.ownerAddress.toLowerCase() : null
+  if (localOwner && resOwner && localOwner === resOwner) {
+    return { allow: true, reason: 'owner-match', ownerAddress: resOwner }
+  }
+  return {
+    allow: false,
+    code: 'VIP_SLUG_RESERVED_BY_OTHER',
+    message: 'vip-' + bareSlug + ' is reserved by another peer',
+    ownerAddress: resOwner,
+    reservedAt: status.reservedAt || null
+  }
+}
 
 function x402PurgeStalePrompts() {
   const now = Date.now()
@@ -1301,6 +1361,21 @@ async function ensureGoalPipeline () {
     const gc = await ensureGoalCard()
     if (!gc) return null
     const mcpBundle = ensureMcpTools()
+    // Ship 3 F1: route voice-cloned TTS through Chatterbox when the host has
+    // enrolled a reference clip AND CURVA_VOICE_CLONE_ENABLED=true. When any
+    // condition is unmet, ensureVoiceClone returns null and the pipeline
+    // falls back to announcer for every locale (existing behaviour).
+    let voiceClone = null
+    try {
+      const vc = await ensureVoiceClone()
+      if (vc && typeof vc.speak === 'function') {
+        // Only pass the handle when a reference is enrolled; otherwise the
+        // speak() call would just emit NO_REFERENCE for every locale and we
+        // would waste a tts-fallback event on the wire.
+        const st = typeof vc.status === 'function' ? vc.status() : null
+        if (st && st.enrolled && st.flagEnabled) voiceClone = vc
+      }
+    } catch { voiceClone = null }
     try {
       goalPipelineInstance = createGoalPipeline({
         ocr,
@@ -1308,6 +1383,7 @@ async function ensureGoalPipeline () {
         mcp: (mcpBundle && mcpBundle.client) || null,
         translate: translator || null,
         announcer: announcer || null,
+        voiceClone,
         chat: room.chat,
         roomSlug: (room && room.slug) || (config.roomSlug || 'default'),
         log: (msg, extra) => log('info', 'goal-pipeline: ' + msg, extra),
@@ -1322,6 +1398,87 @@ async function ensureGoalPipeline () {
   return goalPipelineInflight
 }
 // ===== END WAVE 4 GOAL PIPELINE =====
+
+// ===== QVAC SHIP 3 F3: MATCH RECAP =====
+// Chains SEVEN capabilities: chat + goal + tip reads -> Qwen3 completion ->
+// Bergamot translate -> Chatterbox/Supertonic TTS -> Hyperblob persist ->
+// Autobase append. Feature-flagged (CURVA_MATCH_RECAP_ENABLED=true) because
+// running the whole flow is heavy (LLM + TTS + write per locale).
+const { createMatchRecap, recapFlagEnabled } = require('../bare/matchRecap.js')
+log('info', 'match recap feature flag', { enabled: recapFlagEnabled() })
+
+let matchRecapInstance = null
+let matchRecapInflight = null
+async function ensureMatchRecap () {
+  if (matchRecapInstance) return matchRecapInstance
+  if (matchRecapInflight) return matchRecapInflight
+  if (!recapFlagEnabled()) return null
+  if (!room || !room.chat) return null
+  matchRecapInflight = (async () => {
+    let sharedLlmHandle = null
+    try {
+      if (commentator && typeof commentator.getSharedLlmHandle === 'function') {
+        sharedLlmHandle = commentator.getSharedLlmHandle()
+      }
+    } catch { sharedLlmHandle = null }
+    if (!sharedLlmHandle) return null
+    let voiceClone = null
+    try {
+      const vc = await ensureVoiceClone()
+      if (vc && typeof vc.speak === 'function') {
+        const st = typeof vc.status === 'function' ? vc.status() : null
+        if (st && st.enrolled && st.flagEnabled) voiceClone = vc
+      }
+    } catch { voiceClone = null }
+
+    // saveAudioBlob: persist the PCM into the room's Hyperdrive so peers can
+    // stream the recap back offline. Duck-typed on room.clips to keep this
+    // wire-up small; real production clip persistence lives in bare/clips.js.
+    const saveAudioBlob = async ({ locale, bytes, sampleRate }) => {
+      try {
+        const clips = room && room.clips
+        if (clips && typeof clips.addClip === 'function') {
+          // Use the clip API's addClip path with a synthetic caption so the
+          // recap shows up next to real clips. match_time_ms=0 keeps it out
+          // of the game-timeline gutter.
+          const buf = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes)
+          const saved = await clips.addClip({
+            buffer: buf,
+            match_time_ms: 0,
+            caption: 'recap-audio:' + locale + '@' + sampleRate
+          })
+          if (saved && saved.driveKey && saved.path) {
+            return { blobKey: saved.driveKey + ':' + saved.path }
+          }
+        }
+      } catch (err) {
+        log('warn', 'match-recap: saveAudioBlob failed', { locale, message: err && err.message })
+      }
+      return null
+    }
+
+    try {
+      matchRecapInstance = createMatchRecap({
+        chat: room.chat,
+        sharedLlmHandle,
+        translate: translator || null,
+        announcer: announcer || null,
+        voiceClone,
+        saveAudioBlob,
+        roomSlug: (room && room.slug) || (config.roomSlug || 'default'),
+        locales: ['en', 'it'],
+        log: (level, msg, extra) => log(level, 'match-recap: ' + msg, extra),
+        emit: (ev, p) => emit(ev, p)
+      })
+    } catch (err) {
+      log('warn', 'matchRecap construct failed', { message: err && err.message })
+      matchRecapInstance = null
+    }
+    return matchRecapInstance
+  })().finally(() => { matchRecapInflight = null })
+  return matchRecapInflight
+}
+// ===== END MATCH RECAP =====
 
 // ===== DIAGNOSTICS REPORT (wave-final QVAC depth F2) =====
 // Thin wrapper around @qvac/diagnostics (v0.1.2). Verified per
@@ -3247,6 +3404,23 @@ async function dispatchCommand(msg) {
       case 'room:join': {
         const slug = String(payload?.slug || config.roomSlug)
         const isHost = !!payload?.isHost
+        // Semifinal Wave: VIP slug join gate. For `vip-<slug>` rooms we consult
+        // the backend before opening the swarm topic. Fails OPEN on backend
+        // outage (see evaluateVipJoinGate for the trust model). The gate runs
+        // BEFORE joinRoom() so the peer never announces on a swarm topic they
+        // are not entitled to. Non-vip slugs pass through unchanged.
+        const vipGate = await evaluateVipJoinGate(slug)
+        if (!vipGate.allow) {
+          emit('room:join:refused', {
+            slug,
+            code: vipGate.code,
+            message: vipGate.message,
+            ownerAddress: vipGate.ownerAddress || null,
+            reservedAt: vipGate.reservedAt || null
+          })
+          emit('ack', { id, cmd, error: { code: vipGate.code, message: vipGate.message } })
+          return
+        }
         await openRoomFor(slug, isHost)
         emit('ack', { id, cmd })
         return
@@ -4570,6 +4744,19 @@ async function dispatchCommand(msg) {
         }
         return
       }
+      case 'voice-coach:clear-memory': {
+        // Ship 3 F2: drop the conversational memory ring. Idempotent — if
+        // the coach was never constructed we still ack so the renderer's
+        // "Reset conversation" button never hangs.
+        const coach = voiceCoach
+        if (coach && typeof coach.clearConversationHistory === 'function') {
+          try { coach.clearConversationHistory() } catch (err) {
+            log('warn', 'voice-coach:clear-memory threw', { message: err && err.message })
+          }
+        }
+        emit('ack', { id, cmd, payload: { ok: true } })
+        return
+      }
       case 'voice:status': {
         // Report status even when not-yet-constructed so the renderer's
         // feature-flag check can gate the panel mount without side effects.
@@ -5187,6 +5374,58 @@ async function dispatchCommand(msg) {
         return
       }
       // ===== END GOAL PIPELINE =====
+
+      // ===== MATCH RECAP (QVAC Ship 3 F3) =====
+      case 'match-recap:generate': {
+        if (!recapFlagEnabled()) {
+          emit('recap:error', { code: 'FEATURE_DISABLED', message: 'match recap disabled', requestId: id })
+          emit('ack', { id, cmd, payload: { ok: false, code: 'FEATURE_DISABLED' } })
+          return
+        }
+        const recap = await ensureMatchRecap()
+        if (!recap) {
+          emit('recap:error', { code: 'NOT_READY', message: 'match recap unavailable (missing dep)', requestId: id })
+          emit('ack', { id, cmd, payload: { ok: false, code: 'NOT_READY' } })
+          return
+        }
+        const audience = (payload && typeof payload.audience === 'object' && payload.audience) || null
+        try {
+          const res = await recap.generate({ audience })
+          if (res.ok) {
+            emit('recap:generated', {
+              recapText: res.recapText,
+              audioByLocale: res.audioByLocale,
+              generatedAt: res.generatedAt,
+              requestId: id
+            })
+          }
+          emit('ack', { id, cmd, payload: { ...res, requestId: id } })
+        } catch (err) {
+          emit('recap:error', {
+            code: err?.code || 'RECAP_FAILED',
+            message: err?.message || 'generate failed',
+            requestId: id
+          })
+          emit('ack', { id, cmd, payload: { ok: false, code: err?.code || 'RECAP_FAILED' } })
+        }
+        return
+      }
+      case 'match-recap:status': {
+        const recap = matchRecapInstance
+        const st = recap ? recap.status() : {
+          busy: false,
+          generateCount: 0,
+          lastError: null,
+          lastGeneratedAt: 0,
+          destroyed: false,
+          locales: ['en', 'it'],
+          flagEnabled: recapFlagEnabled()
+        }
+        emit('recap:status', { ...st, requestId: id })
+        emit('ack', { id, cmd, payload: { ...st, requestId: id } })
+        return
+      }
+      // ===== END MATCH RECAP =====
 
       // ===== SEALED PREDICTIONS (Wave 3 F3) =====
       // Wire bare/predictions.js sealed-prediction helpers (createSealedPrediction

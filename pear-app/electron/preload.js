@@ -1286,7 +1286,12 @@ contextBridge.exposeInMainWorld('curva', {
     // Fire-and-forget; the worker emits `voice:cancelled` on success. Verified
     // per @qvac/sdk dist/client/api/cancel.d.ts:6-15.
     cancel()             { return writeMain('voice-coach:cancel', {}) },
-    onCancelled:         (cb) => onEvent('voice:cancelled', cb)
+    onCancelled:         (cb) => onEvent('voice:cancelled', cb),
+    // Ship 3 F2: clear the conversational memory ring. Fire-and-forget; the
+    // worker emits `voice:memory-cleared` on success. Follow-up user turns
+    // start cold (no prior Q/A pairs prepended into the LLM history).
+    clearMemory()        { return writeMain('voice-coach:clear-memory', {}) },
+    onMemoryCleared:     (cb) => onEvent('voice:memory-cleared', cb)
   },
 
   // ===== VLM CAPTION (Cup Final) =====
@@ -1689,6 +1694,37 @@ contextBridge.exposeInMainWorld('curva', {
     onChatAppended: (cb) => onEvent('goalpipe:chat-append', cb),
     onError:        (cb) => onEvent('goalpipe:error', cb),
     onResult:       (cb) => onEvent('goalpipe:result', cb)
+  },
+
+  // ===== QVAC SHIP 3 F3: MATCH RECAP =====
+  // Bridge to bare/matchRecap.js. `generate` reads the room's chat +
+  // goal + tip history, produces a 60-word Qwen3 recap, per-locale
+  // Bergamot translation + Chatterbox/Supertonic TTS, persists audio
+  // as a Hyperblob, and appends a `system:match-recap` chat message.
+  matchRecap: {
+    generate({ audience } = {}) {
+      const payload = {}
+      if (audience !== undefined && audience !== null) {
+        if (typeof audience !== 'object' || Array.isArray(audience)) {
+          throw new TypeError('audience must be an object')
+        }
+        // Whitelist a single narrow field so a broken renderer can't smuggle
+        // arbitrary state through this bridge. `focusTeam` is the only
+        // audience filter matchRecap.bucketRows knows about.
+        const focusTeam = typeof audience.focusTeam === 'string'
+          ? audience.focusTeam.slice(0, 32) : null
+        if (focusTeam) payload.audience = { focusTeam }
+      }
+      return writeMainAwait('match-recap:generate', payload)
+    },
+    status() { return writeMainAwait('match-recap:status', {}) },
+    onGenerated:  (cb) => onEvent('recap:generated', cb),
+    onText:       (cb) => onEvent('recap:text', cb),
+    onLocale:     (cb) => onEvent('recap:locale', cb),
+    onBucketed:   (cb) => onEvent('recap:bucketed', cb),
+    onAppended:   (cb) => onEvent('recap:appended', cb),
+    onError:      (cb) => onEvent('recap:error', cb),
+    onDone:       (cb) => onEvent('recap:done', cb)
   }
 })
 
