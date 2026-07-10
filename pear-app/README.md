@@ -336,6 +336,119 @@ npm run demo:4peer
 
 Runs `scripts/demo-4peer.js`, which spawns four Electron instances with staggered storage roots, joins them into the same room, and drives a scripted playhead + chat + tip scenario. Used for judged rehearsal and CI smoke.
 
+### Full feature demo (semifinal max-out)
+
+Boot each peer with EVERY wave 2 to 4 QVAC feature and observability turned on. This is the exact command used for the semifinal recording; every flag exercises a real code path shipped by waves 2, 3, and 4.
+
+**Peer A (host).** Fresh storage under `/tmp/curva-peer-a-fresh`, backend at `localhost:3700`:
+
+```sh
+cd pear-app && \
+  DEV_WALLET_PASSCODE=curva-peer-a-pw \
+  CURVA_DEMO_MODE=true \
+  CURVA_FORCE_RELAY=1 \
+  CURVA_KEET_IDENTITY_ENABLED=true \
+  CURVA_MULTIWRITER=true \
+  \
+  CURVA_QVAC_COMMENTATOR_ENABLED=true \
+  CURVA_QVAC_STT_ENABLED=true \
+  CURVA_QVAC_TTS_ENABLED=true \
+  CURVA_QVAC_LLM_TRANSLATE_ENABLED=true \
+  \
+  CURVA_PREDICTIONS_ENABLED=true \
+  CURVA_ATTENDANCE_ENABLED=true \
+  CURVA_DELEGATED_INFERENCE_ENABLED=true \
+  CURVA_TACTICAL_ENABLED=true \
+  CURVA_DEMO_HUD_ENABLED=true \
+  \
+  CURVA_OBSERVABILITY_ENABLED=true \
+  CURVA_PROMETHEUS_PORT=4343 \
+  \
+  CURVA_ASK_FRAME_ENABLED=true \
+  CURVA_LANGDETECT_ENABLED=true \
+  CURVA_SEMSEARCH_ENABLED=true \
+  CURVA_GOAL_CARD_ENABLED=true \
+  \
+  CURVA_APPLY_MIDDLEWARE_ENABLED=true \
+  CURVA_GOAL_PIPELINE_ENABLED=true \
+  CURVA_VLM_PREFILTER_ENABLED=true \
+  \
+  npx electron-forge start -- --no-updates \
+    --storage /tmp/curva-peer-a-fresh \
+    --no-auto-open \
+    --backend http://localhost:3700
+```
+
+**Peer B (viewer).** Same flags, different passcode and storage root:
+
+```sh
+cd pear-app && \
+  DEV_WALLET_PASSCODE=curva-peer-b-pw \
+  CURVA_DEMO_MODE=true \
+  CURVA_FORCE_RELAY=1 \
+  CURVA_KEET_IDENTITY_ENABLED=true \
+  CURVA_MULTIWRITER=true \
+  \
+  CURVA_QVAC_COMMENTATOR_ENABLED=true \
+  CURVA_QVAC_STT_ENABLED=true \
+  CURVA_QVAC_TTS_ENABLED=true \
+  CURVA_QVAC_LLM_TRANSLATE_ENABLED=true \
+  \
+  CURVA_PREDICTIONS_ENABLED=true \
+  CURVA_ATTENDANCE_ENABLED=true \
+  CURVA_DELEGATED_INFERENCE_ENABLED=true \
+  CURVA_TACTICAL_ENABLED=true \
+  CURVA_DEMO_HUD_ENABLED=true \
+  \
+  CURVA_OBSERVABILITY_ENABLED=true \
+  CURVA_PROMETHEUS_PORT=4344 \
+  \
+  CURVA_ASK_FRAME_ENABLED=true \
+  CURVA_LANGDETECT_ENABLED=true \
+  CURVA_SEMSEARCH_ENABLED=true \
+  CURVA_GOAL_CARD_ENABLED=true \
+  \
+  CURVA_APPLY_MIDDLEWARE_ENABLED=true \
+  CURVA_GOAL_PIPELINE_ENABLED=true \
+  CURVA_VLM_PREFILTER_ENABLED=true \
+  \
+  npx electron-forge start -- --no-updates \
+    --storage /tmp/curva-peer-b-fresh \
+    --no-auto-open \
+    --backend http://localhost:3700
+```
+
+**Backend companion** (separate terminal, needs the wave 3 observability + shared RAG routes):
+
+```sh
+cd backend && \
+  ENABLE_BACKEND_METRICS=true \
+  ENABLE_SHARED_RAG=true \
+  bun run dev
+```
+
+**Left intentionally OFF** (heavy first-run downloads; toggle on when you want to test them explicitly):
+
+- `CURVA_VOICE_CLONE_ENABLED` — Chatterbox voice clone (~200 MB, EN/IT only)
+- `CURVA_DIARIZE_ENABLED` — Parakeet Sortformer diarization (~150 MB)
+- `CURVA_CHAOS_ENABLED` — deterministic node-drop for divergence testing
+- `ENABLE_QVAC_PROVIDER` — backend as delegated QVAC provider (needs `@qvac/sdk` installed on backend host)
+
+**What each flag activates** (from the wave-3 and wave-4 code review round):
+
+| Flag | Feature |
+|------|---------|
+| `CURVA_OBSERVABILITY_ENABLED` + `CURVA_PROMETHEUS_PORT` | hypertrace + Prometheus loopback exporter, DiagnosticsPanel Metrics tab |
+| `CURVA_ASK_FRAME_ENABLED` | `?` hotkey overlay: VLM caption → RAG → LLM → TTS orchestration |
+| `CURVA_LANGDETECT_ENABLED` | Auto Bergamot pair selection via `@qvac/langdetect-text` |
+| `CURVA_SEMSEARCH_ENABLED` | `srch` button in Chat header, semantic search via `sdk.embed()` |
+| `CURVA_GOAL_CARD_ENABLED` | LLM structured output via `responseFormat.json_schema` |
+| `CURVA_APPLY_MIDDLEWARE_ENABLED` | Autobase apply-middleware chain (audit log + chaos + system guard + replay) |
+| `CURVA_GOAL_PIPELINE_ENABLED` | 6-capability marquee flow (OCR → goalCard → MCP → Bergamot → TTS → Autobase) |
+| `CURVA_VLM_PREFILTER_ENABLED` | MobileNetV3 pre-filter skips non-match frames before VLM |
+| `ENABLE_BACKEND_METRICS` | Backend Prometheus federation on `GET /metrics` |
+| `ENABLE_SHARED_RAG` | FIFA 2026 fixtures RAG service on `POST /rag/search` |
+
 ---
 
 ## Publishing
@@ -360,7 +473,7 @@ npm test
 
 Uses [brittle](https://github.com/holepunchto/brittle) as the runner (same as every Pear reference app).
 
-**Status: 246 / 246 pass, 817 asserts green.**
+**Status: 423 / 423 pass, 1,634 asserts green** (after waves 2 to 4 shipped: voice coach, VLM captioning, OCR, Chatterbox voice clone, JSON-schema goal card, langdetect, ask-the-frame, Parakeet diarization, semantic search, Autobase view.checkout, Hyperbee sub(), hypercore encryption, hypertrace + Prometheus federation, hypercore-stats + hyperswarm-stats + hyperdht-stats, apply middleware chain, goal pipeline, MobileNetV3 pre-filter, live Models panel).
 
 ---
 
