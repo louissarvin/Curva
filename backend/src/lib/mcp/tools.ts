@@ -47,9 +47,13 @@ import {
   type McpToolResult,
 } from './server.ts';
 import {
+  getBroadcastRegions,
   getDisciplineRecord,
   getFixturesOnDate,
   getMatchSummary,
+  getStandings,
+  getTeamSquad,
+  getVenueDetails,
 } from '../qvac/sharedRag.ts';
 import { recordMcpToolCall } from '../observability.ts';
 
@@ -975,6 +979,167 @@ const stadiumGetFixturesTool: McpTool = {
 };
 
 // -----------------------------------------------------------------------------
+// Wave 5C additions — squad / venue / standings / broadcast tools.
+//
+// All four are backed by static JSON on disk (wc26-squads.json,
+// wc26-venues.json, wc26-broadcasts.json) via the sharedRag accessors. They
+// never touch the DB or a live API, so they are safe to expose over MCP with
+// only lexical input validation.
+// -----------------------------------------------------------------------------
+
+const rosterGetSquadTool: McpTool = {
+  name: 'roster.getSquad',
+  title: 'Get WC26 team squad',
+  description:
+    'Return the shipped squad list for a team (name, position, number). Roster data is SAMPLE / placeholder until official FIFA announcements — response includes a source note when applicable.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      teamCode: {
+        type: 'string',
+        description: '3-letter FIFA team code, uppercase (e.g. USA, MEX, BRA)',
+      },
+    },
+    required: ['teamCode'],
+    additionalProperties: false,
+  },
+  async handler(args) {
+    const code = args.teamCode;
+    if (typeof code !== 'string' || !/^[A-Z]{3}$/.test(code)) {
+      recordMcpToolCall('roster.getSquad', 'error');
+      return asError('teamCode must be a 3-letter uppercase code');
+    }
+    try {
+      const squad = getTeamSquad(code);
+      if (!squad) {
+        recordMcpToolCall('roster.getSquad', 'error');
+        return asError(`Squad not found for team ${code}`);
+      }
+      if ('available' in squad && squad.available === false) {
+        recordMcpToolCall('roster.getSquad', 'error');
+        return asText(squad);
+      }
+      recordMcpToolCall('roster.getSquad', 'ok');
+      return asText(squad);
+    } catch (err) {
+      recordMcpToolCall('roster.getSquad', 'error');
+      return asError((err as Error)?.message || 'lookup failed');
+    }
+  },
+};
+
+const venueGetDetailsTool: McpTool = {
+  name: 'venue.getDetails',
+  title: 'Get WC26 venue metadata',
+  description:
+    'Return the metadata for a WC26 host-city stadium (name, city, country, capacity, elevation, match stages hosted). Data verified against FIFA host-city announcements.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      stadiumCode: {
+        type: 'string',
+        description: 'Venue code, e.g. "MEX-AZTECA", "USA-METLIFE"',
+      },
+    },
+    required: ['stadiumCode'],
+    additionalProperties: false,
+  },
+  async handler(args) {
+    const code = args.stadiumCode;
+    if (typeof code !== 'string' || !/^[A-Z]{2,4}-[A-Z0-9]+$/.test(code)) {
+      recordMcpToolCall('venue.getDetails', 'error');
+      return asError('stadiumCode must match /^[A-Z]{2,4}-[A-Z0-9]+$/');
+    }
+    try {
+      const venue = getVenueDetails(code);
+      if (!venue) {
+        recordMcpToolCall('venue.getDetails', 'error');
+        return asError(`Venue not found: ${code}`);
+      }
+      if ('available' in venue && venue.available === false) {
+        recordMcpToolCall('venue.getDetails', 'error');
+        return asText(venue);
+      }
+      recordMcpToolCall('venue.getDetails', 'ok');
+      return asText(venue);
+    } catch (err) {
+      recordMcpToolCall('venue.getDetails', 'error');
+      return asError((err as Error)?.message || 'lookup failed');
+    }
+  },
+};
+
+const standingsGetTableTool: McpTool = {
+  name: 'standings.getTable',
+  title: 'Get WC26 group standings',
+  description:
+    'Compute the standings table for a WC26 group letter (A-L) by aggregating finished fixtures in the shared RAG corpus. If no results are seeded, every team returns 0 played / 0 points. Not authoritative for live scores — use get_match_live for live data.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      group: {
+        type: 'string',
+        description: 'Single uppercase group letter A-L',
+      },
+    },
+    required: ['group'],
+    additionalProperties: false,
+  },
+  async handler(args) {
+    const group = args.group;
+    if (typeof group !== 'string' || !/^[A-L]$/.test(group)) {
+      recordMcpToolCall('standings.getTable', 'error');
+      return asError('group must be a single uppercase letter A-L');
+    }
+    try {
+      const table = getStandings(group);
+      recordMcpToolCall('standings.getTable', 'ok');
+      return asText({ group, table });
+    } catch (err) {
+      recordMcpToolCall('standings.getTable', 'error');
+      return asError((err as Error)?.message || 'lookup failed');
+    }
+  },
+};
+
+const broadcastGetRegionsTool: McpTool = {
+  name: 'broadcast.getRegions',
+  title: 'Get WC26 broadcast regions for a match',
+  description:
+    'Return the sample rights-holder list for a WC26 match. Broadcast rights are territorial and change frequently — the response always includes a disclaimer field. Not a substitute for consulting local listings.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      matchId: {
+        type: 'number',
+        description: 'Positive integer match externalId',
+      },
+    },
+    required: ['matchId'],
+    additionalProperties: false,
+  },
+  async handler(args) {
+    const matchId = args.matchId;
+    if (typeof matchId !== 'number' || !Number.isInteger(matchId) || matchId <= 0) {
+      recordMcpToolCall('broadcast.getRegions', 'error');
+      return asError('matchId must be a positive integer');
+    }
+    try {
+      const payload = getBroadcastRegions(matchId);
+      if ('available' in payload && payload.available === false) {
+        recordMcpToolCall('broadcast.getRegions', 'error');
+        return asText(payload);
+      }
+      recordMcpToolCall('broadcast.getRegions', 'ok');
+      return asText(payload);
+    } catch (err) {
+      recordMcpToolCall('broadcast.getRegions', 'error');
+      return asError((err as Error)?.message || 'lookup failed');
+    }
+  },
+};
+
+// -----------------------------------------------------------------------------
 // Registration
 // -----------------------------------------------------------------------------
 
@@ -999,6 +1164,11 @@ export const registerAllTools = (): void => {
   registerTool(scoreGetLiveTool);
   registerTool(refDisciplineTool);
   registerTool(stadiumGetFixturesTool);
+  // Wave 5C additions.
+  registerTool(rosterGetSquadTool);
+  registerTool(venueGetDetailsTool);
+  registerTool(standingsGetTableTool);
+  registerTool(broadcastGetRegionsTool);
 };
 
 // Test-only exports for direct unit testing without touching registry.
@@ -1016,6 +1186,10 @@ export const __toolsForTest = {
   scoreGetLiveTool,
   refDisciplineTool,
   stadiumGetFixturesTool,
+  rosterGetSquadTool,
+  venueGetDetailsTool,
+  standingsGetTableTool,
+  broadcastGetRegionsTool,
 };
 
 // Re-export McpContext for test files convenience.

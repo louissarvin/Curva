@@ -1,0 +1,83 @@
+{
+  "_meta": {
+    "competition": "FIFA World Cup 2026",
+    "source": "SAMPLE — public announcements of primary FIFA rights-holders in each region. Streaming platforms listed are the rights-holder's own OTT products where publicly announced.",
+    "lastUpdated": "2026-07-10",
+    "notice": "Broadcast rights vary by region, change frequently, and may be sub-licensed. For live listings check local sources. Fields marked 'check local listings' indicate no publicly-verifiable primary rights-holder is loaded for that region.",
+    "disclaimer": "Sample data. Verify against local listings before publishing to end users."
+  },
+  "regions": [
+    {
+      "region": "USA",
+      "official_broadcasters": ["FOX", "Telemundo"],
+      "streaming": ["Fubo", "Peacock"],
+      "matches_broadcast": "all"
+    },
+    {
+      "region": "UK",
+      "official_broadcasters": ["BBC", "ITV"],
+      "streaming": ["BBC iPlayer", "ITVX"],
+      "matches_broadcast": "all"
+    },
+    {
+      "region": "Italy",
+      "official_broadcasters": ["RAI"],
+      "streaming": ["RaiPlay"],
+      "matches_broadcast": "all"
+    },
+    {
+      "region": "Indonesia",
+      "official_broadcasters": ["SCTV", "Indosiar"],
+      "streaming": ["Vidio"],
+      "matches_broadcast": "all"
+    },
+    {
+      "region": "Mexico",
+      "official_broadcasters": ["Televisa", "TV Azteca"],
+      "streaming": ["ViX"],
+      "matches_broadcast": "all"
+    },
+    {
+      "region": "Canada",
+      "official_broadcasters": ["CBC", "TSN", "RDS"],
+      "streaming": ["CBC Gem", "TSN+"],
+      "matches_broadcast": "all"
+    },
+    {
+      "region": "Brazil",
+      "official_broadcasters": ["Globo"],
+      "streaming": ["Globoplay"],
+      "matches_broadcast": "all"
+    },
+    {
+      "region": "Argentina",
+      "official_broadcasters": ["TyC Sports", "TV Publica"],
+      "streaming": [],
+      "matches_broadcast": "check local listings"
+    },
+    {
+      "region": "Germany",
+      "official_broadcasters": ["ARD", "ZDF"],
+      "streaming": ["ARD Mediathek", "ZDFmediathek"],
+      "matches_broadcast": "all"
+    },
+    {
+      "region": "France",
+      "official_broadcasters": ["TF1", "M6"],
+      "streaming": ["TF1+", "M6+"],
+      "matches_broadcast": "all"
+    },
+    {
+      "region": "Spain",
+      "official_broadcasters": ["RTVE"],
+      "streaming": ["RTVE Play"],
+      "matches_broadcast": "check local listings"
+    },
+    {
+      "region": "Japan",
+      "official_broadcasters": ["NHK"],
+      "streaming": ["NHK Plus"],
+      "matches_broadcast": "check local listings"
+    }
+  ]
+}

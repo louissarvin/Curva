@@ -430,8 +430,300 @@ export const getDisciplineRecord = (
 });
 
 // -----------------------------------------------------------------------------
+// Wave 5C accessors: squads, venues, broadcasts, computed standings.
+//
+// These read from the three static JSON files shipped in src/data/:
+//   wc26-squads.json    — real 2025-26 roster snapshots (placeholder-flagged)
+//   wc26-venues.json    — WC26 host-city stadiums (verified public data)
+//   wc26-broadcasts.json — SAMPLE rights-holder list (labelled as such)
+//
+// All accessors:
+//   * Lazy-load on first call, cache result for the process lifetime.
+//   * Return `{ available: false, reason }` on file-read failure so the MCP
+//     tools can degrade gracefully instead of 500ing.
+//   * Never throw on missing keys — return null for a miss.
+// -----------------------------------------------------------------------------
+
+const SQUADS_PATH_REL = 'src/data/wc26-squads.json';
+const VENUES_PATH_REL = 'src/data/wc26-venues.json';
+const BROADCASTS_PATH_REL = 'src/data/wc26-broadcasts.json';
+
+interface Wc26SquadPlayer {
+  name: string;
+  position: string;
+  number: number;
+}
+
+export interface Wc26Squad {
+  code: string;
+  name: string;
+  players: Wc26SquadPlayer[];
+}
+
+export interface Wc26Venue {
+  code: string;
+  name: string;
+  city: string;
+  country: string;
+  capacity: number | null;
+  elevation_m: number | null;
+  matches: string[];
+}
+
+export interface Wc26BroadcastRegion {
+  region: string;
+  official_broadcasters: string[];
+  streaming: string[];
+  matches_broadcast: string;
+}
+
+export interface Wc26BroadcastPayload {
+  available: true;
+  matchId: number;
+  regions: Wc26BroadcastRegion[];
+  disclaimer: string;
+}
+
+export interface Unavailable {
+  available: false;
+  reason: string;
+}
+
+interface SquadFile {
+  teams?: Record<string, {
+    code?: string;
+    name?: string;
+    squad?: Array<{ num?: number; name?: string; pos?: string }>;
+  }>;
+}
+
+interface VenueFile {
+  venues?: Array<Wc26Venue>;
+}
+
+interface BroadcastFile {
+  _meta?: { disclaimer?: string; notice?: string };
+  regions?: Wc26BroadcastRegion[];
+}
+
+// Module-scoped caches. `null` = not loaded. `{available:false,...}` = load
+// failed, do not retry (the file is missing/corrupt for the whole process
+// lifetime; a hot-loop retry would burn CPU for no gain).
+let _squads: Map<string, Wc26Squad> | Unavailable | null = null;
+let _venues: Map<string, Wc26Venue> | Unavailable | null = null;
+let _broadcasts: { regions: Wc26BroadcastRegion[]; disclaimer: string } | Unavailable | null = null;
+
+const readJsonFile = <T>(pathRel: string): T | null => {
+  try {
+    const abs = resolve(process.cwd(), pathRel);
+    const txt = readFileSync(abs, 'utf8');
+    return JSON.parse(txt) as T;
+  } catch {
+    return null;
+  }
+};
+
+const loadSquadsIfNeeded = (): Map<string, Wc26Squad> | Unavailable => {
+  if (_squads) return _squads;
+  const raw = readJsonFile<SquadFile>(SQUADS_PATH_REL);
+  if (!raw || !raw.teams) {
+    _squads = { available: false, reason: `${SQUADS_PATH_REL}: data missing or malformed` };
+    return _squads;
+  }
+  const map = new Map<string, Wc26Squad>();
+  for (const [code, team] of Object.entries(raw.teams)) {
+    if (typeof code !== 'string') continue;
+    const players: Wc26SquadPlayer[] = Array.isArray(team.squad)
+      ? team.squad
+          .filter((p) => typeof p?.name === 'string' && typeof p?.pos === 'string' && typeof p?.num === 'number')
+          .map((p) => ({ name: String(p.name), position: String(p.pos), number: Number(p.num) }))
+      : [];
+    map.set(code, {
+      code,
+      name: typeof team.name === 'string' ? team.name : code,
+      players,
+    });
+  }
+  _squads = map;
+  return map;
+};
+
+const loadVenuesIfNeeded = (): Map<string, Wc26Venue> | Unavailable => {
+  if (_venues) return _venues;
+  const raw = readJsonFile<VenueFile>(VENUES_PATH_REL);
+  if (!raw || !Array.isArray(raw.venues)) {
+    _venues = { available: false, reason: `${VENUES_PATH_REL}: data missing or malformed` };
+    return _venues;
+  }
+  const map = new Map<string, Wc26Venue>();
+  for (const v of raw.venues) {
+    if (!v || typeof v.code !== 'string') continue;
+    map.set(v.code, {
+      code: v.code,
+      name: typeof v.name === 'string' ? v.name : v.code,
+      city: typeof v.city === 'string' ? v.city : '',
+      country: typeof v.country === 'string' ? v.country : '',
+      capacity: typeof v.capacity === 'number' ? v.capacity : null,
+      elevation_m: typeof v.elevation_m === 'number' ? v.elevation_m : null,
+      matches: Array.isArray(v.matches) ? v.matches.filter((s) => typeof s === 'string') : [],
+    });
+  }
+  _venues = map;
+  return map;
+};
+
+const loadBroadcastsIfNeeded = ():
+  | { regions: Wc26BroadcastRegion[]; disclaimer: string }
+  | Unavailable => {
+  if (_broadcasts) return _broadcasts;
+  const raw = readJsonFile<BroadcastFile>(BROADCASTS_PATH_REL);
+  if (!raw || !Array.isArray(raw.regions)) {
+    _broadcasts = { available: false, reason: `${BROADCASTS_PATH_REL}: data missing or malformed` };
+    return _broadcasts;
+  }
+  const disclaimer =
+    raw._meta?.disclaimer ||
+    raw._meta?.notice ||
+    'Broadcast rights vary by region and change frequently. Verify against local listings.';
+  _broadcasts = {
+    regions: raw.regions.filter((r): r is Wc26BroadcastRegion => !!r && typeof r.region === 'string'),
+    disclaimer,
+  };
+  return _broadcasts;
+};
+
+/**
+ * Return the shipped squad for a team code, or null if the code is unknown.
+ * Returns `{available:false}` if the squads file cannot be read at all.
+ */
+export const getTeamSquad = (teamCode: string): Wc26Squad | null | Unavailable => {
+  const loaded = loadSquadsIfNeeded();
+  if ('available' in loaded) return loaded;
+  return loaded.get(teamCode) ?? null;
+};
+
+/**
+ * Return the venue metadata for a stadium code, or null if unknown.
+ * Returns `{available:false}` if the venues file cannot be read.
+ */
+export const getVenueDetails = (stadiumCode: string): Wc26Venue | null | Unavailable => {
+  const loaded = loadVenuesIfNeeded();
+  if ('available' in loaded) return loaded;
+  return loaded.get(stadiumCode) ?? null;
+};
+
+/**
+ * Return the sample broadcast payload keyed by matchId. matchId is echoed in
+ * the response so callers can correlate; the region list is not per-match in
+ * the source data (rights-holders air the full tournament) — so every matchId
+ * gets the same region list plus a clear disclaimer.
+ */
+export const getBroadcastRegions = (matchId: number): Wc26BroadcastPayload | Unavailable => {
+  const loaded = loadBroadcastsIfNeeded();
+  if ('available' in loaded) return loaded;
+  return {
+    available: true,
+    matchId,
+    regions: loaded.regions,
+    disclaimer: loaded.disclaimer,
+  };
+};
+
+export interface StandingRow {
+  teamCode: string;
+  played: number;
+  won: number;
+  drawn: number;
+  lost: number;
+  gf: number;
+  ga: number;
+  gd: number;
+  points: number;
+}
+
+/**
+ * Compute standings for a group by aggregating scheduled fixtures from the
+ * shared corpus. If live scores are not present in the metadata, we treat
+ * every fixture as 0-0. This means at t=0 (pre-tournament) every team is on
+ * 1 point per played match — that is correct BM25-style behaviour for a
+ * corpus with no result data. The caller/tool response makes clear that
+ * these are computed-from-fixtures, not authoritative live standings.
+ */
+export const getStandings = (group: string): StandingRow[] => {
+  if (typeof group !== 'string' || !/^[A-L]$/.test(group)) return [];
+  const idx = loadCorpus();
+  const rows = new Map<string, StandingRow>();
+  const ensure = (code: string): StandingRow => {
+    const existing = rows.get(code);
+    if (existing) return existing;
+    const fresh: StandingRow = {
+      teamCode: code,
+      played: 0,
+      won: 0,
+      drawn: 0,
+      lost: 0,
+      gf: 0,
+      ga: 0,
+      gd: 0,
+      points: 0,
+    };
+    rows.set(code, fresh);
+    return fresh;
+  };
+  // Seed team rows for the group so untested teams still appear.
+  for (const d of idx.docs) {
+    if (d.kind !== 'team') continue;
+    if (String(d.metadata.group) !== group) continue;
+    ensure(String(d.metadata.code));
+  }
+  for (const d of idx.docs) {
+    if (d.kind !== 'match') continue;
+    if (String(d.metadata.groupLabel) !== group) continue;
+    if (String(d.metadata.status) !== 'finished') continue;
+    const home = String(d.metadata.homeTeamCode);
+    const away = String(d.metadata.awayTeamCode);
+    const hs = Number(d.metadata.homeScore ?? 0);
+    const as = Number(d.metadata.awayScore ?? 0);
+    const h = ensure(home);
+    const a = ensure(away);
+    h.played += 1;
+    a.played += 1;
+    h.gf += hs;
+    h.ga += as;
+    a.gf += as;
+    a.ga += hs;
+    if (hs > as) {
+      h.won += 1;
+      a.lost += 1;
+      h.points += 3;
+    } else if (hs < as) {
+      a.won += 1;
+      h.lost += 1;
+      a.points += 3;
+    } else {
+      h.drawn += 1;
+      a.drawn += 1;
+      h.points += 1;
+      a.points += 1;
+    }
+  }
+  const out = Array.from(rows.values()).map((r) => ({ ...r, gd: r.gf - r.ga }));
+  // FIFA tie-break simplified to (points desc, gd desc, gf desc, code asc).
+  out.sort((x, y) => {
+    if (y.points !== x.points) return y.points - x.points;
+    if (y.gd !== x.gd) return y.gd - x.gd;
+    if (y.gf !== x.gf) return y.gf - x.gf;
+    return x.teamCode.localeCompare(y.teamCode);
+  });
+  return out;
+};
+
+// -----------------------------------------------------------------------------
 // Test-only reset
 // -----------------------------------------------------------------------------
 export const __resetForTest = (): void => {
   _index = null;
+  _squads = null;
+  _venues = null;
+  _broadcasts = null;
 };

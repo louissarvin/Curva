@@ -632,6 +632,23 @@ export const RAG_RATE_LIMIT_MAX: number =
 export const RAG_RATE_LIMIT_WINDOW: string =
   process.env.RAG_RATE_LIMIT_WINDOW || '1 minute';
 
+// =============================================================================
+// F1 (Semifinal Wave): Match-clip Hyperdrive
+// =============================================================================
+//
+// Off by default so the corestore/hyperdrive dep is only touched on boot when
+// operators explicitly opt in. When disabled, the /clips route is never
+// mounted and no filesystem work happens at boot. Source clips live under
+// backend/tmp/match-clips-source/ (see the README there for operator notes).
+export const ENABLE_MATCH_CLIP_DRIVE: boolean =
+  String(process.env.ENABLE_MATCH_CLIP_DRIVE || 'false').toLowerCase() === 'true';
+export const CLIP_DRIVE_RATE_LIMIT_MAX: number =
+  Number(process.env.CLIP_DRIVE_RATE_LIMIT_MAX) || 60;
+export const CLIP_DRIVE_RATE_LIMIT_WINDOW: string =
+  process.env.CLIP_DRIVE_RATE_LIMIT_WINDOW || '1 minute';
+export const CLIP_DRIVE_CACHE_TTL_MS: number =
+  Number(process.env.CLIP_DRIVE_CACHE_TTL_MS) || 30_000;
+
 export default {
   APP_PORT,
   NODE_ENV,

@@ -53,7 +53,10 @@ import {
   METRICS_RATE_LIMIT_MAX,
   METRICS_RATE_LIMIT_WINDOW,
   ENABLE_SHARED_RAG,
+  ENABLE_MATCH_CLIP_DRIVE,
 } from './src/config/main-config.ts';
+import { clipsRoutes } from './src/routes/clipsRoutes.ts';
+import { initMatchClipDrive, shutdownMatchClipDrive } from './src/lib/pears/matchClipDrive.ts';
 import { ragRoutes } from './src/routes/ragRoutes.ts';
 import { scrapeMetrics } from './src/lib/observability.ts';
 import { getToolCount, getResourceCount } from './src/lib/mcp/server.ts';
@@ -322,6 +325,13 @@ await fastify.register(pearsRoutes, { prefix: '/pears' });
 // Wave 7 Zone C: Fiat pricing (USDT -> IDR/EUR/GBP/BRL/MXN/JPY/USD).
 // Public. 60/min/IP rate limit. Bitfinex (peg) + Frankfurter (ECB refs).
 await fastify.register(pricingRoutes, { prefix: '/pricing' });
+// F1 Semifinal: Match-clip Hyperdrive manifest. Off by default; hides existence
+// (route is never mounted) when ENABLE_MATCH_CLIP_DRIVE=false. See
+// src/lib/pears/matchClipDrive.ts for the ingestion + key-derivation flow.
+if (ENABLE_MATCH_CLIP_DRIVE) {
+  await fastify.register(clipsRoutes, { prefix: '/clips' });
+  console.log('[Boot] Match-clip Hyperdrive route enabled at GET /clips/manifest');
+}
 // Wave 3 F4: shared WC26 fixtures RAG service. Public. Rate-limited.
 // Backed by src/data/world-cup-2026.json — real FIFA 2026 draw data seeded
 // into the corpus at boot. When ENABLE_SHARED_RAG=false the route plugin
@@ -382,6 +392,7 @@ const shutdown = async (signal: string): Promise<void> => {
     // F13 distribution seeder shutdown. No-op when the seeder was never spawned
     // (disabled mode), so safe to call unconditionally.
     await stopAppDistributionSeeder();
+    await shutdownMatchClipDrive();
     console.log('[Shutdown] Done. Bye.');
     process.exit(0);
   } catch (err) {
@@ -438,6 +449,11 @@ const start = async (): Promise<void> => {
     // F13 distribution seeder. No-ops when PEAR_APP_KEY is unset OR
     // PEAR_DISTRIBUTION_ENABLED=false; safe to call unconditionally at boot.
     startAppDistributionSeeder();
+    // F1 Semifinal: match-clip Hyperdrive ingestion. Runs only when the flag is
+    // on. Never throws — a failed init leaves the manifest in { ready:false }.
+    if (ENABLE_MATCH_CLIP_DRIVE) {
+      await initMatchClipDrive();
+    }
     // Wave 10 settlement worker. No-ops when CURVA_PREDICTIONS_ENABLED=false;
     // safe to schedule unconditionally.
     startPredictionSettlementWorker();

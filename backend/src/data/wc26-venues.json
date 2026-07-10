@@ -1,0 +1,154 @@
+{
+  "_meta": {
+    "competition": "FIFA World Cup 2026",
+    "source": "FIFA official host city announcements (2022-06-16) + FIFA venue confirmations. Match stage assignments per FIFA 2026 match schedule announcement (2024-02-04). Capacities and elevations are publicly available stadium data; football-mode capacity varies by seating configuration.",
+    "lastUpdated": "2026-07-10",
+    "notice": "Capacity figures reflect the football-configuration seated capacity commonly cited by the venue operator; some are approximate. Fields set to null where a single verifiable public source could not be confirmed."
+  },
+  "venues": [
+    {
+      "code": "MEX-AZTECA",
+      "name": "Estadio Azteca",
+      "city": "Mexico City",
+      "country": "Mexico",
+      "capacity": 87000,
+      "elevation_m": 2240,
+      "matches": ["opening", "group", "r16"]
+    },
+    {
+      "code": "MEX-AKRON",
+      "name": "Estadio Akron",
+      "city": "Guadalajara",
+      "country": "Mexico",
+      "capacity": 49850,
+      "elevation_m": 1566,
+      "matches": ["group", "r32"]
+    },
+    {
+      "code": "MEX-BBVA",
+      "name": "Estadio BBVA",
+      "city": "Monterrey",
+      "country": "Mexico",
+      "capacity": 53500,
+      "elevation_m": 500,
+      "matches": ["group", "r32"]
+    },
+    {
+      "code": "CAN-BMO",
+      "name": "BMO Field",
+      "city": "Toronto",
+      "country": "Canada",
+      "capacity": 45500,
+      "elevation_m": 76,
+      "matches": ["group", "r32"]
+    },
+    {
+      "code": "CAN-BCPLACE",
+      "name": "BC Place",
+      "city": "Vancouver",
+      "country": "Canada",
+      "capacity": 54500,
+      "elevation_m": 3,
+      "matches": ["group", "r16"]
+    },
+    {
+      "code": "USA-METLIFE",
+      "name": "MetLife Stadium",
+      "city": "East Rutherford",
+      "country": "United States",
+      "capacity": 82500,
+      "elevation_m": 2,
+      "matches": ["group", "r16", "qf", "final"]
+    },
+    {
+      "code": "USA-SOFI",
+      "name": "SoFi Stadium",
+      "city": "Inglewood",
+      "country": "United States",
+      "capacity": 70240,
+      "elevation_m": 22,
+      "matches": ["group", "r32", "qf"]
+    },
+    {
+      "code": "USA-ATT",
+      "name": "AT&T Stadium",
+      "city": "Arlington",
+      "country": "United States",
+      "capacity": 80000,
+      "elevation_m": 190,
+      "matches": ["group", "r32", "r16", "sf"]
+    },
+    {
+      "code": "USA-MBS",
+      "name": "Mercedes-Benz Stadium",
+      "city": "Atlanta",
+      "country": "United States",
+      "capacity": 71000,
+      "elevation_m": 320,
+      "matches": ["group", "r32", "sf"]
+    },
+    {
+      "code": "USA-GILLETTE",
+      "name": "Gillette Stadium",
+      "city": "Foxborough",
+      "country": "United States",
+      "capacity": 65878,
+      "elevation_m": 62,
+      "matches": ["group", "r32", "qf"]
+    },
+    {
+      "code": "USA-NRG",
+      "name": "NRG Stadium",
+      "city": "Houston",
+      "country": "United States",
+      "capacity": 72220,
+      "elevation_m": 14,
+      "matches": ["group", "r32"]
+    },
+    {
+      "code": "USA-ARROWHEAD",
+      "name": "Arrowhead Stadium",
+      "city": "Kansas City",
+      "country": "United States",
+      "capacity": 76416,
+      "elevation_m": 268,
+      "matches": ["group", "r16", "qf"]
+    },
+    {
+      "code": "USA-HARDROCK",
+      "name": "Hard Rock Stadium",
+      "city": "Miami Gardens",
+      "country": "United States",
+      "capacity": 65326,
+      "elevation_m": 3,
+      "matches": ["group", "r32", "third-place"]
+    },
+    {
+      "code": "USA-LINCOLN",
+      "name": "Lincoln Financial Field",
+      "city": "Philadelphia",
+      "country": "United States",
+      "capacity": 69796,
+      "elevation_m": 12,
+      "matches": ["group", "r32", "r16"]
+    },
+    {
+      "code": "USA-LEVIS",
+      "name": "Levi's Stadium",
+      "city": "Santa Clara",
+      "country": "United States",
+      "capacity": 68500,
+      "elevation_m": 3,
+      "matches": ["group", "r32"]
+    },
+    {
+      "code": "USA-LUMEN",
+      "name": "Lumen Field",
+      "city": "Seattle",
+      "country": "United States",
+      "capacity": 68740,
+      "elevation_m": 8,
+      "matches": ["group", "r32"]
+    }
+  ]
+}
