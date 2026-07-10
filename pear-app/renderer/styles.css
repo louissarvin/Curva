@@ -6062,6 +6062,57 @@ h2::after {
   font-size: 11px;
   color: var(--curva-muted);
 }
+/* wave-final QVAC depth F1: Cancel button under PTT while streaming. */
+.curva-voice-coach__cancel {
+  align-self: flex-start;
+  padding: 6px 12px;
+  font-size: 12px;
+  background: transparent;
+  border: 1px solid var(--curva-border, #555);
+  color: var(--curva-muted, #aaa);
+  border-radius: 6px;
+  cursor: pointer;
+  margin-top: var(--sp-1, 4px);
+}
+.curva-voice-coach__cancel:hover:not(:disabled) {
+  border-color: var(--curva-accent);
+  color: var(--curva-text);
+}
+.curva-voice-coach__cancel:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+/* wave-final QVAC depth F1: AskFrame overlay Cancel button. */
+.curva-ask-overlay__cancel-btn {
+  padding: 6px 12px;
+  font-size: 12px;
+  background: transparent;
+  border: 1px solid var(--curva-border, #555);
+  color: var(--curva-muted, #aaa);
+  border-radius: 6px;
+  cursor: pointer;
+  margin-left: var(--sp-1, 4px);
+}
+.curva-ask-overlay__cancel-btn:hover:not(:disabled) {
+  border-color: var(--curva-accent);
+  color: var(--curva-text);
+}
+.curva-ask-overlay__cancel-btn:disabled { opacity: 0.6; cursor: default; }
+/* wave-final QVAC depth F2: DiagnosticsPanel Report tab styling. */
+.curva-diagnostics-report-json {
+  background: var(--curva-panel-dark, #0f1116);
+  color: var(--curva-text);
+  font-family: var(--curva-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+  padding: var(--sp-2, 8px);
+  border-radius: 6px;
+  border: 1px solid var(--curva-border, #333);
+  max-height: 480px;
+  overflow: auto;
+  white-space: pre;
+  word-break: normal;
+  margin-top: var(--sp-2, 8px);
+}
 
 .curva-frame-analyze {
   display: flex;

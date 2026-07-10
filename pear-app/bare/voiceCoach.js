@@ -39,6 +39,18 @@
 //   Docs: https://docs.qvac.tether.io/ai-capabilities/text-generation/ (MCP +
 //   kvCache sections, fetched 2026-07-10).
 //
+// Cancel contract (SDK 0.14.0):
+//   pear-app/node_modules/@qvac/sdk/dist/client/api/cancel.d.ts:6-15
+//     cancel({requestId}) is the primary path. A cancel that races the
+//     originating call is recorded and applied retroactively when the begin
+//     arrives (line 10-11). So an early cancel is a no-op only if we don't
+//     yet have a requestId to hand off.
+//   pear-app/node_modules/@qvac/sdk/dist/schemas/completion-event.d.ts:217
+//     CompletionRun.requestId is a string, guaranteed synchronously — safe
+//     to read immediately after completion() returns.
+//   Docs: https://docs.qvac.tether.io/ai-capabilities/text-generation/#cancel
+//   (fetched 2026-07-10).
+//
 // The voice-assistant recipe (self-hearing gate + 300 ms cooldown + meaningful
 // transcript filter) is documented at
 //   https://docs.qvac.tether.io/ai-capabilities/voice-assistant/ (fetched
@@ -200,7 +212,7 @@ function coerceAudio (chunk) {
  *   emit?: Function,
  *   now?: () => number
  * }} opts
- * @returns {{ startTurn: Function, pushAudio: Function, endTurn: Function, cancel: Function, close: Function, status: Function }}
+ * @returns {{ startTurn: Function, pushAudio: Function, endTurn: Function, cancelInFlight: Function, close: Function, status: Function }}
  */
 function createVoiceCoach (opts = {}) {
   const {
@@ -241,6 +253,10 @@ function createVoiceCoach (opts = {}) {
 
   const state = {
     turnActive: false,
+    // In-flight LLM completion request id set from CompletionRun.requestId once
+    // the completion() call returns. Cleared on completionDone or on cancel.
+    // Used by cancelInFlight() and startTurn()'s barge-in path.
+    inFlightRequestId: null,
     // Bytes seen this turn; enforces AUDIO_MAX_BYTES.
     audioBytesThisTurn: 0,
     // Security audit fix (H1): rate-limit pushAudio calls per turn to guard
@@ -276,8 +292,41 @@ function createVoiceCoach (opts = {}) {
       hasRag: !!(ragHandle && typeof ragHandle.search === 'function'),
       hasMcp: !!(mcpClient && typeof mcpClient.callTool === 'function'),
       turnActive: state.turnActive,
+      inFlightRequestId: state.inFlightRequestId,
       lang,
       lastError: state.lastError
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // cancelInFlight: best-effort cancel of the currently streaming completion.
+  //
+  // Verified against @qvac/sdk dist/client/api/cancel.d.ts:6-15 (fetched
+  // 2026-07-10). If we don't have a requestId yet (cancel races the begin),
+  // the SDK does NOT accept an empty-string requestId — the schema at
+  // dist/schemas/cancel.d.ts:47 requires z.ZodString (min 1). So the race
+  // case is a no-op on our side; the SDK docs claim retroactive apply only
+  // when the caller can produce the requestId later, which we can't.
+  //
+  // Errors from sdk.cancel are swallowed (best-effort). The completion iterator
+  // in runCoachPipeline sees the cancel as a completionDone with a truncated
+  // stopReason, so no cleanup is needed here beyond clearing the tracked id.
+  // ---------------------------------------------------------------------------
+  async function cancelInFlight () {
+    const requestId = state.inFlightRequestId
+    if (!requestId) return { ok: false, code: 'NO_INFLIGHT' }
+    state.inFlightRequestId = null
+    if (!sdk || typeof sdk.cancel !== 'function') {
+      return { ok: false, code: 'CANCEL_UNAVAILABLE' }
+    }
+    try {
+      await sdk.cancel({ requestId })
+      emit('voice:cancelled', { requestId })
+      return { ok: true, requestId }
+    } catch (err) {
+      // Best-effort. Log and move on.
+      log('warn', 'voiceCoach: sdk.cancel threw', { message: err && err.message })
+      return { ok: false, code: 'CANCEL_FAILED', message: err && err.message }
     }
   }
 
@@ -288,6 +337,12 @@ function createVoiceCoach (opts = {}) {
     if (state.turnActive) {
       log('info', 'voiceCoach: startTurn while turn active is a noop', {})
       return { ok: true, turnId: state.turnId }
+    }
+    // Barge-in: if a previous turn's LLM completion is still streaming, cancel
+    // it before opening the new STT session. Best-effort; swallowed errors
+    // never block a new turn. See cancel.d.ts:6-15.
+    if (state.inFlightRequestId) {
+      try { await cancelInFlight() } catch { /* noop */ }
     }
     if (state.isSpeaking) {
       // Voice-assistant recipe: never open the mic while TTS is playing.
@@ -586,6 +641,13 @@ function createVoiceCoach (opts = {}) {
       if (!run || !run.events || typeof run.events[Symbol.asyncIterator] !== 'function') {
         throw new Error('completion() returned no events iterable')
       }
+      // Track the run's requestId so cancelInFlight() can target it. Guarded
+      // by turn-id so a stale turn's completion never overwrites a fresh one.
+      // Verified per completion-event.d.ts:217 (requestId is synchronously
+      // available on CompletionRun).
+      if (typeof run.requestId === 'string' && run.requestId.length > 0 && turnId === state.turnId) {
+        state.inFlightRequestId = run.requestId
+      }
       for await (const event of run.events) {
         if (timedOut) break
         if (!event || typeof event !== 'object') continue
@@ -653,6 +715,10 @@ function createVoiceCoach (opts = {}) {
       emit('voice:error', { code: 'LLM_FAIL', message: state.lastError })
     } finally {
       clearTimeout(timeout)
+      // Completion has finished (naturally, by cap, or by throw). Clear the
+      // tracked requestId so a stray cancelInFlight() from a future turn does
+      // not target a stale id.
+      state.inFlightRequestId = null
     }
 
     const answerText = sanitizePrompt(replyBuf, MAX_REPLY_CHARS) || '(no reply)'
@@ -708,6 +774,11 @@ function createVoiceCoach (opts = {}) {
   // close: tear everything down cleanly.
   // ---------------------------------------------------------------------------
   async function close () {
+    // Cancel-first so a completion in flight does not leak past room teardown.
+    // Best-effort; failures never block close.
+    if (state.inFlightRequestId) {
+      try { await cancelInFlight() } catch { /* noop */ }
+    }
     if (state.session && typeof state.session.destroy === 'function') {
       try { state.session.destroy() } catch { /* noop */ }
     }
@@ -740,6 +811,7 @@ function createVoiceCoach (opts = {}) {
     startTurn,
     pushAudio,
     endTurn,
+    cancelInFlight,
     close,
     status,
     _internal: { state, meaningfulTranscript, sanitizePrompt, coerceAudio }

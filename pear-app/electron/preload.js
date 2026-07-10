@@ -1281,7 +1281,12 @@ contextBridge.exposeInMainWorld('curva', {
     onGrounded:          (cb) => onEvent('voice:grounded', cb),
     onDone:              (cb) => onEvent('voice:done', cb),
     onError:             (cb) => onEvent('voice:error', cb),
-    onAudioCap:          (cb) => onEvent('voice:audio-cap', cb)
+    onAudioCap:          (cb) => onEvent('voice:audio-cap', cb),
+    // wave-final QVAC depth F1: best-effort cancel of an in-flight completion.
+    // Fire-and-forget; the worker emits `voice:cancelled` on success. Verified
+    // per @qvac/sdk dist/client/api/cancel.d.ts:6-15.
+    cancel()             { return writeMain('voice-coach:cancel', {}) },
+    onCancelled:         (cb) => onEvent('voice:cancelled', cb)
   },
 
   // ===== VLM CAPTION (Cup Final) =====
@@ -1339,7 +1344,16 @@ contextBridge.exposeInMainWorld('curva', {
       const res = await writeMainAwait('diagnostics:metrics', {})
       return (res && typeof res.text === 'string') ? res.text : null
     },
-    onLog: (cb) => onEvent('diagnostics:log', cb)
+    onLog: (cb) => onEvent('diagnostics:log', cb),
+    // wave-final QVAC depth F2: generate a full peer-side diagnostic report
+    // via @qvac/diagnostics. Returns the serialized JSON string on success or
+    // null on failure — DiagnosticsPanel handles both. Verified per
+    // node_modules/@qvac/diagnostics/index.d.ts:132-159.
+    async generateReport() {
+      const res = await writeMainAwait('diagnostics:generate-report', {})
+      if (res && res.ok === true && typeof res.json === 'string') return res.json
+      return null
+    }
   },
 
   // ===== SCOPED CHAT SYSTEM SEND (Cup Final) =====
@@ -1520,11 +1534,16 @@ contextBridge.exposeInMainWorld('curva', {
       return writeMainAwait('ask-frame:ask', { image, question, matchTimeMs: cleanMtm })
     },
     status()      { return writeMainAwait('ask-frame:status', {}) },
+    // wave-final QVAC depth F1: best-effort cancel of a streaming ask. Fire
+    // and forget. Worker emits `askframe:cancelled` on success. Verified per
+    // @qvac/sdk dist/client/api/cancel.d.ts:6-15.
+    cancel()      { return writeMain('ask-frame:cancel', {}) },
     onStarted:    (cb) => onEvent('askframe:start', cb),
     onCaption:    (cb) => onEvent('askframe:caption', cb),
     onToken:      (cb) => onEvent('askframe:token', cb),
     onToolCall:   (cb) => onEvent('askframe:tool-call', cb),
     onDone:       (cb) => onEvent('askframe:done', cb),
+    onCancelled:  (cb) => onEvent('askframe:cancelled', cb),
     onError:      (cb) => onEvent('askframe:error', cb)
   },
 

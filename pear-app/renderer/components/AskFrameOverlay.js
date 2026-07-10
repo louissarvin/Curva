@@ -79,9 +79,19 @@ export function mountAskFrameOverlay({ container, curva, getVideoPlayer } = {}) 
   askBtn.className = 'curva-ask-overlay__ask-btn'
   askBtn.textContent = 'Ask'
 
+  // wave-final QVAC depth F1: Cancel button visible only while an ask is in
+  // flight. Wired to curva.askFrame.cancel() which routes to sdk.cancel({
+  // requestId}) in the worker. Verified per @qvac/sdk cancel.d.ts:6-15.
+  const cancelBtn = document.createElement('button')
+  cancelBtn.type = 'button'
+  cancelBtn.className = 'curva-ask-overlay__cancel-btn'
+  cancelBtn.textContent = 'Cancel'
+  cancelBtn.hidden = true
+
   inputRow.appendChild(questionInput)
   inputRow.appendChild(charCount)
   inputRow.appendChild(askBtn)
+  inputRow.appendChild(cancelBtn)
 
   // Answer streaming area
   const answerEl = document.createElement('div')
@@ -188,6 +198,12 @@ export function mountAskFrameOverlay({ container, curva, getVideoPlayer } = {}) 
     answerText.textContent = ''
     answerEl.hidden = false
     copyBtn.hidden = true
+    // Cancel becomes available the moment we hit the wire; the worker will
+    // no-op the cancel if the SDK has not yet returned a requestId (see
+    // askTheFrame.js cancel()).
+    cancelBtn.hidden = false
+    cancelBtn.disabled = false
+    cancelBtn.textContent = 'Cancel'
 
     try {
       await curva.askFrame.ask({ image: capturedFrame, question })
@@ -196,6 +212,7 @@ export function mountAskFrameOverlay({ container, curva, getVideoPlayer } = {}) 
       asking = false
       askBtn.disabled = false
       askBtn.textContent = 'Ask'
+      cancelBtn.hidden = true
     }
   }
 
@@ -238,6 +255,25 @@ export function mountAskFrameOverlay({ container, curva, getVideoPlayer } = {}) 
       askBtn.disabled = false
       askBtn.textContent = 'Ask'
       copyBtn.hidden = currentAnswer.length === 0
+      cancelBtn.hidden = true
+      cancelBtn.disabled = false
+      cancelBtn.textContent = 'Cancel'
+    })
+  }
+
+  let offCancelled = () => {}
+  if (typeof curva.askFrame?.onCancelled === 'function') {
+    offCancelled = curva.askFrame.onCancelled(() => {
+      cancelBtn.textContent = 'Cancelled'
+      cancelBtn.disabled = true
+      // The worker will also emit onDone after the SDK finalises the run;
+      // we let that reset the button. If it never comes, hide after 800 ms
+      // as a safety net.
+      setTimeout(() => {
+        cancelBtn.hidden = true
+        cancelBtn.textContent = 'Cancel'
+        cancelBtn.disabled = false
+      }, 800)
     })
   }
 
@@ -251,6 +287,14 @@ export function mountAskFrameOverlay({ container, curva, getVideoPlayer } = {}) 
   })
 
   askBtn.addEventListener('click', () => submitQuestion())
+  cancelBtn.addEventListener('click', (e) => {
+    e.preventDefault()
+    if (cancelBtn.disabled) return
+    cancelBtn.disabled = true
+    if (typeof curva.askFrame?.cancel === 'function') {
+      try { curva.askFrame.cancel() } catch { /* noop */ }
+    }
+  })
   closeBtn.addEventListener('click', () => close())
 
   backdrop.addEventListener('click', () => close())
@@ -310,6 +354,7 @@ export function mountAskFrameOverlay({ container, curva, getVideoPlayer } = {}) 
     try { offCaption() } catch { /* noop */ }
     try { offToken() } catch { /* noop */ }
     try { offDone() } catch { /* noop */ }
+    try { offCancelled() } catch { /* noop */ }
     try { overlay.remove() } catch { /* noop */ }
   }
 

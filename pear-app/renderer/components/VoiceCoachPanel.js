@@ -88,6 +88,17 @@ export function mountVoiceCoachPanel({ container, curva, roomState } = {}) {
   btn.textContent = 'Hold to talk (Space)'
   btn.setAttribute('aria-label', 'Push to talk')
 
+  // wave-final QVAC depth F1: Cancel button appears only while the LLM is
+  // streaming an answer. Clicking calls curva.voiceCoach.cancel() which
+  // routes to sdk.cancel({requestId}) in the worker. XSS-safe: textContent
+  // only. See @qvac/sdk dist/client/api/cancel.d.ts:6-15.
+  const cancelBtn = document.createElement('button')
+  cancelBtn.type = 'button'
+  cancelBtn.className = 'curva-voice-coach__cancel'
+  cancelBtn.textContent = 'Cancel'
+  cancelBtn.setAttribute('aria-label', 'Cancel streaming answer')
+  cancelBtn.hidden = true
+
   const transcript = document.createElement('div')
   transcript.className = 'curva-voice-coach__transcript'
   transcript.setAttribute('aria-live', 'polite')
@@ -109,6 +120,7 @@ export function mountVoiceCoachPanel({ container, curva, roomState } = {}) {
 
   container.appendChild(header)
   container.appendChild(btn)
+  container.appendChild(cancelBtn)
   container.appendChild(transcript)
   container.appendChild(answer)
   container.appendChild(meta)
@@ -153,6 +165,12 @@ export function mountVoiceCoachPanel({ container, curva, roomState } = {}) {
     const chunk = typeof p.text === 'string' ? p.text : ''
     if (chunk.length === 0) return
     answer.textContent = answer.textContent + chunk
+    // wave-final QVAC depth F1: first token = streaming has begun. Reveal
+    // the Cancel button. The worker only exposes a requestId once the SDK's
+    // completion() call returns, and the first token guarantees we are
+    // past that point.
+    cancelBtn.hidden = false
+    cancelBtn.disabled = false
   })
   trySubscribe('voice:done', (p) => {
     if (!p || typeof p !== 'object') return
@@ -160,6 +178,17 @@ export function mountVoiceCoachPanel({ container, curva, roomState } = {}) {
     meta.textContent = ms > 0 ? (ms + ' ms round-trip') : ''
     hint.hidden = false
     setChip('idle')
+    cancelBtn.hidden = true
+    cancelBtn.disabled = false
+  })
+  trySubscribe('voice:cancelled', () => {
+    cancelBtn.disabled = true
+    cancelBtn.textContent = 'Cancelled'
+    setTimeout(() => {
+      cancelBtn.hidden = true
+      cancelBtn.disabled = false
+      cancelBtn.textContent = 'Cancel'
+    }, 800)
   })
   trySubscribe('voice:vad', (p) => {
     if (!p || typeof p !== 'object') return
@@ -344,6 +373,16 @@ export function mountVoiceCoachPanel({ container, curva, roomState } = {}) {
   })
   btn.addEventListener('pointercancel', () => { endPTT() })
   btn.addEventListener('pointerleave', () => { if (state.active) endPTT() })
+
+  cancelBtn.addEventListener('click', (e) => {
+    e.preventDefault()
+    if (cancelBtn.disabled) return
+    cancelBtn.disabled = true
+    if (typeof curva.voiceCoach.cancel === 'function') {
+      // Fire-and-forget. The onCancelled handler handles the visual reset.
+      try { curva.voiceCoach.cancel() } catch { /* noop */ }
+    }
+  })
 
   function onKeyDown(e) {
     if (e.repeat) return

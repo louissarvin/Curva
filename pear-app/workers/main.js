@@ -1322,6 +1322,56 @@ async function ensureGoalPipeline () {
 }
 // ===== END WAVE 4 GOAL PIPELINE =====
 
+// ===== DIAGNOSTICS REPORT (wave-final QVAC depth F2) =====
+// Thin wrapper around @qvac/diagnostics (v0.1.2). Verified per
+// pear-app/node_modules/@qvac/diagnostics/index.d.ts:132-159 (fetched
+// 2026-07-10). Default ON since generating a report is a read-only,
+// idempotent operation. Set CURVA_DIAGNOSTICS_ENABLED=false to disable.
+const { createDiagnosticsReport } = require('../bare/diagnosticsReport.js')
+const diagnosticsReportFlagEnabled = (() => {
+  try {
+    const raw = (typeof process !== 'undefined' && process.env
+      && process.env.CURVA_DIAGNOSTICS_ENABLED)
+    if (raw === undefined || raw === null || raw === '') return true // default ON
+    const s = String(raw).toLowerCase()
+    return !(s === '0' || s === 'false' || s === 'no' || s === 'off')
+  } catch { return true }
+})()
+log('info', 'diagnostics-report feature flag', { enabled: diagnosticsReportFlagEnabled })
+
+const CURVA_APP_NAME = 'curva'
+const CURVA_APP_VERSION = (() => {
+  try {
+    // eslint-disable-next-line global-require
+    const pkg = require('../package.json')
+    return String((pkg && pkg.version) || '0.0.0')
+  } catch { return '0.0.0' }
+})()
+
+let diagnosticsReportInstance = null
+let diagnosticsReportInflight = null
+async function ensureDiagnosticsReport () {
+  if (diagnosticsReportInstance) return diagnosticsReportInstance
+  if (diagnosticsReportInflight) return diagnosticsReportInflight
+  if (!diagnosticsReportFlagEnabled) return null
+  diagnosticsReportInflight = (async () => {
+    try {
+      diagnosticsReportInstance = createDiagnosticsReport({
+        appName: CURVA_APP_NAME,
+        appVersion: CURVA_APP_VERSION,
+        emit: (ev, p) => emit(ev, p),
+        log
+      })
+    } catch (err) {
+      log('warn', 'diagnosticsReport construct failed', { message: err && err.message })
+      diagnosticsReportInstance = null
+    }
+    return diagnosticsReportInstance
+  })().finally(() => { diagnosticsReportInflight = null })
+  return diagnosticsReportInflight
+}
+// ===== END DIAGNOSTICS REPORT =====
+
 // ===== MODEL REGISTRY (Wave 4B) =====
 // Bridges bare/observability.js `getModelSnapshot` + sdk.unloadModel over IPC.
 // Allowlist of known model names covers the models the app currently loads +
@@ -4446,6 +4496,15 @@ async function dispatchCommand(msg) {
           emit('ack', { id, cmd })
           return
         }
+        // Barge-in coordination: cancel any lingering in-flight completion
+        // from the previous turn BEFORE opening the new STT session. The
+        // coach also does this internally, but calling it here surfaces the
+        // voice:cancelled event to the renderer via the standard emit path.
+        if (typeof coach.cancelInFlight === 'function') {
+          try { await coach.cancelInFlight() } catch (err) {
+            log('warn', 'voice:start-turn barge-in cancel threw', { message: err && err.message })
+          }
+        }
         try {
           const res = await coach.startTurn()
           emit('ack', { id, cmd, payload: res })
@@ -4487,6 +4546,20 @@ async function dispatchCommand(msg) {
         } catch (err) {
           emit('voice:error', { code: err?.code || 'END_FAILED', message: err?.message, requestId: id })
           emit('ack', { id, cmd })
+        }
+        return
+      }
+      case 'voice-coach:cancel': {
+        // Fire-and-forget best-effort cancel of a streaming completion. The
+        // coach handles the "nothing in flight" case internally and emits
+        // voice:cancelled on success. Verified per bare/voiceCoach.js
+        // cancelInFlight() + @qvac/sdk cancel.d.ts:6-15.
+        const coach = voiceCoach
+        emit('ack', { id, cmd })
+        if (coach && typeof coach.cancelInFlight === 'function') {
+          coach.cancelInFlight().catch((err) => {
+            log('warn', 'voice-coach:cancel threw', { message: err && err.message })
+          })
         }
         return
       }
@@ -4563,6 +4636,44 @@ async function dispatchCommand(msg) {
           requestId: id
         })
         emit('ack', { id, cmd })
+        return
+      }
+      case 'diagnostics:generate-report': {
+        // wave-final QVAC depth F2: full peer-side diagnostic snapshot backed
+        // by @qvac/diagnostics. Read-only, so always safe to call. Payload:
+        //   { ok: true, json: string }  OR  { ok: false, reason: string }
+        // Cited d.ts: pear-app/node_modules/@qvac/diagnostics/index.d.ts:132-159.
+        const rep = await ensureDiagnosticsReport()
+        if (!rep) {
+          emit('ack', { id, cmd, payload: {
+            ok: false,
+            reason: 'DIAGNOSTICS_UNAVAILABLE',
+            requestId: id
+          } })
+          return
+        }
+        const activeCapabilities = []
+        try {
+          if (commentator) activeCapabilities.push('commentator')
+          if (voiceCoach) activeCapabilities.push('voice-coach')
+          if (askTheFrameInstance) activeCapabilities.push('ask-the-frame')
+          if (goalCardInstance) activeCapabilities.push('goal-card')
+          if (goalPipelineInstance) activeCapabilities.push('goal-pipeline')
+          if (voiceCloneInstance) activeCapabilities.push('voice-clone')
+          if (langDetectInstance) activeCapabilities.push('lang-detect')
+          if (diarizationInstance) activeCapabilities.push('diarization')
+          if (ragInstance) activeCapabilities.push('rag')
+          if (mcpToolsInstance) activeCapabilities.push('mcp-tools')
+          if (translator) activeCapabilities.push('translator')
+          if (announcer) activeCapabilities.push('announcer')
+          if (promHandle && promHandle.started) activeCapabilities.push('observability')
+        } catch { /* best-effort */ }
+        const res = await rep.generate({
+          roomSlug: (room && room.slug) || (config.roomSlug || null),
+          isHost: !!(room && room.isHost),
+          activeCapabilities
+        })
+        emit('ack', { id, cmd, payload: { ...res, requestId: id } })
         return
       }
       case 'diagnostics:metrics': {
@@ -4702,6 +4813,19 @@ async function dispatchCommand(msg) {
         const matchTimeMs = Number(payload?.matchTimeMs ?? payload?.match_time_ms ?? 0)
         const res = await af.ask({ image, question, matchTimeMs })
         emit('ack', { id, cmd, payload: { ...res, requestId: id } })
+        return
+      }
+      case 'ask-frame:cancel': {
+        // Fire-and-forget best-effort cancel of a streaming ask completion.
+        // Verified per bare/askTheFrame.js cancel() + @qvac/sdk
+        // cancel.d.ts:6-15. Emits askframe:cancelled on success.
+        const af = askTheFrameInstance
+        emit('ack', { id, cmd })
+        if (af && typeof af.cancel === 'function') {
+          af.cancel().catch((err) => {
+            log('warn', 'ask-frame:cancel threw', { message: err && err.message })
+          })
+        }
         return
       }
       case 'ask-frame:status': {

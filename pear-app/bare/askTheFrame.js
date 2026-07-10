@@ -19,6 +19,8 @@
 //     completion() returns a CompletionRun synchronously with `run.events`
 //     (AsyncIterable<CompletionEvent>) and `run.final` (Promise). Verified
 //     against dist/client/api/completion-stream.d.ts.
+//     `CompletionRun.requestId` is guaranteed synchronously (line 217) and is
+//     the primary cancel handle per dist/client/api/cancel.d.ts:6-15.
 //   - pear-app/node_modules/@qvac/sdk/dist/client/api/rag.d.ts
 //       ragSearch({modelId, workspace, query, topK})
 //         -> Promise<Array<{id, content, score, ...}>>
@@ -123,7 +125,7 @@ function sanitizeUntrusted (raw, maxLen) {
  *   log?: (level:string, msg:string, extra?:any) => void,
  *   now?: () => number
  * }} opts
- * @returns {{ ask: Function, close: Function, status: Function }}
+ * @returns {{ ask: Function, cancel: Function, close: Function, status: Function }}
  */
 function createAskTheFrame (opts = {}) {
   const {
@@ -151,8 +153,6 @@ function createAskTheFrame (opts = {}) {
   if (!sharedLlmHandle || typeof sharedLlmHandle.completion !== 'function' || !sharedLlmHandle.modelId) {
     throw new TypeError('createAskTheFrame: sharedLlmHandle with completion + modelId required')
   }
-  // sdk retained for future direct-SDK code paths; reference to keep lint quiet.
-  void sdk
 
   const state = {
     closed: false,
@@ -161,7 +161,32 @@ function createAskTheFrame (opts = {}) {
     lastError: null,
     // Bookkeeping so ask() is idempotent per-invocation and observers can
     // correlate token events with the originating ask.
-    currentAskId: null
+    currentAskId: null,
+    // Set from CompletionRun.requestId once the completion() call returns.
+    // Used by cancel() and by close() to abort mid-stream. Cleared in the
+    // completion loop's finally block.
+    inFlightRequestId: null
+  }
+
+  // Best-effort cancel of the currently streaming completion. Verified per
+  // @qvac/sdk dist/client/api/cancel.d.ts:6-15 (fetched 2026-07-10). Errors
+  // are swallowed because a cancel is best-effort — a failure means the
+  // completion will finish naturally, which is still a safe outcome.
+  async function cancel () {
+    const requestId = state.inFlightRequestId
+    if (!requestId) return { ok: false, code: 'NO_INFLIGHT' }
+    state.inFlightRequestId = null
+    if (!sdk || typeof sdk.cancel !== 'function') {
+      return { ok: false, code: 'CANCEL_UNAVAILABLE' }
+    }
+    try {
+      await sdk.cancel({ requestId })
+      emit('askframe:cancelled', { requestId, askId: state.currentAskId })
+      return { ok: true, requestId }
+    } catch (err) {
+      log('warn', 'askTheFrame: sdk.cancel threw', { message: err && err.message })
+      return { ok: false, code: 'CANCEL_FAILED', message: err && err.message }
+    }
   }
 
   const cleanRoomSlug = String(roomSlug || 'default').slice(0, 64)
@@ -176,7 +201,9 @@ function createAskTheFrame (opts = {}) {
       hasAnnouncer: !!(announcer && typeof announcer.speak === 'function'),
       hasChat: !!(chat && typeof chat.sendSystem === 'function'),
       hasMcp: !!(mcpClient || roomMcpClient),
+      hasCancel: !!(sdk && typeof sdk.cancel === 'function'),
       inFlight: state.inFlight,
+      inFlightRequestId: state.inFlightRequestId,
       askCount: state.askCount,
       framesWorkspace,
       lastError: state.lastError,
@@ -349,6 +376,11 @@ function createAskTheFrame (opts = {}) {
       if (!run || !run.events || typeof run.events[Symbol.asyncIterator] !== 'function') {
         return finalise({ ok: false, code: 'LLM_NO_STREAM', reason: 'completion returned no events iterable', askId, startedAt })
       }
+      // Track the requestId so cancel() and close() can target it. Verified
+      // per completion-event.d.ts:217 — requestId is synchronously available.
+      if (typeof run.requestId === 'string' && run.requestId.length > 0) {
+        state.inFlightRequestId = run.requestId
+      }
 
       for await (const event of run.events) {
         if (timedOut) { stopReason = 'timeout'; break }
@@ -491,6 +523,9 @@ function createAskTheFrame (opts = {}) {
     function finalise (result) {
       state.inFlight = false
       state.currentAskId = null
+      // Clear the in-flight requestId so a stray cancel() from a future ask
+      // does not target a stale id.
+      state.inFlightRequestId = null
       if (typeof result === 'object' && result !== null && result.startedAt) {
         result.durationMs = now() - result.startedAt
         delete result.startedAt
@@ -500,6 +535,11 @@ function createAskTheFrame (opts = {}) {
   }
 
   async function close () {
+    // Cancel-first so an ask() streaming when the room tears down does not
+    // leak past close. Best-effort — swallowed errors never block cleanup.
+    if (state.inFlightRequestId) {
+      try { await cancel() } catch { /* noop */ }
+    }
     state.closed = true
     state.inFlight = false
     state.currentAskId = null
@@ -526,12 +566,14 @@ function createAskTheFrame (opts = {}) {
 
   return {
     ask,
+    cancel,
     close,
     status,
     _internal: {
       sanitizeUntrusted,
       SYSTEM_PROMPT,
-      framesWorkspace
+      framesWorkspace,
+      getState: () => state
     }
   }
 }

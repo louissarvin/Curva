@@ -256,9 +256,11 @@ export function mountDiagnosticsPanel (opts = {}) {
   const metricsTab = tabButton('Metrics')
   const logsTab = tabButton('Logs')
   const modelsTab = tabButton('Models')
+  const reportTab = tabButton('Report')
   tabbar.appendChild(metricsTab)
   tabbar.appendChild(logsTab)
   tabbar.appendChild(modelsTab)
+  tabbar.appendChild(reportTab)
   container.appendChild(tabbar)
 
   // -- Panels -------------------------------------------------------------
@@ -340,6 +342,39 @@ export function mountDiagnosticsPanel (opts = {}) {
   modelsPanel.appendChild(modelsEmpty)
   container.appendChild(modelsPanel)
 
+  // -- Report panel (wave-final QVAC depth F2) ---------------------------
+  // Full peer-side diagnostic snapshot from @qvac/diagnostics: app info,
+  // environment, hardware, addon status, Curva extension section (roomSlug,
+  // isHost, active AI capabilities). XSS discipline: every rendered string
+  // goes through textContent — the report JSON is dumped into a <pre>.
+  const reportPanel = document.createElement('div')
+  reportPanel.className = 'curva-diagnostics-panel curva-diagnostics-report'
+  const reportToolbar = document.createElement('div')
+  reportToolbar.className = 'curva-diagnostics-toolbar'
+  const genReportBtn = document.createElement('button')
+  genReportBtn.type = 'button'
+  genReportBtn.textContent = 'Generate report'
+  reportToolbar.appendChild(genReportBtn)
+  const copyReportBtn = document.createElement('button')
+  copyReportBtn.type = 'button'
+  copyReportBtn.textContent = 'Copy to clipboard'
+  copyReportBtn.disabled = true
+  reportToolbar.appendChild(copyReportBtn)
+  const reportSource = document.createElement('span')
+  reportSource.className = 'curva-diagnostics-source'
+  reportSource.textContent = ''
+  reportToolbar.appendChild(reportSource)
+  reportPanel.appendChild(reportToolbar)
+  const reportPre = document.createElement('pre')
+  reportPre.className = 'curva-diagnostics-report-json'
+  reportPre.textContent = ''
+  reportPanel.appendChild(reportPre)
+  const reportEmpty = document.createElement('div')
+  reportEmpty.className = 'curva-diagnostics-empty'
+  reportEmpty.textContent = 'Click "Generate report" to capture a snapshot.'
+  reportPanel.appendChild(reportEmpty)
+  container.appendChild(reportPanel)
+
   // -- State --------------------------------------------------------------
   const state = {
     tab: 'metrics',
@@ -351,7 +386,11 @@ export function mountDiagnosticsPanel (opts = {}) {
     lastLogPerModel: new Map(), // model-id -> last log entry
     destroyed: false,
     inFlight: false,
-    lastMetricsText: ''
+    lastMetricsText: '',
+    // wave-final QVAC depth F2: last generated report JSON. Held so the
+    // Copy button has something to write to the clipboard without re-fetching.
+    lastReportJson: '',
+    reportInFlight: false
   }
 
   function tabButton (label) {
@@ -367,10 +406,13 @@ export function mountDiagnosticsPanel (opts = {}) {
     metricsPanel.hidden = name !== 'metrics'
     logsPanel.hidden = name !== 'logs'
     modelsPanel.hidden = name !== 'models'
+    reportPanel.hidden = name !== 'report'
     metricsTab.classList.toggle('is-active', name === 'metrics')
     logsTab.classList.toggle('is-active', name === 'logs')
     modelsTab.classList.toggle('is-active', name === 'models')
-    // Restart polling loops so we only poll while their tab is active.
+    reportTab.classList.toggle('is-active', name === 'report')
+    // Restart polling loops so we only poll while their tab is active. The
+    // Report tab is a manual snapshot — deliberately no auto-refresh.
     stopPolling()
     stopModelsPolling()
     if (state.destroyed) return
@@ -380,6 +422,7 @@ export function mountDiagnosticsPanel (opts = {}) {
   metricsTab.addEventListener('click', () => selectTab('metrics'))
   logsTab.addEventListener('click', () => selectTab('logs'))
   modelsTab.addEventListener('click', () => selectTab('models'))
+  reportTab.addEventListener('click', () => selectTab('report'))
 
   async function refresh () {
     if (state.destroyed || state.inFlight) return
@@ -635,6 +678,65 @@ export function mountDiagnosticsPanel (opts = {}) {
     }
   })
 
+  // -- Report tab handlers (wave-final QVAC depth F2) --------------------
+  async function generateReport () {
+    if (state.destroyed || state.reportInFlight) return
+    const bridge = curva?.diagnostics?.generateReport
+    if (typeof bridge !== 'function') {
+      reportSource.textContent = 'source: unavailable'
+      reportEmpty.hidden = false
+      reportEmpty.textContent = 'diagnostics report bridge not wired'
+      reportPre.hidden = true
+      return
+    }
+    state.reportInFlight = true
+    genReportBtn.disabled = true
+    genReportBtn.textContent = 'Generating...'
+    reportSource.textContent = ''
+    try {
+      const json = await bridge()
+      if (state.destroyed) return
+      if (typeof json === 'string' && json.length > 0) {
+        state.lastReportJson = json
+        // XSS-safe: textContent only. The JSON body is a serialized report
+        // and never rendered as HTML.
+        reportPre.textContent = json
+        reportPre.hidden = false
+        reportEmpty.hidden = true
+        copyReportBtn.disabled = false
+        reportSource.textContent = 'source: @qvac/diagnostics'
+      } else {
+        state.lastReportJson = ''
+        reportPre.textContent = ''
+        reportPre.hidden = true
+        reportEmpty.hidden = false
+        reportEmpty.textContent = 'report unavailable (missing @qvac/diagnostics or feature disabled)'
+        copyReportBtn.disabled = true
+      }
+    } catch (err) {
+      reportSource.textContent = 'error: ' + safeMessage(err)
+      reportEmpty.hidden = false
+      reportEmpty.textContent = 'error: ' + safeMessage(err)
+      reportPre.hidden = true
+      copyReportBtn.disabled = true
+    } finally {
+      state.reportInFlight = false
+      genReportBtn.disabled = false
+      genReportBtn.textContent = 'Generate report'
+    }
+  }
+  genReportBtn.addEventListener('click', () => generateReport())
+  copyReportBtn.addEventListener('click', async () => {
+    const text = state.lastReportJson || ''
+    if (!text) return
+    try {
+      if (navigator?.clipboard?.writeText) await navigator.clipboard.writeText(text)
+      status.textContent = 'report copied ' + text.length + ' bytes'
+    } catch {
+      status.textContent = 'clipboard blocked'
+    }
+  })
+
   // Subscribe to log stream once the bridge is available.
   if (typeof curva?.diagnostics?.onLog === 'function') {
     try {
@@ -648,12 +750,14 @@ export function mountDiagnosticsPanel (opts = {}) {
   return {
     refresh,
     refreshModels,
+    generateReport,
     selectTab,
     getState () {
       return {
         tab: state.tab,
         logs: state.logs.slice(),
         lastMetricsText: state.lastMetricsText,
+        lastReportJson: state.lastReportJson,
         lastLogPerModel: Object.fromEntries(state.lastLogPerModel)
       }
     },
