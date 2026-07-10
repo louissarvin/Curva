@@ -7,6 +7,7 @@
 //   - Tips total refresh on every list update.
 
 import { mountTipButton } from './TipButton.js'
+import { mountVoiceEnrollmentModal } from './VoiceEnrollmentModal.js'
 
 // -- pear.assets branding pack ---
 // Resolve a crest URL for a given roomState. Prefers the pear.assets branding
@@ -332,6 +333,27 @@ export function mountRoomHeader({ container, curva, roomState, appVersion, backe
   inviteBtn.addEventListener('click', () => {
     openInviteModal({ curva, slug: roomState.slug })
   })
+
+  // F2: voice clone trigger (host-only, bridge-gated)
+  let voiceEnrollModal = null
+  const hasVoiceClone = !!(curva.voiceClone && typeof curva.voiceClone.enroll === 'function')
+  if (roomState.isHost && hasVoiceClone) {
+    const cloneBtn = document.createElement('button')
+    cloneBtn.type = 'button'
+    cloneBtn.className = 'curva-header__btn curva-header__btn--clone'
+    cloneBtn.textContent = 'Clone my voice'
+    cloneBtn.addEventListener('click', () => {
+      if (!voiceEnrollModal) {
+        voiceEnrollModal = mountVoiceEnrollmentModal({
+          container: document.body,
+          curva,
+          isHost: true
+        })
+      }
+      voiceEnrollModal.open()
+    })
+    actions.appendChild(cloneBtn)
+  }
 
   actions.appendChild(publishBtn)
   actions.appendChild(copyBtn)
@@ -734,6 +756,7 @@ export function mountRoomHeader({ container, curva, roomState, appVersion, backe
     try { brandingUnsub() } catch { /* noop */ }
     try { clearInterval(brandingPoll) } catch { /* noop */ }
     if (tipButton) tipButton.destroy()
+    if (voiceEnrollModal) { try { voiceEnrollModal.destroy() } catch { /* noop */ } voiceEnrollModal = null }
     container.textContent = ''
   }
 

@@ -23,6 +23,30 @@ const TONES = [
   { id: 'hype', label: 'Hype' }
 ]
 
+// -- Diarization speaker badge helpers ------------------------------------
+
+// Hash a speaker ID string to an HSL hue value. Deterministic: same ID always
+// yields the same hue so the badge color is stable across turns.
+function speakerIdToHue(id) {
+  let h = 0
+  for (let i = 0; i < id.length; i++) {
+    h = (h * 31 + id.charCodeAt(i)) >>> 0
+  }
+  return h % 360
+}
+
+function speakerColor(id) {
+  const hue = speakerIdToHue(id)
+  return `hsl(${hue}, 45%, 55%)`
+}
+
+// Format total speaking milliseconds as compact "12s" or "1m 4s".
+function fmtMs(ms) {
+  const s = Math.floor(ms / 1000)
+  if (s < 60) return s + 's'
+  return Math.floor(s / 60) + 'm ' + (s % 60) + 's'
+}
+
 // Public: the feature flag test. Renderer/app.js consults this before wiring
 // the panel so no DOM is created when the flag is off. Race with a 3s
 // timeout so a broken worker never blocks room mount.
@@ -51,6 +75,96 @@ export function mountCommentaryPanel({ container, curva, roomState } = {}) {
 
   container.textContent = ''
   container.classList.add('curva-commentary')
+
+  // -- Diarization sidebar ------------------------------------------------
+  // Speakers map: speakerId -> { badge (DOM), totalMs, segmentCount, lastSeenAt, lastText }
+  const speakersMap = new Map()
+  // speakersList is assigned below after DOM construction; functions close over
+  // the binding, so they safely reference the populated value at call time.
+  let speakersList = null
+
+  function renderSpeakerBadge(speaker) {
+    const existing = speakersMap.get(speaker.speakerId)
+    if (!existing) return
+
+    const { badge, dot, idEl, timeEl, previewEl } = existing
+
+    // Update time
+    timeEl.textContent = fmtMs(speaker.totalMs || 0)
+
+    // Update preview if present
+    if (typeof speaker.lastText === 'string' && speaker.lastText.length > 0) {
+      previewEl.textContent = speaker.lastText.slice(0, 40)
+    }
+
+    // Bubble top speaker to top by re-sorting the list
+    const allSpeakers = Array.from(speakersMap.values())
+    allSpeakers.sort((a, b) => (b.totalMs || 0) - (a.totalMs || 0))
+    for (const s of allSpeakers) {
+      speakersList.appendChild(s.badge)
+    }
+  }
+
+  function addOrUpdateSpeaker(speaker) {
+    const sid = String(speaker.speakerId || '').slice(0, 24)
+    if (!sid) return
+    if (speakersMap.has(sid)) {
+      const entry = speakersMap.get(sid)
+      entry.totalMs = speaker.totalMs || 0
+      entry.segmentCount = speaker.segmentCount || 0
+      entry.lastSeenAt = speaker.lastSeenAt || 0
+      if (typeof speaker.lastText === 'string') entry.lastText = speaker.lastText
+      renderSpeakerBadge({ ...speaker, speakerId: sid })
+      return
+    }
+
+    const color = speakerColor(sid)
+    const badge = document.createElement('div')
+    badge.className = 'curva-diarize__badge'
+
+    const dot = document.createElement('span')
+    dot.className = 'curva-diarize__dot'
+    dot.style.background = color
+
+    const idEl = document.createElement('span')
+    idEl.className = 'curva-diarize__id'
+    idEl.textContent = sid.length > 8 ? sid.slice(0, 5) + '..' : sid
+
+    const timeEl = document.createElement('span')
+    timeEl.className = 'curva-diarize__time'
+    timeEl.textContent = fmtMs(speaker.totalMs || 0)
+
+    const previewEl = document.createElement('div')
+    previewEl.className = 'curva-diarize__preview'
+    previewEl.textContent = ''
+
+    badge.appendChild(dot)
+    badge.appendChild(idEl)
+    badge.appendChild(timeEl)
+    badge.appendChild(previewEl)
+    speakersList.appendChild(badge)
+
+    speakersMap.set(sid, {
+      badge, dot, idEl, timeEl, previewEl,
+      totalMs: speaker.totalMs || 0,
+      segmentCount: speaker.segmentCount || 0,
+      lastSeenAt: speaker.lastSeenAt || 0,
+      lastText: speaker.lastText || ''
+    })
+  }
+
+  function pulseSpeaker(speakerId) {
+    const sid = String(speakerId || '').slice(0, 24)
+    const entry = speakersMap.get(sid)
+    if (!entry) return
+    entry.badge.classList.remove('curva-diarize__badge--pulse')
+    // Force reflow so animation re-triggers on rapid back-to-back turns
+    void entry.badge.offsetWidth
+    entry.badge.classList.add('curva-diarize__badge--pulse')
+    setTimeout(() => {
+      try { entry.badge.classList.remove('curva-diarize__badge--pulse') } catch { /* noop */ }
+    }, 700)
+  }
 
   // Header: title + status chip + pulse indicator.
   const header = document.createElement('div')
@@ -95,7 +209,29 @@ export function mountCommentaryPanel({ container, curva, roomState } = {}) {
   thinkBadge.hidden = true
   thinkBadge.setAttribute('aria-live', 'polite')
   header.appendChild(thinkBadge)
+  // Diarize toggle (host-only). Only rendered when the bridge is present.
+  const hasDiarize = !!(curva.diarize && typeof curva.diarize.start === 'function')
+  const diarizeBtn = document.createElement('button')
+  diarizeBtn.type = 'button'
+  diarizeBtn.className = 'curva-commentary__diarize-btn'
+  diarizeBtn.textContent = 'start diarize'
+  diarizeBtn.hidden = !(isHost && hasDiarize)
+  header.appendChild(diarizeBtn)
+
   container.appendChild(header)
+
+  // Speakers sidebar (shown only when a diarize session is active)
+  const speakersSidebar = document.createElement('div')
+  speakersSidebar.className = 'curva-diarize__sidebar'
+  speakersSidebar.hidden = true
+  const speakersLabel = document.createElement('div')
+  speakersLabel.className = 'curva-diarize__label'
+  speakersLabel.textContent = 'speakers'
+  speakersList = document.createElement('div')
+  speakersList.className = 'curva-diarize__list'
+  speakersSidebar.appendChild(speakersLabel)
+  speakersSidebar.appendChild(speakersList)
+  container.appendChild(speakersSidebar)
 
   // Body: last-line preview + controls.
   const body = document.createElement('div')
@@ -418,6 +554,86 @@ export function mountCommentaryPanel({ container, curva, roomState } = {}) {
       playAudio(wavBase64, lang)
     })
     offs.push(offTts)
+  }
+
+  // -- Diarization wiring ------------------------------------------------
+  // All handlers are feature-gated on bridge presence. A missing bridge is
+  // a silent no-op so the commentary panel still works on older builds.
+  let diarizeActive = false
+  if (hasDiarize) {
+    diarizeBtn.addEventListener('click', () => {
+      if (diarizeActive) {
+        curva.diarize.end().catch(() => { /* noop */ })
+      } else {
+        curva.diarize.start().catch(() => { /* noop */ })
+      }
+    })
+
+    if (typeof curva.diarize.onSpeakerAdded === 'function') {
+      offs.push(curva.diarize.onSpeakerAdded((speaker) => {
+        if (!speaker) return
+        addOrUpdateSpeaker(speaker)
+        speakersSidebar.hidden = false
+      }))
+    }
+
+    if (typeof curva.diarize.onTurn === 'function') {
+      offs.push(curva.diarize.onTurn((turn) => {
+        if (!turn) return
+        const sid = String(turn.speakerId || '').slice(0, 24)
+        if (!sid) return
+        // Update preview text from transcript segment
+        const entry = speakersMap.get(sid)
+        if (entry && typeof turn.text === 'string') {
+          entry.lastText = turn.text
+          entry.previewEl.textContent = turn.text.slice(0, 40)
+          entry.totalMs = (entry.totalMs || 0) + (turn.durationMs || 0)
+          entry.timeEl.textContent = fmtMs(entry.totalMs)
+          // Re-sort so highest speaker time floats up
+          const all = Array.from(speakersMap.values())
+          all.sort((a, b) => (b.totalMs || 0) - (a.totalMs || 0))
+          for (const s of all) speakersList.appendChild(s.badge)
+        } else if (!entry) {
+          addOrUpdateSpeaker({ speakerId: sid, totalMs: turn.durationMs || 0, lastText: turn.text || '' })
+          speakersSidebar.hidden = false
+        }
+        pulseSpeaker(sid)
+      }))
+    }
+
+    if (typeof curva.diarize.onSessionDone === 'function') {
+      offs.push(curva.diarize.onSessionDone(() => {
+        diarizeActive = false
+        diarizeBtn.textContent = 'start diarize'
+        // Refresh table on session end
+        if (typeof curva.diarize.table === 'function') {
+          curva.diarize.table().then((rows) => {
+            if (!Array.isArray(rows)) return
+            for (const row of rows) addOrUpdateSpeaker(row)
+          }).catch(() => { /* noop */ })
+        }
+      }))
+    }
+
+    // Detect session state transitions from diarize.status() if available
+    if (typeof curva.diarize.status === 'function') {
+      curva.diarize.status().then((st) => {
+        if (st && st.sessionActive) {
+          diarizeActive = true
+          diarizeBtn.textContent = 'stop diarize'
+          speakersSidebar.hidden = false
+        }
+      }).catch(() => { /* noop */ })
+    }
+
+    // Keep diarizeActive in sync via status events if the bridge exposes them
+    if (typeof curva.diarize.onStatus === 'function') {
+      offs.push(curva.diarize.onStatus((st) => {
+        diarizeActive = !!(st && st.sessionActive)
+        diarizeBtn.textContent = diarizeActive ? 'stop diarize' : 'start diarize'
+        speakersSidebar.hidden = !diarizeActive && speakersMap.size === 0
+      }))
+    }
   }
 
   // Kick off: fetch status so the panel reflects reality on mount.

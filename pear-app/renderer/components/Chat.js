@@ -18,6 +18,8 @@
 // original in a lighter shade. Translation NEVER blocks message rendering.
 
 const MAX_CHARS = 280
+const MAX_SEARCH_QUERY = 500
+const MAX_INDEX_TEXT = 4000
 const LANG_LABELS = {
   en: { flag: 'EN', name: 'English' },
   it: { flag: 'IT', name: 'Italiano' },
@@ -39,8 +41,77 @@ export function mountChat({ container, curva, tier = 'writer' } = {}) {
   const count = document.createElement('span')
   count.className = 'curva-chat__count'
   count.textContent = '0 msgs'
+
+  // F1: history scrubber toggle button
+  const historyToggleBtn = document.createElement('button')
+  historyToggleBtn.type = 'button'
+  historyToggleBtn.className = 'curva-chat__header-btn'
+  historyToggleBtn.title = 'Browse history'
+  historyToggleBtn.setAttribute('aria-label', 'Toggle history scrubber')
+  historyToggleBtn.textContent = 'hist'
+
+  // F4: semantic search toggle button
+  const searchToggleBtn = document.createElement('button')
+  searchToggleBtn.type = 'button'
+  searchToggleBtn.className = 'curva-chat__header-btn'
+  searchToggleBtn.title = 'Semantic search'
+  searchToggleBtn.setAttribute('aria-label', 'Toggle semantic search')
+  searchToggleBtn.textContent = 'srch'
+
   header.appendChild(title)
   header.appendChild(count)
+  header.appendChild(searchToggleBtn)
+  header.appendChild(historyToggleBtn)
+
+  // F1: History scrubber bar. Hidden until the user toggles it open.
+  const scrubberBar = document.createElement('div')
+  scrubberBar.className = 'curva-chat__scrubber'
+  scrubberBar.hidden = true
+
+  const scrubberSlider = document.createElement('input')
+  scrubberSlider.type = 'range'
+  scrubberSlider.className = 'curva-chat__scrubber-slider'
+  scrubberSlider.min = '0'
+  scrubberSlider.max = '0'
+  scrubberSlider.value = '0'
+  scrubberSlider.setAttribute('aria-label', 'History position')
+
+  const scrubberLabel = document.createElement('span')
+  scrubberLabel.className = 'curva-chat__scrubber-label'
+  scrubberLabel.textContent = ''
+
+  const scrubberLiveBtn = document.createElement('button')
+  scrubberLiveBtn.type = 'button'
+  scrubberLiveBtn.className = 'curva-chat__scrubber-live'
+  scrubberLiveBtn.textContent = 'live'
+
+  scrubberBar.appendChild(scrubberSlider)
+  scrubberBar.appendChild(scrubberLabel)
+  scrubberBar.appendChild(scrubberLiveBtn)
+
+  // F1: history-mode overlay banner on the message list
+  const historyBanner = document.createElement('div')
+  historyBanner.className = 'curva-chat__history-banner'
+  historyBanner.hidden = true
+
+  // F4: Semantic search bar. Hidden until user toggles open.
+  const searchBar = document.createElement('div')
+  searchBar.className = 'curva-chat__search-bar'
+  searchBar.hidden = true
+
+  const searchInput = document.createElement('input')
+  searchInput.type = 'text'
+  searchInput.className = 'curva-chat__search-input'
+  searchInput.placeholder = 'Search chat semantically...'
+  searchInput.maxLength = MAX_SEARCH_QUERY + 10
+  searchInput.setAttribute('aria-label', 'Semantic search')
+
+  const searchResults = document.createElement('ul')
+  searchResults.className = 'curva-chat__search-results'
+  searchResults.hidden = true
+
+  searchBar.appendChild(searchInput)
+  searchBar.appendChild(searchResults)
 
   // Phase 3.5: language picker + translation status banner.
   const translationBar = document.createElement('div')
@@ -142,8 +213,11 @@ export function mountChat({ container, curva, tier = 'writer' } = {}) {
   readerNote.textContent = 'Spectator view. Chat is invite-only.'
 
   container.appendChild(header)
+  container.appendChild(scrubberBar)
+  container.appendChild(searchBar)
   container.appendChild(translationBar)
   container.appendChild(translationStatus)
+  container.appendChild(historyBanner)
   container.appendChild(list)
   container.appendChild(form)
   container.appendChild(readerNote)
@@ -162,6 +236,246 @@ export function mountChat({ container, curva, tier = 'writer' } = {}) {
   list.addEventListener('scroll', () => {
     const nearBottom = list.scrollHeight - (list.scrollTop + list.clientHeight) < 40
     autoScroll = nearBottom
+  })
+
+  // F1: scrubber state
+  let scrubberOpen = false
+  let historyMode = false // true while viewing a past version
+  let versionMarkers = [] // [{version, matchTimeMs}] sorted oldest -> newest
+  let scrubDebounce = null
+
+  function formatAgo(matchTimeMs) {
+    if (typeof matchTimeMs !== 'number' || matchTimeMs <= 0) return ''
+    const m = Math.floor(matchTimeMs / 60000)
+    const s = Math.floor((matchTimeMs % 60000) / 1000)
+    return m + ':' + String(s).padStart(2, '0')
+  }
+
+  function renderHistorySnapshot(messages) {
+    // Clear DOM state while staying in history mode
+    for (const key of rowsByKey.keys()) {
+      rowsByKey.delete(key)
+    }
+    list.textContent = ''
+    if (!Array.isArray(messages)) return
+    for (const m of messages) {
+      addMessage(m)
+    }
+  }
+
+  function enterHistoryMode(version, matchTimeMs) {
+    historyMode = true
+    historyBanner.hidden = false
+    historyBanner.textContent = 'Reading history · v' + version + (matchTimeMs > 0 ? ' · ' + formatAgo(matchTimeMs) : '')
+    list.classList.add('curva-chat__list--history')
+    if (typeof curva.chat?.historyAt === 'function') {
+      curva.chat.historyAt({ from: 0, limit: 200, at: version })
+        .then((result) => {
+          const msgs = result?.messages || result || []
+          renderHistorySnapshot(Array.isArray(msgs) ? msgs : [])
+        })
+        .catch(() => {})
+    }
+  }
+
+  function exitHistoryMode() {
+    historyMode = false
+    historyBanner.hidden = true
+    list.classList.remove('curva-chat__list--history')
+    // Re-render from live historyCache
+    for (const key of rowsByKey.keys()) rowsByKey.delete(key)
+    list.textContent = ''
+    msgCount = 0
+    count.textContent = '0 msgs'
+    for (const m of historyCache) addMessage(m)
+    autoScroll = true
+    list.scrollTop = list.scrollHeight
+  }
+
+  function openScrubber() {
+    scrubberOpen = true
+    scrubberBar.hidden = false
+    historyToggleBtn.classList.add('curva-chat__header-btn--active')
+    // Load version markers
+    if (typeof curva.chat?.getVersions === 'function') {
+      curva.chat.getVersions({ limit: 32 })
+        .then((markers) => {
+          if (!Array.isArray(markers) || markers.length === 0) return
+          versionMarkers = markers
+          scrubberSlider.min = '0'
+          scrubberSlider.max = String(markers.length - 1)
+          scrubberSlider.value = String(markers.length - 1)
+          updateScrubberLabel(markers.length - 1)
+        })
+        .catch(() => {})
+    }
+  }
+
+  function closeScrubber() {
+    scrubberOpen = false
+    scrubberBar.hidden = true
+    historyToggleBtn.classList.remove('curva-chat__header-btn--active')
+    if (historyMode) exitHistoryMode()
+  }
+
+  function updateScrubberLabel(idx) {
+    const marker = versionMarkers[idx]
+    if (!marker) { scrubberLabel.textContent = ''; return }
+    scrubberLabel.textContent = 'v' + marker.version +
+      (marker.matchTimeMs > 0 ? ' · ' + formatAgo(marker.matchTimeMs) : '')
+  }
+
+  historyToggleBtn.addEventListener('click', () => {
+    if (scrubberOpen) closeScrubber()
+    else openScrubber()
+  })
+
+  scrubberSlider.addEventListener('input', () => {
+    const idx = Number(scrubberSlider.value)
+    updateScrubberLabel(idx)
+    if (scrubDebounce) clearTimeout(scrubDebounce)
+    scrubDebounce = setTimeout(() => {
+      const marker = versionMarkers[idx]
+      if (!marker) return
+      const isLast = idx === versionMarkers.length - 1
+      if (isLast) {
+        if (historyMode) exitHistoryMode()
+      } else {
+        enterHistoryMode(marker.version, marker.matchTimeMs || 0)
+      }
+    }, 300)
+  })
+
+  scrubberLiveBtn.addEventListener('click', () => {
+    scrubberSlider.value = scrubberSlider.max
+    if (versionMarkers.length > 0) updateScrubberLabel(versionMarkers.length - 1)
+    if (historyMode) exitHistoryMode()
+  })
+
+  // Subscribe to new version markers (best-effort; older workers won't have this)
+  if (typeof curva.chat?.onVersionMarker === 'function') {
+    curva.chat.onVersionMarker((marker) => {
+      if (!marker || typeof marker.version === 'undefined') return
+      versionMarkers.push(marker)
+      if (versionMarkers.length > 32) versionMarkers.shift()
+      if (scrubberOpen && !historyMode) {
+        const max = versionMarkers.length - 1
+        scrubberSlider.max = String(max)
+        scrubberSlider.value = String(max)
+        updateScrubberLabel(max)
+      }
+    })
+  }
+
+  // F4: semantic search state
+  let searchOpen = false
+  let searchDebounce = null
+
+  function openSearch() {
+    searchOpen = true
+    searchBar.hidden = false
+    searchToggleBtn.classList.add('curva-chat__header-btn--active')
+    searchInput.value = ''
+    searchResults.hidden = true
+    searchResults.textContent = ''
+    setTimeout(() => searchInput.focus(), 0)
+  }
+
+  function closeSearch() {
+    searchOpen = false
+    searchBar.hidden = true
+    searchToggleBtn.classList.remove('curva-chat__header-btn--active')
+    searchResults.hidden = true
+    searchResults.textContent = ''
+  }
+
+  function runSearch(query) {
+    if (!query || query.length === 0) {
+      searchResults.hidden = true
+      searchResults.textContent = ''
+      return
+    }
+    const safeQuery = query.slice(0, MAX_SEARCH_QUERY)
+    if (typeof curva.semSearch?.search !== 'function') {
+      searchResults.hidden = false
+      searchResults.textContent = ''
+      const noApi = document.createElement('li')
+      noApi.className = 'curva-chat__search-empty'
+      noApi.textContent = 'semantic search unavailable'
+      searchResults.appendChild(noApi)
+      return
+    }
+    curva.semSearch.search({ query: safeQuery, topK: 8 })
+      .then((hits) => {
+        searchResults.textContent = ''
+        if (!Array.isArray(hits) || hits.length === 0) {
+          searchResults.hidden = false
+          const empty = document.createElement('li')
+          empty.className = 'curva-chat__search-empty'
+          empty.textContent = 'no matches — try a different phrase'
+          searchResults.appendChild(empty)
+          return
+        }
+        searchResults.hidden = false
+        for (const hit of hits) {
+          const id = typeof hit.id === 'string' ? hit.id : String(hit.id || '')
+          const li = document.createElement('li')
+          li.className = 'curva-chat__search-hit'
+
+          const idEl = document.createElement('span')
+          idEl.className = 'curva-chat__search-hit-id'
+          // Show last 16 chars of id to fit narrow layout
+          idEl.textContent = id.length > 16 ? '...' + id.slice(-16) : id
+
+          const jumpBtn = document.createElement('button')
+          jumpBtn.type = 'button'
+          jumpBtn.className = 'curva-chat__search-jump'
+          jumpBtn.textContent = 'jump'
+          // Use a closure to capture the safe id string
+          const safeId = id.slice(0, 200) // cap for safety
+          jumpBtn.addEventListener('click', () => {
+            // Scroll the matching row into view if still in the DOM
+            const row = rowsByKey.get(safeId)
+            if (row) {
+              row.scrollIntoView({ behavior: 'smooth', block: 'center' })
+              row.classList.add('curva-chat__msg--search-highlight')
+              setTimeout(() => row.classList.remove('curva-chat__msg--search-highlight'), 1500)
+            }
+          })
+
+          li.appendChild(idEl)
+          li.appendChild(jumpBtn)
+          searchResults.appendChild(li)
+        }
+      })
+      .catch(() => {
+        searchResults.textContent = ''
+        searchResults.hidden = false
+        const err = document.createElement('li')
+        err.className = 'curva-chat__search-empty'
+        err.textContent = 'search error — try again'
+        searchResults.appendChild(err)
+      })
+  }
+
+  searchToggleBtn.addEventListener('click', () => {
+    if (searchOpen) closeSearch()
+    else openSearch()
+  })
+
+  searchInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { closeSearch(); return }
+    if (e.key === 'Enter') {
+      if (searchDebounce) clearTimeout(searchDebounce)
+      runSearch(searchInput.value.trim())
+    }
+  })
+
+  searchInput.addEventListener('input', () => {
+    if (searchDebounce) clearTimeout(searchDebounce)
+    searchDebounce = setTimeout(() => {
+      runSearch(searchInput.value.trim())
+    }, 400)
   })
 
   input.addEventListener('input', () => {
@@ -285,6 +599,35 @@ export function mountChat({ container, curva, tier = 'writer' } = {}) {
     if (msg && typeof msg === 'object' && msg.text) {
       historyCache.push(msg)
       if (historyCache.length > 300) historyCache.shift()
+    }
+
+    // F4: index new messages for semantic search. Best-effort; no throw.
+    // Only index regular chat text and commentary-style messages with text.
+    // id is the Hyperbee key (chatKey) when present, else keyForMessage().
+    if (msg && typeof msg.text === 'string' && msg.text.length > 0
+        && typeof curva.semSearch?.index === 'function') {
+      const indexId = (typeof msg.chatKey === 'string' && msg.chatKey.length > 0)
+        ? msg.chatKey
+        : key
+      const indexText = msg.text.slice(0, MAX_INDEX_TEXT)
+      curva.semSearch.index({ id: indexId, text: indexText }).catch(() => {})
+    }
+
+    // F2: system:goal-card — AI-parsed goal event. Gold border-left pill.
+    // All fields via textContent — model output is untrusted (defense in depth).
+    if (msg?.type === 'system:goal-card') {
+      const li = renderSystemGoalCard(msg, key)
+      list.appendChild(li)
+      rowsByKey.set(key, li)
+      msgCount++
+      count.textContent = msgCount + ' msg' + (msgCount === 1 ? '' : 's')
+      while (list.children.length > 300) {
+        const first = list.firstChild
+        if (first?.dataset?.key) rowsByKey.delete(first.dataset.key)
+        list.removeChild(first)
+      }
+      if (autoScroll) list.scrollTop = list.scrollHeight
+      return
     }
 
     // Task 6: system:tip messages render with a distinct style, currency
@@ -801,6 +1144,71 @@ export function mountChat({ container, curva, tier = 'writer' } = {}) {
 
     li.appendChild(marker)
     li.appendChild(body)
+    li.appendChild(attribution)
+    return li
+  }
+
+  // F2: `system:goal-card` renderer.
+  // Bold gold border-left. Grid: minute (large mono red) · scorer · team.
+  // Optional assist line. Attribution "AI parsed · on-device". "GOAL" tag top-right.
+  // All fields via textContent — goalCard output is model-generated and untrusted.
+  function renderSystemGoalCard(msg, key) {
+    const li = document.createElement('li')
+    li.className = 'curva-chat__msg curva-chat__msg--system curva-chat__msg--goal-card'
+    li.dataset.key = key
+
+    const inner = document.createElement('div')
+    inner.className = 'curva-chat__goal-card-inner'
+
+    // "GOAL" tag top-right
+    const tag = document.createElement('span')
+    tag.className = 'curva-chat__goal-card-tag'
+    tag.textContent = 'GOAL'
+
+    // Minute: large mono red
+    const min = Number.isFinite(msg.minute) ? String(Math.floor(msg.minute)) + "'" : "?'"
+    const minuteEl = document.createElement('span')
+    minuteEl.className = 'curva-chat__goal-card-minute'
+    minuteEl.textContent = min
+
+    // Scorer: uppercase tracking
+    const rawScorer = typeof msg.scorer === 'string' && msg.scorer.length > 0
+      ? msg.scorer.toUpperCase().slice(0, 30) : 'GOAL'
+    const scorerEl = document.createElement('span')
+    scorerEl.className = 'curva-chat__goal-card-scorer'
+    scorerEl.textContent = rawScorer
+
+    // Team: small-caps muted
+    const rawTeam = typeof msg.team === 'string' && msg.team.length > 0
+      ? msg.team.slice(0, 30) : ''
+    const teamEl = document.createElement('span')
+    teamEl.className = 'curva-chat__goal-card-team'
+    teamEl.textContent = rawTeam
+
+    inner.appendChild(tag)
+    inner.appendChild(minuteEl)
+    inner.appendChild(scorerEl)
+    inner.appendChild(teamEl)
+
+    // Optional assist line
+    if (typeof msg.assist === 'string' && msg.assist.length > 0) {
+      const assistEl = document.createElement('div')
+      assistEl.className = 'curva-chat__goal-card-assist'
+      const assistLabel = document.createElement('span')
+      assistLabel.className = 'curva-chat__goal-card-assist-label'
+      assistLabel.textContent = 'assist: '
+      const assistName = document.createElement('span')
+      assistName.textContent = msg.assist.slice(0, 30)
+      assistEl.appendChild(assistLabel)
+      assistEl.appendChild(assistName)
+      inner.appendChild(assistEl)
+    }
+
+    const attribution = document.createElement('div')
+    attribution.className = 'curva-chat__commentary-attribution'
+    attribution.textContent = 'AI parsed · on-device'
+
+    li.appendChild(inner)
     li.appendChild(attribution)
     return li
   }
@@ -1342,6 +1750,8 @@ export function mountChat({ container, curva, tier = 'writer' } = {}) {
   curva.loadChatHistory({ from: 0, limit: 100 }).catch(() => {})
 
   function destroy() {
+    if (scrubDebounce) clearTimeout(scrubDebounce)
+    if (searchDebounce) clearTimeout(searchDebounce)
     offMsg()
     offCluster()
     offHistory()

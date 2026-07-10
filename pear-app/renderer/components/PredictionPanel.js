@@ -18,6 +18,105 @@
 //   - Sepolia links go through curva.openExternal which is host-allowlisted
 //     to sepolia.etherscan.io.
 
+// -- F3: Sealed prediction reveal ceremony -----------------------------------
+// The sealed API surface (wave 3) may or may not be bridged in the current
+// build. All access is guarded by typeof checks so this degrades cleanly.
+//
+// Reveal animation: each locked card sequentially flips with a 500ms stagger,
+// then shows a mint-green flash. After all cards flip, a leaderboard of
+// accuracy per player is shown.
+//
+// Implementation notes:
+//   - CSS transform (rotateY) drives the flip; no GSAP dependency.
+//   - Card flip uses class-toggle, not style mutation, so reduced-motion can
+//     suppress it via @media (prefers-reduced-motion: reduce).
+//   - All prediction text is set via textContent — peer-supplied data is untrusted.
+
+function hasSealedApi(curva) {
+  return !!(
+    curva && curva.predictions &&
+    typeof curva.predictions.createSealed === 'function' &&
+    typeof curva.predictions.reveal === 'function'
+  )
+}
+
+function renderSealedCards(container, sealedPredictions) {
+  // sealedPredictions: [{ handle, encryptionKey, prediction, epoch }]
+  // or an empty array when none have been submitted yet.
+  const list = document.createElement('div')
+  list.className = 'curva-predictions__sealed-list'
+  if (!sealedPredictions || sealedPredictions.length === 0) {
+    const empty = document.createElement('div')
+    empty.className = 'curva-predictions__hint'
+    empty.textContent = 'No sealed predictions submitted yet.'
+    container.appendChild(empty)
+    return { cards: [], list }
+  }
+
+  const cards = []
+  for (const sp of sealedPredictions) {
+    const card = document.createElement('div')
+    card.className = 'curva-predictions__sealed-card'
+
+    const lockEl = document.createElement('span')
+    lockEl.className = 'curva-predictions__sealed-lock'
+    lockEl.textContent = '[sealed]'
+
+    const handleEl = document.createElement('span')
+    handleEl.className = 'curva-predictions__handle'
+    handleEl.textContent = String(sp.handle || 'peer').slice(0, 32)
+
+    const hintEl = document.createElement('span')
+    hintEl.className = 'curva-predictions__sealed-hint'
+    hintEl.textContent = 'sealed until kickoff'
+
+    card.appendChild(lockEl)
+    card.appendChild(handleEl)
+    card.appendChild(hintEl)
+    list.appendChild(card)
+    cards.push({ card, sealed: sp })
+  }
+  container.appendChild(list)
+  return { cards, list }
+}
+
+// Sequentially flip cards and reveal content. Returns a Promise that resolves
+// when all cards have flipped. revealedData is an array parallel to cards.
+function animateReveal(cards, revealedData) {
+  return new Promise((resolve) => {
+    let i = 0
+    function next() {
+      if (i >= cards.length) { resolve(); return }
+      const { card } = cards[i]
+      const data = revealedData[i]
+      i++
+
+      card.classList.add('curva-predictions__sealed-card--flipping')
+      setTimeout(() => {
+        // Mid-flip: swap content to revealed
+        card.textContent = ''
+        const handleEl = document.createElement('span')
+        handleEl.className = 'curva-predictions__handle'
+        handleEl.textContent = String(data.handle || 'peer').slice(0, 32)
+        const pickEl = document.createElement('span')
+        pickEl.className = 'curva-predictions__pick'
+        pickEl.textContent = String(data.prediction || data.winner || '?').slice(0, 60)
+        card.appendChild(handleEl)
+        card.appendChild(pickEl)
+        card.classList.remove('curva-predictions__sealed-card--flipping')
+        card.classList.add('curva-predictions__sealed-card--revealed')
+        // Mint flash
+        card.classList.add('curva-predictions__sealed-card--flash')
+        setTimeout(() => {
+          try { card.classList.remove('curva-predictions__sealed-card--flash') } catch { /* noop */ }
+        }, 400)
+        setTimeout(next, 500)
+      }, 250)  // half the 500ms flip duration
+    }
+    next()
+  })
+}
+
 const DEFAULT_STAKE_PRESETS = [
   { label: '1 USDT',  value: '1000000' },
   { label: '5 USDT',  value: '5000000' },
@@ -549,6 +648,119 @@ export function mountPredictionPanel({ container, curva, roomState, appVersion }
   }
 
   // ------------------------------------------------------------
+  // F3: Sealed prediction reveal ceremony (additive render block)
+  // ------------------------------------------------------------
+  function renderSealedSection(pool, status, sealedPreds) {
+    const section = document.createElement('div')
+    section.className = 'curva-predictions__sealed-section'
+
+    const sealedTitle = document.createElement('div')
+    sealedTitle.className = 'curva-predictions__section-title'
+    sealedTitle.textContent = 'Sealed predictions (' + sealedPreds.length + ')'
+    section.appendChild(sealedTitle)
+
+    // Bridge absent: show a clear degraded state
+    if (!hasSealedApi(curva)) {
+      const degraded = document.createElement('div')
+      degraded.className = 'curva-predictions__hint'
+      degraded.textContent = 'Sealed predictions require host broadcast.'
+      const disabledBtn = document.createElement('button')
+      disabledBtn.type = 'button'
+      disabledBtn.className = 'curva-predictions__btn'
+      disabledBtn.textContent = 'Reveal all predictions'
+      disabledBtn.disabled = true
+      section.appendChild(degraded)
+      section.appendChild(disabledBtn)
+      body.appendChild(section)
+      return
+    }
+
+    const { cards, list } = renderSealedCards(section, sealedPreds)
+
+    // Host-only: reveal button near kickoff (status is 'locked' or 'open' near deadline)
+    const nearKickoff = status === 'locked' ||
+      (status === 'open' && Number(pool.deadlineMs) - Date.now() < 5 * 60_000)
+
+    const revealBtn = document.createElement('button')
+    revealBtn.type = 'button'
+    revealBtn.className = 'curva-predictions__btn curva-predictions__btn--primary'
+    revealBtn.textContent = 'Reveal all predictions'
+    revealBtn.hidden = !(isHost && nearKickoff && sealedPreds.length > 0)
+
+    const revealError = document.createElement('div')
+    revealError.className = 'curva-predictions__error'
+    revealError.hidden = true
+
+    revealBtn.addEventListener('click', async () => {
+      revealError.hidden = true
+      revealError.textContent = ''
+      revealBtn.disabled = true
+      revealBtn.textContent = 'Revealing...'
+
+      // Derive the encryption key from the epoch if not stored client-side.
+      // If curva.predictions.reveal expects an encryptionKey, prompt for it.
+      // We attempt without a key first; Bare may derive it from the epoch.
+      const epoch = pool.epoch || pool.id || null
+      try {
+        await curva.predictions.reveal({ epoch, encryptionKey: pool.encryptionKey || null })
+        // On success, animate the card flips. Revealed data should come via event
+        // (curva.predictions.onRevealed) or be embedded in sealedPreds. We use
+        // whatever we have — on missing text it shows '?' which is clearly degraded
+        // but never crashes.
+        await animateReveal(cards, sealedPreds)
+
+        // After all reveals, render leaderboard if accuracy data is available.
+        if (Array.isArray(pool.sealedPredictions)) {
+          const withAccuracy = pool.sealedPredictions.filter((sp) => typeof sp.accurate === 'boolean')
+          if (withAccuracy.length > 0) {
+            const lb = document.createElement('div')
+            lb.className = 'curva-predictions__sealed-leaderboard'
+            const lbTitle = document.createElement('div')
+            lbTitle.className = 'curva-predictions__section-title'
+            lbTitle.textContent = 'Accuracy'
+            lb.appendChild(lbTitle)
+            const sorted = [...withAccuracy].sort((a, b) => (b.accurate ? 1 : 0) - (a.accurate ? 1 : 0))
+            for (const sp of sorted) {
+              const row = document.createElement('div')
+              row.className = 'curva-predictions__row'
+              const hEl = document.createElement('span')
+              hEl.className = 'curva-predictions__handle'
+              hEl.textContent = String(sp.handle || 'peer').slice(0, 32)
+              const aEl = document.createElement('span')
+              aEl.className = sp.accurate ? 'curva-predictions__won' : 'curva-predictions__stake'
+              aEl.textContent = sp.accurate ? 'correct' : 'incorrect'
+              row.appendChild(hEl)
+              row.appendChild(aEl)
+              lb.appendChild(row)
+            }
+            section.appendChild(lb)
+          }
+        }
+        revealBtn.hidden = true
+      } catch (err) {
+        revealBtn.disabled = false
+        revealBtn.textContent = 'Reveal all predictions'
+        revealError.hidden = false
+        revealError.textContent = 'Reveal failed: ' + (err?.message || 'unknown') + '. Cards remain sealed.'
+      }
+    })
+
+    section.appendChild(revealBtn)
+    section.appendChild(revealError)
+    body.appendChild(section)
+
+    // Subscribe to reveal event so cards flip automatically when host broadcasts
+    if (typeof curva.predictions.onRevealed === 'function') {
+      const off = curva.predictions.onRevealed(async (payload) => {
+        try { off() } catch { /* noop */ }
+        const revealed = Array.isArray(payload?.predictions) ? payload.predictions : sealedPreds
+        await animateReveal(cards, revealed)
+        revealBtn.hidden = true
+      })
+    }
+  }
+
+  // ------------------------------------------------------------
   // Top-level render orchestrator
   // ------------------------------------------------------------
   function render() {
@@ -595,6 +807,14 @@ export function mountPredictionPanel({ container, curva, roomState, appVersion }
     tweenStakedLine(pool)
     renderEntryChips(pool)
     renderResult(pool)
+
+    // F3: Sealed prediction ceremony. Shown when the pool has sealed entries.
+    // If the createSealed API is not bridged, we show a graceful hint only.
+    const sealedPreds = Array.isArray(pool.sealedPredictions) ? pool.sealedPredictions : []
+    if (sealedPreds.length > 0 || hasSealedApi(curva)) {
+      renderSealedSection(pool, status, sealedPreds)
+    }
+
     renderEntriesList(pool)
 
     if (isHost) {

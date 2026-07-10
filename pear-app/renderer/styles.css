@@ -66,6 +66,56 @@
   --curva-live-minute-bg: rgba(200, 16, 46, 0.9);
   --curva-live-minute-color: #ffffff;
   --curva-live-minute-border: #c8102e;
+
+  /* =========================================================================
+   * Semifinal polish pass (2026-07): Linear/Vercel discipline
+   * -------------------------------------------------------------------------
+   * Additive tokens for the wave 2-4 UI systems. Nothing here renames or
+   * overrides existing tokens. Philosophy:
+   *  - 4px spacing grid, exposed as --curva-space-*.
+   *  - Motion: 150ms for local feedback, 300ms for state transitions.
+   *  - Focus: 2px outset outline in accent red, honored by every interactive
+   *    element unless the element already ships its own box-shadow ring.
+   *  - Typography: three sizes for numeric data (xs/sm/base) plus two for
+   *    headings (lg/xl). Mono for numbers, sans (Urbanist) for prose.
+   * ======================================================================= */
+
+  /* Spacing scale (aliases match the existing --sp-* names but read
+     more clearly in the newer panels). */
+  --curva-space-1: 4px;
+  --curva-space-2: 8px;
+  --curva-space-3: 12px;
+  --curva-space-4: 16px;
+  --curva-space-5: 20px;
+  --curva-space-6: 24px;
+  --curva-space-8: 32px;
+
+  /* Motion */
+  --curva-transition-fast: 150ms ease-out;
+  --curva-transition-med:  300ms ease-out;
+
+  /* Radii */
+  --curva-radius-sm: 4px;
+  --curva-radius-md: 8px;
+  --curva-radius-lg: 12px;
+
+  /* Type scale (data + labels) */
+  --curva-text-xs:   11px;
+  --curva-text-sm:   13px;
+  --curva-text-base: 15px;
+  --curva-text-lg:   18px;
+  --curva-text-xl:   24px;
+
+  /* Focus outline (2px outset, accent red, 2px offset). Applied by the
+     global :focus-visible rule below; individual components may still
+     opt into the box-shadow ring style if that's already established. */
+  --curva-focus-outline: 2px solid var(--curva-accent);
+
+  /* Alias so the newer panels can reference an elevated bg without
+     knowing whether the older or newer palette applies. --curva-fg /
+     --curva-fg-muted are declared in the wave-9 :root block further
+     down; do not redeclare here. */
+  --curva-bg-elevated: var(--curva-panel);
 }
 
 * {
@@ -6256,4 +6306,1289 @@ h2::after {
   padding-left: 14px;
   font-family: var(--curva-mono, 'JetBrains Mono', ui-monospace, monospace);
   font-size: 12px;
+}
+
+/* =========================================================================
+   Wave 2/3 gap features: F1 diarize, F2 voice enrollment, F3 sealed reveal
+   Additive. No existing rules overridden.
+   ========================================================================= */
+
+/* F1: Diarization speaker badge grid ------------------------------------ */
+
+.curva-commentary__diarize-btn {
+  margin-left: auto;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+  font-family: var(--curva-sans);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--curva-muted);
+  border: 1px solid var(--curva-border);
+  cursor: pointer;
+  transition: background 120ms ease-out, border-color 120ms ease-out;
+}
+
+.curva-commentary__diarize-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.15);
+}
+
+.curva-diarize__sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-top: 1px solid var(--curva-border);
+  background: rgba(255, 255, 255, 0.01);
+}
+
+.curva-diarize__label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--curva-muted);
+  font-family: var(--curva-sans);
+}
+
+.curva-diarize__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.curva-diarize__badge {
+  display: grid;
+  grid-template-columns: 8px auto 1fr;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-2);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.04);
+  font-size: 12px;
+  transition: border-color 200ms ease-out;
+}
+
+.curva-diarize__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.curva-diarize__id {
+  font-family: var(--curva-mono);
+  font-size: 11px;
+  color: var(--curva-text);
+}
+
+.curva-diarize__time {
+  text-align: right;
+  font-family: var(--curva-mono);
+  font-size: 10px;
+  color: var(--curva-muted);
+}
+
+.curva-diarize__preview {
+  grid-column: 2 / -1;
+  font-family: var(--curva-mono);
+  font-size: 10px;
+  color: var(--curva-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-style: italic;
+  margin-top: 2px;
+}
+
+@keyframes curva-diarize-pulse {
+  0%   { border-color: var(--curva-mint); background: rgba(124, 227, 193, 0.08); }
+  100% { border-color: rgba(255, 255, 255, 0.04); background: rgba(255, 255, 255, 0.03); }
+}
+
+.curva-diarize__badge--pulse {
+  animation: curva-diarize-pulse 700ms ease-out forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .curva-diarize__badge--pulse { animation: none; }
+}
+
+/* F2: Voice enrollment modal -------------------------------------------- */
+
+.curva-voice-enroll {
+  position: fixed;
+  inset: 0;
+  z-index: 500;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.curva-voice-enroll__backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.72);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+
+.curva-voice-enroll__card {
+  position: relative;
+  z-index: 501;
+  background: var(--curva-panel);
+  border: 1px solid var(--curva-border);
+  border-radius: 12px;
+  padding: var(--sp-8) var(--sp-6);
+  width: 420px;
+  max-width: 94vw;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-4);
+}
+
+.curva-voice-enroll__close {
+  position: absolute;
+  top: var(--sp-4);
+  right: var(--sp-4);
+  background: transparent;
+  border: none;
+  color: var(--curva-muted);
+  font-size: 14px;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+  line-height: 1;
+}
+.curva-voice-enroll__close:hover { color: var(--curva-text); }
+
+.curva-voice-enroll__title {
+  font-family: var(--curva-display);
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--curva-text);
+  text-align: center;
+  letter-spacing: 0.01em;
+}
+
+.curva-voice-enroll__explainer {
+  font-size: 13px;
+  color: var(--curva-muted);
+  text-align: center;
+  line-height: 1.5;
+  margin: 0;
+  max-width: 320px;
+}
+
+.curva-voice-enroll__waveform {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 48px;
+  padding: 0 var(--sp-2);
+}
+
+.curva-voice-enroll__bar {
+  width: 6px;
+  min-height: 4px;
+  background: var(--curva-mint);
+  border-radius: 3px;
+  opacity: 0.7;
+  transition: height 60ms ease-out;
+}
+
+.curva-voice-enroll__timer {
+  font-family: var(--curva-mono);
+  font-size: 32px;
+  color: var(--curva-text);
+  letter-spacing: 0.04em;
+}
+
+.curva-voice-enroll__record {
+  width: 72px;
+  height: 72px;
+  border-radius: 50%;
+  background: var(--curva-primary-dim);
+  border: 2px solid var(--curva-primary-border);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 150ms ease-out, border-color 150ms ease-out, transform 80ms ease-out;
+}
+
+.curva-voice-enroll__record:hover {
+  background: var(--curva-accent);
+  border-color: var(--curva-accent);
+}
+
+.curva-voice-enroll__record:active { transform: scale(0.96); }
+
+.curva-voice-enroll__record-dot {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--curva-accent);
+  transition: border-radius 200ms ease-out;
+}
+
+@keyframes curva-enroll-cadence {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50%       { transform: scale(1.12); opacity: 0.8; }
+}
+
+.curva-voice-enroll__record--active {
+  border-color: var(--curva-accent);
+  background: var(--curva-accent-dim);
+  animation: curva-enroll-cadence 1s ease-in-out infinite;
+}
+
+.curva-voice-enroll__record--active .curva-voice-enroll__record-dot {
+  border-radius: 4px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .curva-voice-enroll__record--active { animation: none; }
+}
+
+.curva-voice-enroll__actions {
+  display: flex;
+  gap: var(--sp-3);
+  align-items: center;
+}
+
+.curva-voice-enroll__btn {
+  padding: 8px 18px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  font-family: var(--curva-sans);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--curva-text);
+  border: 1px solid var(--curva-border);
+  cursor: pointer;
+  transition: background 120ms ease-out, border-color 120ms ease-out;
+}
+
+.curva-voice-enroll__btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.15);
+}
+
+.curva-voice-enroll__btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.curva-voice-enroll__btn--primary {
+  background: var(--curva-primary-dim);
+  border-color: var(--curva-primary-border);
+  color: var(--curva-secondary);
+}
+
+.curva-voice-enroll__btn--primary:hover:not(:disabled) {
+  background: var(--curva-accent);
+  border-color: var(--curva-accent);
+  color: #fff;
+}
+
+.curva-voice-enroll__status {
+  font-size: 12px;
+  color: var(--curva-muted);
+  text-align: center;
+  min-height: 16px;
+}
+
+.curva-voice-enroll__status--error {
+  color: var(--curva-bad);
+}
+
+/* F3: Sealed prediction reveal ceremony --------------------------------- */
+
+.curva-predictions__sealed-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--curva-border);
+  margin-top: var(--sp-2);
+}
+
+.curva-predictions__sealed-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.curva-predictions__sealed-card {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: 6px;
+  border: 1px solid rgba(200, 16, 46, 0.2);
+  background: rgba(200, 16, 46, 0.04);
+  font-size: 12px;
+  transition: border-color 300ms ease-out, background 300ms ease-out;
+}
+
+.curva-predictions__sealed-lock {
+  font-family: var(--curva-mono);
+  font-size: 10px;
+  color: var(--curva-accent);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  flex-shrink: 0;
+}
+
+.curva-predictions__sealed-hint {
+  font-size: 11px;
+  color: var(--curva-muted);
+  margin-left: auto;
+}
+
+@keyframes curva-sealed-flip {
+  0%   { transform: rotateY(0deg); }
+  50%  { transform: rotateY(90deg); }
+  100% { transform: rotateY(0deg); }
+}
+
+.curva-predictions__sealed-card--flipping {
+  animation: curva-sealed-flip 500ms ease-in-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .curva-predictions__sealed-card--flipping { animation: none; }
+}
+
+.curva-predictions__sealed-card--revealed {
+  border-color: rgba(124, 227, 193, 0.35);
+  background: rgba(124, 227, 193, 0.04);
+}
+
+@keyframes curva-sealed-flash {
+  0%   { background: rgba(124, 227, 193, 0.18); }
+  100% { background: rgba(124, 227, 193, 0.04); }
+}
+
+.curva-predictions__sealed-card--flash {
+  animation: curva-sealed-flash 400ms ease-out forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .curva-predictions__sealed-card--flash { animation: none; }
+}
+
+.curva-predictions__sealed-leaderboard {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  padding-top: var(--sp-2);
+  border-top: 1px solid var(--curva-border);
+}
+
+/* =========================================================================
+ * F1: Chat History Scrubber
+ * ========================================================================= */
+
+.curva-chat__header-btn {
+  background: transparent;
+  color: var(--curva-muted);
+  border: 1px solid var(--curva-border);
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  font-family: var(--curva-mono);
+  letter-spacing: 0.06em;
+  cursor: pointer;
+  transition: color 120ms ease-out, border-color 120ms ease-out, background 120ms ease-out;
+  text-transform: uppercase;
+}
+
+.curva-chat__header-btn:hover {
+  color: var(--curva-text);
+  border-color: rgba(255, 255, 255, 0.15);
+}
+
+.curva-chat__header-btn--active {
+  color: var(--curva-accent);
+  border-color: var(--curva-primary-border);
+  background: var(--curva-primary-dim);
+}
+
+.curva-chat__header-btn:focus-visible {
+  outline: 2px solid var(--curva-accent);
+  outline-offset: 2px;
+}
+
+.curva-chat__scrubber {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--curva-border);
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.curva-chat__scrubber-slider {
+  flex: 1 1 auto;
+  accent-color: var(--curva-accent);
+  cursor: pointer;
+  height: 3px;
+}
+
+.curva-chat__scrubber-label {
+  font-family: var(--curva-mono);
+  font-size: 10px;
+  color: var(--curva-muted);
+  white-space: nowrap;
+  min-width: 60px;
+  text-align: right;
+}
+
+.curva-chat__scrubber-live {
+  background: var(--curva-accent);
+  color: #fff;
+  border: none;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  font-family: var(--curva-mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: background 120ms ease-out;
+  white-space: nowrap;
+}
+
+.curva-chat__scrubber-live:hover {
+  background: #a8102a;
+}
+
+.curva-chat__history-banner {
+  padding: 5px 12px;
+  font-family: var(--curva-mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--curva-accent);
+  background: rgba(200, 16, 46, 0.06);
+  border-bottom: 1px solid rgba(200, 16, 46, 0.15);
+  text-transform: uppercase;
+}
+
+.curva-chat__list--history .curva-chat__msg {
+  opacity: 0.82;
+}
+
+.curva-chat__list--history .curva-chat__msg--system {
+  opacity: 0.7;
+}
+
+/* =========================================================================
+ * F2: system:goal-card pill
+ * ========================================================================= */
+
+.curva-chat__msg--goal-card {
+  border-left: 3px solid #f59e0b;
+  background: rgba(245, 158, 11, 0.04);
+  padding: 8px 14px;
+  position: relative;
+}
+
+.curva-chat__goal-card-inner {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 10px;
+  position: relative;
+}
+
+.curva-chat__goal-card-tag {
+  position: absolute;
+  top: 0;
+  right: 0;
+  font-size: 9px;
+  font-weight: 700;
+  font-family: var(--curva-sans);
+  letter-spacing: 0.12em;
+  color: #f59e0b;
+  background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  border-radius: 3px;
+  padding: 2px 5px;
+  text-transform: uppercase;
+}
+
+.curva-chat__goal-card-minute {
+  font-family: var(--curva-mono);
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--curva-accent);
+  line-height: 1;
+}
+
+.curva-chat__goal-card-scorer {
+  font-family: var(--curva-sans);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--curva-text);
+  text-transform: uppercase;
+}
+
+.curva-chat__goal-card-team {
+  font-family: var(--curva-sans);
+  font-size: 10px;
+  font-variant: small-caps;
+  letter-spacing: 0.06em;
+  color: var(--curva-muted);
+  text-align: right;
+}
+
+.curva-chat__goal-card-assist {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--curva-muted);
+  font-family: var(--curva-sans);
+  grid-column: 1 / -1;
+}
+
+.curva-chat__goal-card-assist-label {
+  font-style: italic;
+  margin-right: 2px;
+}
+
+/* =========================================================================
+ * F3: AskFrameOverlay
+ * ========================================================================= */
+
+.curva-ask-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 500;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.curva-ask-overlay[hidden] {
+  display: none;
+}
+
+.curva-ask-overlay__backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+}
+
+.curva-ask-overlay__card {
+  position: relative;
+  z-index: 501;
+  background: var(--curva-panel);
+  border: 1px solid var(--curva-border);
+  border-radius: 10px;
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 480px;
+  max-width: 92vw;
+}
+
+.curva-ask-overlay__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.curva-ask-overlay__title {
+  font-family: var(--curva-sans);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--curva-muted);
+}
+
+.curva-ask-overlay__close {
+  background: transparent;
+  border: 1px solid var(--curva-border);
+  color: var(--curva-muted);
+  padding: 3px 10px;
+  border-radius: 4px;
+  font-size: 11px;
+  cursor: pointer;
+  font-family: var(--curva-sans);
+  transition: color 120ms ease-out;
+}
+
+.curva-ask-overlay__close:hover {
+  color: var(--curva-text);
+}
+
+.curva-ask-overlay__close:focus-visible {
+  outline: 2px solid var(--curva-accent);
+  outline-offset: 2px;
+}
+
+.curva-ask-overlay__frame-status {
+  font-family: var(--curva-mono);
+  font-size: 10px;
+  color: var(--curva-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.curva-ask-overlay__input-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.curva-ask-overlay__question {
+  background: var(--curva-surface-2, #1c1c1c);
+  border: 1px solid var(--curva-web-border);
+  color: var(--curva-text);
+  padding: 9px 12px;
+  border-radius: 8px;
+  font-size: 14px;
+  font-family: var(--curva-sans);
+  transition: border-color 120ms ease-out;
+}
+
+.curva-ask-overlay__question::placeholder {
+  color: var(--curva-muted-2, rgba(138, 138, 138, 0.5));
+}
+
+.curva-ask-overlay__question:focus {
+  outline: none;
+  border-color: var(--curva-primary-border);
+}
+
+.curva-ask-overlay__charcount {
+  font-family: var(--curva-mono);
+  font-size: 10px;
+  color: var(--curva-muted);
+  white-space: nowrap;
+}
+
+.curva-ask-overlay__charcount--over {
+  color: var(--curva-bad);
+}
+
+.curva-ask-overlay__ask-btn {
+  background: var(--curva-accent);
+  color: #fff;
+  border: 1px solid var(--curva-primary-border);
+  border-radius: 8px;
+  padding: 9px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  font-family: var(--curva-sans);
+  cursor: pointer;
+  transition: background 120ms ease-out;
+  white-space: nowrap;
+}
+
+.curva-ask-overlay__ask-btn:hover:not(:disabled) {
+  background: #a8102a;
+}
+
+.curva-ask-overlay__ask-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.curva-ask-overlay__ask-btn:focus-visible {
+  outline: 2px solid var(--curva-accent);
+  outline-offset: 2px;
+}
+
+.curva-ask-overlay__answer {
+  border-top: 1px solid var(--curva-border);
+  padding-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.curva-ask-overlay__answer[hidden] {
+  display: none;
+}
+
+.curva-ask-overlay__answer-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--curva-muted);
+  font-family: var(--curva-sans);
+  font-weight: 600;
+}
+
+.curva-ask-overlay__answer-text {
+  font-size: 14px;
+  color: var(--curva-text);
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  max-height: 220px;
+  overflow-y: auto;
+  font-family: var(--curva-sans);
+}
+
+.curva-ask-overlay__copy-btn {
+  align-self: flex-start;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--curva-text);
+  border: 1px solid var(--curva-web-border);
+  padding: 6px 14px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  font-family: var(--curva-sans);
+  cursor: pointer;
+  transition: background 120ms ease-out;
+}
+
+.curva-ask-overlay__copy-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.curva-ask-overlay__copy-btn[hidden] {
+  display: none;
+}
+
+.curva-ask-overlay__copy-btn:focus-visible {
+  outline: 2px solid var(--curva-accent);
+  outline-offset: 2px;
+}
+
+/* =========================================================================
+ * F4: Semantic Search
+ * ========================================================================= */
+
+.curva-chat__search-bar {
+  display: flex;
+  flex-direction: column;
+  border-bottom: 1px solid var(--curva-border);
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.curva-chat__search-bar[hidden] {
+  display: none;
+}
+
+.curva-chat__search-input {
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--curva-border);
+  color: var(--curva-text);
+  padding: 9px 14px;
+  font-size: 13px;
+  font-family: var(--curva-sans);
+  width: 100%;
+  outline: none;
+  transition: border-color 120ms ease-out;
+}
+
+.curva-chat__search-input::placeholder {
+  color: var(--curva-muted-2, rgba(138, 138, 138, 0.5));
+}
+
+.curva-chat__search-input:focus {
+  border-bottom-color: var(--curva-primary-border);
+}
+
+.curva-chat__search-results {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+.curva-chat__search-results[hidden] {
+  display: none;
+}
+
+.curva-chat__search-hit {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+}
+
+.curva-chat__search-hit:last-child {
+  border-bottom: none;
+}
+
+.curva-chat__search-hit-id {
+  font-family: var(--curva-mono);
+  font-size: 10px;
+  color: var(--curva-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  margin-right: 8px;
+}
+
+.curva-chat__search-jump {
+  background: transparent;
+  color: var(--curva-accent);
+  border: 1px solid var(--curva-primary-border);
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  font-family: var(--curva-mono);
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 120ms ease-out;
+}
+
+.curva-chat__search-jump:hover {
+  background: var(--curva-primary-dim);
+}
+
+.curva-chat__search-jump:focus-visible {
+  outline: 2px solid var(--curva-accent);
+  outline-offset: 2px;
+}
+
+.curva-chat__search-empty {
+  padding: 8px 14px;
+  font-size: 11px;
+  color: var(--curva-muted);
+  font-style: italic;
+  font-family: var(--curva-sans);
+}
+
+/* F4: search-highlight flash on a jumped-to message */
+.curva-chat__msg--search-highlight {
+  background: rgba(200, 16, 46, 0.12);
+  transition: background 300ms ease-out;
+}
+
+/* =========================================================================
+ * SEMIFINAL POLISH PASS (2026-07)
+ *
+ * Additive rules. No existing declarations are edited above this comment.
+ * The wave 2-4 panels (DelegatedInference, Diagnostics, VoiceCoach,
+ * FrameAnalyze, AskFrame, VoiceEnrollment, Prediction reveal, RoomHeader
+ * voice-clone, chat scrubber/search/goal-card, commentary diarization
+ * grid) all shipped independently. This block harmonizes them:
+ *   - Small-caps micro-labels
+ *   - Consistent 1px borders, subtle rgba tints, no drop shadows or gradients
+ *   - Motion capped at 500ms, ease-out only, disabled under prefers-reduced
+ *   - Focus outline: 2px solid accent, 2px offset, on every interactive
+ *     element unless it already owns a box-shadow ring
+ *   - AA-passable muted text
+ *   - Loading states use pulsing-dot pattern (no spinners)
+ *   - Error states use accent-red left-border + mono
+ * ======================================================================= */
+
+/* -- Diagnostics tabs: small-caps + underline for active ------------------ */
+.curva-diagnostics-tabs {
+  gap: var(--curva-space-3);
+  padding-bottom: 0;
+}
+.curva-diagnostics-tab {
+  padding: 6px 2px;
+  border: none;
+  border-bottom: 1px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  font-variant: small-caps;
+  letter-spacing: 0.08em;
+  font-size: var(--curva-text-xs);
+  font-weight: 600;
+  color: var(--curva-fg-muted);
+  transition: color var(--curva-transition-fast),
+              border-color var(--curva-transition-fast);
+}
+.curva-diagnostics-tab:hover {
+  color: var(--curva-fg);
+  border-bottom-color: var(--curva-border-strong, rgba(255, 255, 255, 0.12));
+}
+.curva-diagnostics-tab.is-active {
+  color: var(--curva-fg);
+  background: transparent;
+  border-bottom-color: var(--curva-accent);
+}
+.curva-diagnostics-tab:focus-visible {
+  outline: var(--curva-focus-outline);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+.curva-diagnostics-status,
+.curva-diagnostics-source {
+  font-size: var(--curva-text-xs);
+  letter-spacing: 0.04em;
+}
+.curva-diagnostics-empty {
+  min-height: 60px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--curva-fg-muted);
+  font-size: var(--curva-text-xs);
+  font-style: italic;
+  text-align: center;
+  padding: var(--curva-space-4);
+}
+
+/* -- Voice Coach: weighty push-to-talk with mint pulse ------------------- */
+.curva-voice-coach__ptt {
+  padding: 10px 16px;
+  border-radius: var(--curva-radius-md);
+  transition: background var(--curva-transition-fast),
+              border-color var(--curva-transition-fast),
+              transform 80ms ease-out;
+  letter-spacing: 0.02em;
+}
+.curva-voice-coach__ptt:active:not(:disabled) {
+  transform: translateY(1px);
+}
+.curva-voice-coach__ptt:focus-visible {
+  outline: var(--curva-focus-outline);
+  outline-offset: 2px;
+}
+@keyframes curva-voice-coach-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(124, 227, 193, 0.30); }
+  50%      { box-shadow: 0 0 0 6px rgba(124, 227, 193, 0);    }
+}
+.curva-voice-coach__ptt.is-active,
+.curva-voice-coach__ptt.is-speaking {
+  border-color: var(--curva-mint);
+  background: rgba(124, 227, 193, 0.08);
+  color: var(--curva-fg);
+  animation: curva-voice-coach-pulse 1.4s ease-out infinite;
+}
+.curva-voice-coach__transcript {
+  font-family: var(--curva-mono);
+  font-size: var(--curva-text-xs);
+  letter-spacing: 0.01em;
+  font-style: normal;
+  padding: var(--curva-space-2) var(--curva-space-3);
+  background: rgba(255, 255, 255, 0.02);
+  border-left: 2px solid var(--curva-border);
+  border-radius: var(--curva-radius-sm);
+}
+.curva-voice-coach__transcript:empty::before {
+  content: 'listening for your question…';
+  color: var(--curva-fg-muted);
+  font-style: italic;
+}
+.curva-voice-coach__answer:empty::before {
+  content: 'no answer yet.';
+  color: var(--curva-fg-muted);
+  font-size: var(--curva-text-xs);
+  font-style: italic;
+}
+@media (prefers-reduced-motion: reduce) {
+  .curva-voice-coach__ptt.is-active,
+  .curva-voice-coach__ptt.is-speaking { animation: none; }
+}
+
+/* -- Frame Analyze: unify with Delegated panel look --------------------- */
+.curva-frame-analyze__header {
+  font-variant: small-caps;
+  letter-spacing: 0.08em;
+  font-size: var(--curva-text-sm);
+}
+.curva-frame-analyze__btn {
+  padding: 7px 14px;
+  border-radius: var(--curva-radius-md);
+  font-size: var(--curva-text-sm);
+  font-weight: 500;
+  transition: background var(--curva-transition-fast),
+              border-color var(--curva-transition-fast);
+}
+.curva-frame-analyze__btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: var(--curva-accent);
+}
+.curva-frame-analyze__btn:focus-visible {
+  outline: var(--curva-focus-outline);
+  outline-offset: 2px;
+}
+.curva-frame-analyze__caption {
+  font-family: var(--curva-sans);
+  line-height: 1.5;
+}
+.curva-frame-analyze__blocks:empty::before {
+  content: 'no ocr results yet.';
+  display: block;
+  padding: var(--curva-space-3);
+  text-align: center;
+  color: var(--curva-fg-muted);
+  font-size: var(--curva-text-xs);
+  font-style: italic;
+}
+.curva-frame-analyze__status {
+  font-family: var(--curva-mono);
+  letter-spacing: 0.02em;
+}
+
+/* -- Delegated: use the polished token vocabulary too ------------------- */
+.curva-delegated__title {
+  font-variant: small-caps;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+}
+.curva-delegated__test:focus-visible,
+.curva-delegated__allow:focus-visible,
+.curva-delegated__block:focus-visible,
+.curva-delegated__save:focus-visible,
+.curva-delegated__apply:focus-visible {
+  outline: var(--curva-focus-outline);
+  outline-offset: 2px;
+}
+.curva-delegated__empty {
+  padding: var(--curva-space-6) var(--curva-space-4);
+  border: 1px dashed var(--curva-border);
+  border-radius: var(--curva-radius-md);
+  background: transparent;
+}
+.curva-delegated__error {
+  border-left: 2px solid var(--curva-accent);
+  padding: var(--curva-space-2) var(--curva-space-3);
+  background: rgba(200, 16, 46, 0.05);
+  font-family: var(--curva-mono);
+  font-size: var(--curva-text-xs);
+  color: var(--curva-fg);
+  border-radius: 0 var(--curva-radius-sm) var(--curva-radius-sm) 0;
+  margin-top: var(--curva-space-2);
+}
+
+/* -- Ask-Frame overlay: 12% black backdrop, mono answer ---------------- */
+.curva-ask-overlay__backdrop {
+  background: rgba(0, 0, 0, 0.12);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+.curva-ask-overlay__card {
+  border-radius: var(--curva-radius-lg);
+  padding: var(--curva-space-5) var(--curva-space-5);
+  gap: var(--curva-space-3);
+}
+.curva-ask-overlay__title {
+  font-variant: small-caps;
+  font-size: var(--curva-text-xs);
+  letter-spacing: 0.1em;
+}
+.curva-ask-overlay__answer-text {
+  font-family: var(--curva-mono);
+  font-size: var(--curva-text-sm);
+  line-height: 1.55;
+  letter-spacing: 0.005em;
+}
+
+/* -- Voice Enrollment: countdown as mono numerics ---------------------- */
+.curva-voice-enroll__timer {
+  font-variant-numeric: tabular-nums;
+  color: var(--curva-fg);
+  letter-spacing: 0.06em;
+}
+.curva-voice-enroll__title {
+  font-family: var(--curva-sans);
+  font-size: var(--curva-text-lg);
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+.curva-voice-enroll__btn:focus-visible,
+.curva-voice-enroll__record:focus-visible,
+.curva-voice-enroll__close:focus-visible {
+  outline: var(--curva-focus-outline);
+  outline-offset: 3px;
+}
+.curva-voice-enroll__status--error {
+  border-left: 2px solid var(--curva-accent);
+  padding: var(--curva-space-1) var(--curva-space-2);
+  background: rgba(200, 16, 46, 0.05);
+  font-family: var(--curva-mono);
+}
+
+/* -- Prediction reveal ceremony: cleaner flip + mint flash ------------- */
+.curva-predictions__sealed-card {
+  transform-style: preserve-3d;
+  backface-visibility: hidden;
+  transition: border-color var(--curva-transition-med),
+              background var(--curva-transition-med);
+}
+.curva-predictions__sealed-card--flipping {
+  animation-duration: 500ms;
+  animation-timing-function: ease-out;
+}
+.curva-predictions__sealed-lock {
+  font-variant: small-caps;
+  letter-spacing: 0.1em;
+}
+.curva-predictions__sealed-section > *:first-child {
+  font-variant: small-caps;
+  letter-spacing: 0.08em;
+  font-size: var(--curva-text-xs);
+  color: var(--curva-fg-muted);
+}
+
+/* -- RoomHeader voice-clone button: subtle mint accent ----------------- */
+.curva-header__btn--clone {
+  color: var(--curva-mint);
+  border-color: rgba(124, 227, 193, 0.35);
+  background: rgba(124, 227, 193, 0.06);
+  transition: background var(--curva-transition-fast),
+              border-color var(--curva-transition-fast);
+}
+.curva-header__btn--clone:hover {
+  background: rgba(124, 227, 193, 0.12) !important;
+  border-color: var(--curva-mint) !important;
+  color: var(--curva-mint) !important;
+}
+.curva-header__btn--clone:focus-visible {
+  outline: 2px solid var(--curva-mint);
+  outline-offset: 2px;
+  box-shadow: none !important;
+}
+
+/* -- Chat scrubber: thinner track, refined thumb ----------------------- */
+.curva-chat__scrubber-slider {
+  height: 2px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 999px;
+}
+.curva-chat__scrubber-slider:focus-visible {
+  outline: var(--curva-focus-outline);
+  outline-offset: 4px;
+}
+.curva-chat__scrubber-live:focus-visible {
+  outline: var(--curva-focus-outline);
+  outline-offset: 2px;
+}
+
+/* -- Commentary streaming badges: normalize weights -------------------- */
+.curva-commentary__tps-badge {
+  color: var(--curva-mint);
+  background: rgba(124, 227, 193, 0.08);
+  border-color: rgba(124, 227, 193, 0.30);
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+
+/* -- Diarization grid: focus + hover polish ---------------------------- */
+.curva-diarize__badge {
+  transition: border-color var(--curva-transition-med),
+              background var(--curva-transition-fast);
+}
+.curva-diarize__badge:hover {
+  border-color: var(--curva-border-strong, rgba(255, 255, 255, 0.12));
+}
+.curva-diarize__label {
+  font-variant: small-caps;
+  letter-spacing: 0.08em;
+}
+
+/* -- Semantic search: chip-shaped results ------------------------------ */
+.curva-chat__search-hit {
+  transition: background var(--curva-transition-fast);
+}
+.curva-chat__search-hit:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+/* Semantic search input is borderless-expanding; keep the accent underline
+   on focus AND ensure the universal focus outline still applies. */
+.curva-chat__search-input:focus-visible {
+  outline: var(--curva-focus-outline);
+  outline-offset: -2px;
+}
+
+/* -- Universal focus fallback -----------------------------------------
+   Every button/link/input/select/textarea/slider gets an accent-red
+   outline on keyboard focus, unless a component-scoped rule already
+   claims :focus-visible (existing rules layer above thanks to source
+   order). No `outline: none` without replacement. */
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+[role="button"]:focus-visible,
+[role="tab"]:focus-visible,
+[tabindex="0"]:focus-visible {
+  outline: var(--curva-focus-outline);
+  outline-offset: 2px;
+}
+
+/* -- Loading dot pattern (replaces spinners) ---------------------------
+   Attach `.curva-loading-dots` to a container; it renders three pulsing
+   dots. Consumers can drop existing spinner markup and use this. */
+.curva-loading-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 var(--curva-space-1);
+}
+.curva-loading-dots::before,
+.curva-loading-dots::after,
+.curva-loading-dots > span {
+  content: '';
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--curva-fg-muted);
+  animation: curva-loading-dot 1.2s ease-in-out infinite;
+}
+.curva-loading-dots::after   { animation-delay: 0.2s; }
+.curva-loading-dots > span   { animation-delay: 0.4s; }
+@keyframes curva-loading-dot {
+  0%, 80%, 100% { opacity: 0.25; transform: scale(0.85); }
+  40%           { opacity: 1;    transform: scale(1);    }
+}
+@media (prefers-reduced-motion: reduce) {
+  .curva-loading-dots::before,
+  .curva-loading-dots::after,
+  .curva-loading-dots > span { animation: none; opacity: 0.6; }
+}
+
+/* -- Utility: empty-state and error-state classes any panel can adopt -- */
+.curva-empty-state {
+  padding: var(--curva-space-6) var(--curva-space-4);
+  text-align: center;
+  color: var(--curva-fg-muted);
+  font-size: var(--curva-text-xs);
+  font-style: italic;
+  border: 1px dashed var(--curva-border);
+  border-radius: var(--curva-radius-md);
+  background: transparent;
+}
+.curva-error-state {
+  border-left: 2px solid var(--curva-accent);
+  padding: var(--curva-space-2) var(--curva-space-3);
+  background: rgba(200, 16, 46, 0.05);
+  font-family: var(--curva-mono);
+  font-size: var(--curva-text-xs);
+  color: var(--curva-fg);
+  border-radius: 0 var(--curva-radius-sm) var(--curva-radius-sm) 0;
+}
+
+/* -- Reduced motion catch-all for the new panels ----------------------- */
+@media (prefers-reduced-motion: reduce) {
+  .curva-diagnostics-tab,
+  .curva-voice-coach__ptt,
+  .curva-frame-analyze__btn,
+  .curva-header__btn--clone,
+  .curva-predictions__sealed-card,
+  .curva-diarize__badge,
+  .curva-chat__search-hit {
+    transition: none !important;
+  }
 }

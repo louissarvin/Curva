@@ -28,6 +28,7 @@ import { mountIdentityWizard } from './components/IdentityWizard.js'
 import { mountVoiceCoachPanel, isVoiceCoachEnabled } from './components/VoiceCoachPanel.js'
 import { mountFrameAnalyzePanel } from './components/FrameAnalyzePanel.js'
 import { mountDiagnosticsPanel, isDiagnosticsEnabled } from './components/DiagnosticsPanel.js'
+import { mountAskFrameOverlay } from './components/AskFrameOverlay.js'
 
 const bridge = window.bridge
 const curva = window.curva
@@ -236,6 +237,9 @@ let diagnosticsPanel = null
 let diagnosticsPanelHost = null
 // C2: TacticalOverlay. Only mounted when TACTICAL_ENABLED.
 let tacticalOverlay = null
+// F3: AskFrameOverlay. Mounted globally on body (not per-room) so the ?
+// hotkey works from any context. Re-uses the current videoPlayer instance.
+let askFrameOverlay = null
 
 // Tier 4 R2: IdentityWizard gate.
 // Mount the wizard over the whole UI before the room browser is shown.
@@ -677,6 +681,17 @@ function destroyRoom() {
 // Activity feed is always visible (independent of room state).
 activityFeed = safeMount('ActivityFeed', () => mountActivityFeed({ container: els.feed, curva }), els.feed)
 
+// F3: AskFrameOverlay. Global singleton on document.body.
+// getVideoPlayer closure gives the overlay access to the current room's
+// videoPlayer without holding a stale reference across room transitions.
+if (curva.askFrame) {
+  askFrameOverlay = safeMount('AskFrameOverlay', () => mountAskFrameOverlay({
+    container: document.body,
+    curva,
+    getVideoPlayer: () => videoPlayer
+  }), null)
+}
+
 // Passcode prompt: shows when the Bare worker signals it needs a passcode
 // to initialize the wallet. Mount lazily, unmount on wallet:ready.
 let passcodePrompt = null
@@ -741,6 +756,30 @@ isDiagnosticsEnabled(curva).then((enabled) => {
 }).catch((err) => {
   logEvent('warn', 'diagnostics flag check failed: ' + (err?.message || 'unknown'))
 })
+
+// Wave 3 F1: log streaming TTS lifecycle so DiagnosticsPanel picks them up.
+// We intentionally do NOT decode + play PCM here — the commentator already
+// emits the PCM via the announcer's `announcer:audio` path where relevant.
+// Every subscriber is best-effort (no throw) so an older worker without the
+// event surface degrades to a silent no-op.
+try {
+  curva.commentator?.onTtsChunk?.((payload) => {
+    if (!payload) return
+    const bytes = payload && payload.pcm ? payload.pcm.length : 0
+    logEvent('info', 'commentator tts-chunk bytes=' + bytes)
+  })
+  curva.commentator?.onTtsDone?.(() => {
+    logEvent('info', 'commentator tts-done')
+  })
+  curva.commentator?.onTtsError?.((payload) => {
+    logEvent('warn', 'commentator tts-error: ' + (payload?.message || 'unknown'))
+  })
+  curva.onAnnouncerTtsFirstChunk?.((payload) => {
+    logEvent('info', 'announcer tts-first-chunk latencyMs=' + (payload?.latencyMs ?? 'n/a'))
+  })
+} catch (err) {
+  logEvent('warn', 'wave3 tts subscribe failed: ' + (err?.message || 'unknown'))
+}
 
 // Task 9: deep-link auto-join. Electron main parses `curva://room/<slug>`
 // and forwards to the renderer via `curva:deeplink:join`. We call
