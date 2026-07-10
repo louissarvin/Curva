@@ -1146,6 +1146,9 @@ function isValidMessage(v) {
   // allowed for both since they represent local on-device model output.
   if (v.type === 'system:ask-frame-answer') return isValidSystemAskFrameAnswer(v)
   if (v.type === 'system:goal-card') return isValidSystemGoalCard(v)
+  // Ship 3 F7: auto-highlight detection. Peer-writer allowed (each host runs
+  // the pipeline locally). Shape validator co-located with sibling goal-card.
+  if (v.type === 'system:highlight') return isValidSystemHighlight(v)
   // Wave 13B: `/bot` roomBot query + reply. Peer-writer allowed for both
   // (any peer can ask the bot; any peer that runs the bot can reply). The
   // reducer applies a host-only gate on `system:bot-reply` when the host is
@@ -1483,6 +1486,32 @@ function isValidSystemGoalCard (v) {
   return true
 }
 
+// Ship 3 F7: system:highlight shape validator. Mirrors the goal-card
+// discipline. Peer-writer allowed (highlight detection runs per-peer via the
+// host's shared LLM). Summary text is capped at 200 chars to keep the chat DOM
+// row size predictable; `kind` must be one of the four documented values so a
+// forged shape can never inject arbitrary CSS class fragments via the
+// data-kind attribute (Chat.js uses classList.add on a known allowlist).
+const HIGHLIGHT_KINDS = new Set(['red-card', 'yellow-card', 'corner', 'substitution'])
+function isValidSystemHighlight (v) {
+  if (!v || typeof v !== 'object') return false
+  if (v.type !== 'system:highlight') return false
+  if (typeof v.kind !== 'string' || !HIGHLIGHT_KINDS.has(v.kind)) return false
+  if (typeof v.team !== 'string' || v.team.length === 0 || v.team.length > 32) return false
+  if (typeof v.summaryText !== 'string' || v.summaryText.length === 0 || v.summaryText.length > 200) return false
+  if (typeof v.at !== 'number' || v.at < 0) return false
+  if (v.roomSlug !== undefined && v.roomSlug !== null &&
+    (typeof v.roomSlug !== 'string' || v.roomSlug.length > 128)) return false
+  if (v.audioByLocale !== undefined && v.audioByLocale !== null) {
+    if (typeof v.audioByLocale !== 'object' || Array.isArray(v.audioByLocale)) return false
+    for (const [locale, blobKey] of Object.entries(v.audioByLocale)) {
+      if (typeof locale !== 'string' || locale.length === 0 || locale.length > 8) return false
+      if (typeof blobKey !== 'string' || blobKey.length === 0 || blobKey.length > 256) return false
+    }
+  }
+  return true
+}
+
 // Wave 13B: shape validator for `system:bot-query`. Peer-writer allowed. The
 // text is capped at 500 chars (roomBot.answer() also trims to 500 before
 // broadcast) so a malicious peer cannot smuggle a giant prompt through the
@@ -1618,6 +1647,8 @@ module.exports = {
     // Wave 3 exports for brittle tests
     isValidSystemAskFrameAnswer,
     isValidSystemGoalCard,
+    // Ship 3 F7 export
+    isValidSystemHighlight,
     // Wave 13B exports for brittle tests
     isValidSystemBotQuery,
     isValidSystemBotReply,

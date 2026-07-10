@@ -183,6 +183,178 @@ function sanitizeCommentary (raw, maxWords = DEFAULT_MAX_WORDS) {
 // for-await session events -> chat.sendSystem({type:'system:caption', ...}).
 // -----------------------------------------------------------------------------
 
+// Ship 3 F5: voice-cloned commentator locale gate. Mirrors the allowlist in
+// bare/voiceClone.js:48 (fetched 2026-07-10). We keep the constant here rather
+// than import it so routing decisions do not have to wait for an async
+// voiceClone factory to resolve; any drift from voiceClone.js costs us a
+// single fall-through to announcer (fail-safe by design).
+// Verified against node_modules/@qvac/sdk/dist/schemas/text-to-speech.d.ts:2
+// (TTS_CHATTERBOX_LANGUAGES literal).
+const VOICE_CLONE_ALLOWED = Object.freeze(new Set(['en', 'it', 'es', 'fr', 'de', 'pt']))
+
+// Feature flag: mirrors the goal-pipeline pattern. When unset, auto-on if a
+// voiceClone handle is present AND enrolled AND the voiceClone flag itself is
+// on. Explicit env override (CURVA_COMMENTATOR_VOICE_CLONE_ENABLED) short
+// circuits the auto-detect. Off => routeTts always uses announcer.
+function commentatorVoiceCloneFlagEnabled () {
+  try {
+    const raw = (typeof process !== 'undefined' && process.env &&
+      process.env.CURVA_COMMENTATOR_VOICE_CLONE_ENABLED) || ''
+    const s = String(raw).toLowerCase()
+    if (s === '1' || s === 'true' || s === 'yes' || s === 'on') return true
+    if (s === '0' || s === 'false' || s === 'no' || s === 'off') return false
+  } catch { /* noop */ }
+  return null // null => defer to auto-detect (voiceClone handle + status)
+}
+
+/**
+ * Ship 3 F5: session-shaped TTS router.
+ *
+ * The commentator streams contentDelta chunks into `session.write(chunk)` and
+ * drains `session.chunks` as PCM. voiceClone.speakStream reads a whole text
+ * upfront and returns `{chunks, end, destroy}`. To keep the streaming loop
+ * uniform, we wrap voiceClone into a matching session that:
+ *   - buffers each write(chunk) into an accumulator
+ *   - on end(), calls voiceClone.speakStream(fullText, locale) exactly once
+ *     and adapts its chunks iterator to yield `{buffer, chunkIndex, sentenceChunk, done}`
+ *
+ * The announcer path returns the SDK's native session unchanged.
+ * Any voiceClone failure falls back to the announcer session so the commentator
+ * loop never breaks on TTS routing.
+ *
+ * @param {object|null} voiceClone
+ * @param {object|null} announcer
+ * @param {string|null} locale
+ * @param {function} log
+ * @param {function} emit
+ * @returns {Promise<{ session: object|null, via: 'voiceClone'|'announcer', ok: boolean }>}
+ */
+async function routeTts (voiceClone, announcer, locale, log, emit) {
+  const flag = commentatorVoiceCloneFlagEnabled()
+  let cloneEligible = false
+  if (voiceClone && typeof voiceClone.speakStream === 'function') {
+    const target = typeof locale === 'string' ? locale.toLowerCase() : ''
+    if (VOICE_CLONE_ALLOWED.has(target)) {
+      let enrolled = false
+      try {
+        const st = typeof voiceClone.status === 'function' ? voiceClone.status() : null
+        enrolled = !!(st && st.enrolled)
+      } catch { enrolled = false }
+      if (enrolled) {
+        // flag === null => auto-on (enrolled + flag defers to detection)
+        // flag === true => force-on
+        // flag === false => force-off
+        if (flag === true || flag === null) cloneEligible = true
+      }
+    }
+  }
+
+  if (cloneEligible) {
+    emit('commentator:tts-open', { locale, via: 'voiceClone' })
+    let chunks = []
+    let ended = false
+    let destroyed = false
+    let buffer = ''
+    const queue = []
+    let resolveNext = null
+    let done = false
+    let error = null
+    let started = false
+
+    async function pumpVoiceClone () {
+      if (started) return
+      started = true
+      const text = buffer
+      buffer = ''
+      try {
+        const stream = await voiceClone.speakStream(text, locale)
+        if (!stream) {
+          // voiceClone declined (empty text, feature-flag off inside voiceClone,
+          // or missing reference at speak time). Signal done; caller falls back
+          // to text-only path with no PCM.
+          done = true
+          if (resolveNext) { const r = resolveNext; resolveNext = null; r() }
+          emit('commentator:tts-fallback', { locale, from: 'voiceClone', reason: 'skipped' })
+          return
+        }
+        let idx = 0
+        for await (const chunk of stream.chunks) {
+          if (destroyed) break
+          if (!chunk || typeof chunk !== 'object') continue
+          if (Array.isArray(chunk.buffer) && chunk.buffer.length > 0) {
+            queue.push({
+              buffer: chunk.buffer,
+              chunkIndex: idx++,
+              sentenceChunk: null,
+              done: !!chunk.done
+            })
+            if (resolveNext) { const r = resolveNext; resolveNext = null; r() }
+          }
+          if (chunk.done) break
+        }
+      } catch (err) {
+        error = err
+        log('warn', 'commentator: voiceClone stream failed', {
+          locale, message: err && err.message
+        })
+        emit('commentator:tts-fallback', { locale, from: 'voiceClone', reason: 'threw',
+          message: err && err.message })
+      } finally {
+        done = true
+        if (resolveNext) { const r = resolveNext; resolveNext = null; r() }
+      }
+    }
+
+    const chunksIterator = (async function * () {
+      while (!destroyed) {
+        if (queue.length > 0) { yield queue.shift(); continue }
+        if (done) break
+        await new Promise((r) => { resolveNext = r })
+      }
+    })()
+
+    const session = {
+      write (chunk) {
+        if (ended || destroyed) return
+        if (typeof chunk === 'string') buffer += chunk
+      },
+      end () {
+        if (ended) return
+        ended = true
+        // Kick off the actual voiceClone call once we have the full text.
+        pumpVoiceClone().catch(() => { /* already handled */ })
+      },
+      destroy () {
+        destroyed = true
+        done = true
+        if (resolveNext) { const r = resolveNext; resolveNext = null; r() }
+      },
+      chunks: chunksIterator
+    }
+    return { session, via: 'voiceClone', ok: true }
+  }
+
+  // Fall back to announcer. Any failure returns { session: null } so the
+  // caller degrades to text-only cleanly.
+  if (announcer && typeof announcer.openSpeakStream === 'function') {
+    try {
+      const session = await announcer.openSpeakStream({
+        locale: locale || undefined,
+        matchId: null
+      })
+      emit('commentator:tts-open', { locale, via: 'announcer' })
+      return { session, via: 'announcer', ok: !!session }
+    } catch (err) {
+      log('warn', 'commentator: announcer openSpeakStream failed', {
+        locale, message: err && err.message
+      })
+      emit('commentator:tts-open-error', { locale, via: 'announcer', message: err && err.message })
+      return { session: null, via: 'announcer', ok: false }
+    }
+  }
+  return { session: null, via: 'announcer', ok: false }
+}
+
 const DEFAULT_STT_LANG = 'en'
 const STT_FRAME_SAMPLES = 480   // 30 ms at 16 kHz => 480 f32 samples
 const STT_FRAME_BYTES = STT_FRAME_SAMPLES * 4
@@ -367,6 +539,13 @@ function createCommentator (opts = {}) {
     // Passing `null` (default) keeps the pre-Wave-3 behaviour (no TTS).
     announcer = null,
     announcerLocale = null,
+    // Ship 3 F5: optional voice-cloned Chatterbox handle. When present AND the
+    // `announcerLocale` is in VOICE_CLONE_ALLOWED AND voiceClone.status()
+    // reports `enrolled: true` AND the feature flag resolves truthy, the
+    // commentator's TTS session is served by Chatterbox instead of the
+    // Supertonic announcer. Any failure falls back to announcer transparently
+    // — the token loop never breaks on TTS routing. See routeTts() above.
+    voiceClone = null,
     modelSrc = DEFAULT_MODEL_SRC,
     modelSizeMb = DEFAULT_MODEL_SIZE_MB,
     // Room-scoped kvCache key. Reusing the cache across 60 s ticks in the
@@ -627,19 +806,23 @@ function createCommentator (opts = {}) {
       // contract: kvCache accepts `true` (auto) or a caller-managed string
       // key. Verified in @qvac/sdk/dist/schemas/completion-stream.d.ts.
       const kvCacheKey = 'commentator:room:' + (roomSlug || 'default')
-      // Wave 3 F1: open a streaming TTS session in parallel with the LLM
-      // completion. Sentence accumulation is delegated to the SDK via
-      // `accumulateSentences: true` (see announcer openSpeakStream). If the
-      // announcer is not supplied or refuses (feature flag off / SDK missing),
-      // the TTS session is null and the loop degrades to text-only.
-      if (announcer && typeof announcer.openSpeakStream === 'function') {
+      // Wave 3 F1 + Ship 3 F5: open a streaming TTS session in parallel with
+      // the LLM completion. Sentence accumulation is delegated to the SDK via
+      // `accumulateSentences: true` (see announcer openSpeakStream). Ship 3 F5
+      // adds voiceClone routing: when the voiceClone handle is enrolled AND
+      // announcerLocale is in the Chatterbox allowlist, PCM comes from
+      // Chatterbox instead of Supertonic. Failure falls back transparently.
+      let ttsVia = 'announcer'
+      if ((voiceClone || announcer) && (
+        (voiceClone && typeof voiceClone.speakStream === 'function') ||
+        (announcer && typeof announcer.openSpeakStream === 'function')
+      )) {
         try {
-          ttsSession = await announcer.openSpeakStream({
-            locale: announcerLocale || undefined,
-            matchId: null
-          })
+          const routed = await routeTts(voiceClone, announcer, announcerLocale, log, emit)
+          ttsSession = routed.session
+          ttsVia = routed.via
         } catch (err) {
-          log('warn', 'commentator: openSpeakStream failed', { message: err && err.message })
+          log('warn', 'commentator: routeTts failed', { message: err && err.message })
           ttsSession = null
         }
       }
@@ -653,12 +836,13 @@ function createCommentator (opts = {}) {
               emit('commentator:tts-chunk', {
                 buffer: chunk.buffer,
                 chunkIndex: chunk.chunkIndex,
-                sentenceChunk: chunk.sentenceChunk
+                sentenceChunk: chunk.sentenceChunk,
+                via: ttsVia
               })
             }
-            emit('commentator:tts-done', {})
+            emit('commentator:tts-done', { via: ttsVia })
           } catch (err) {
-            emit('commentator:tts-error', { message: err && err.message })
+            emit('commentator:tts-error', { message: err && err.message, via: ttsVia })
           }
         })()
       }
@@ -1193,6 +1377,10 @@ module.exports = {
   bufferFrameSource,
   resolveAudioSource,
   sttFlagEnabled,
+  // Ship 3 F5 exports
+  routeTts,
+  VOICE_CLONE_ALLOWED,
+  commentatorVoiceCloneFlagEnabled,
   PROMPT_TEMPLATE,
   TONE_PROMPTS,
   DEFAULT_MODEL_SRC,
