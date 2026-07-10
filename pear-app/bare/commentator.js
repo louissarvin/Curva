@@ -353,6 +353,13 @@ function createCommentator (opts = {}) {
     getMatchTitle = () => 'unknown match',
     getRecentChat = () => [],
     sdkFactory = null,
+    // Wave 3 F1: optional Supertonic streaming TTS handle. When present, the
+    // commentator opens a `textToSpeechStream` session for each trigger and
+    // feeds every `contentDelta` chunk into it. The session's PCM output is
+    // surfaced via `commentator:tts-chunk` events for the renderer to play.
+    // Passing `null` (default) keeps the pre-Wave-3 behaviour (no TTS).
+    announcer = null,
+    announcerLocale = null,
     modelSrc = DEFAULT_MODEL_SRC,
     modelSizeMb = DEFAULT_MODEL_SIZE_MB,
     // Room-scoped kvCache key. Reusing the cache across 60 s ticks in the
@@ -587,6 +594,10 @@ function createCommentator (opts = {}) {
         : thinkingBuf
       emit('commentator:thinking-preview', { text: clipped, len: thinkingBuf.length })
     }
+    // Wave 3 F1: hoisted so the catch block can destroy() a partially-open
+    // TTS session on generation failure.
+    let ttsSession = null
+    let ttsConsumer = null
     try {
       const matchTimeMs = Math.max(0, Number(getMatchTimeMs() || 0))
       const prompt = buildPrompt({
@@ -605,6 +616,41 @@ function createCommentator (opts = {}) {
       // contract: kvCache accepts `true` (auto) or a caller-managed string
       // key. Verified in @qvac/sdk/dist/schemas/completion-stream.d.ts.
       const kvCacheKey = 'commentator:room:' + (roomSlug || 'default')
+      // Wave 3 F1: open a streaming TTS session in parallel with the LLM
+      // completion. Sentence accumulation is delegated to the SDK via
+      // `accumulateSentences: true` (see announcer openSpeakStream). If the
+      // announcer is not supplied or refuses (feature flag off / SDK missing),
+      // the TTS session is null and the loop degrades to text-only.
+      if (announcer && typeof announcer.openSpeakStream === 'function') {
+        try {
+          ttsSession = await announcer.openSpeakStream({
+            locale: announcerLocale || undefined,
+            matchId: null
+          })
+        } catch (err) {
+          log('warn', 'commentator: openSpeakStream failed', { message: err && err.message })
+          ttsSession = null
+        }
+      }
+      // Consume PCM chunks in a fire-and-forget task; emit `commentator:tts-*`
+      // events so the renderer can play audio without blocking the token
+      // stream. First PCM chunk latency is stamped by the announcer itself.
+      if (ttsSession) {
+        ttsConsumer = (async () => {
+          try {
+            for await (const chunk of ttsSession.chunks) {
+              emit('commentator:tts-chunk', {
+                buffer: chunk.buffer,
+                chunkIndex: chunk.chunkIndex,
+                sentenceChunk: chunk.sentenceChunk
+              })
+            }
+            emit('commentator:tts-done', {})
+          } catch (err) {
+            emit('commentator:tts-error', { message: err && err.message })
+          }
+        })()
+      }
       const result = sdkHandle.completion({
         modelId: sdkHandle.modelId,
         history,
@@ -644,6 +690,12 @@ function createCommentator (opts = {}) {
             // tests) and the new streaming-shaped `commentator:token`.
             emit('commentary:tokens', { token: chunk })
             emit('commentator:token', { text: chunk })
+            // Wave 3 F1: pipe raw chunk into the SDK-side sentence buffer.
+            // Sentence accumulation happens inside `textToSpeechStream`, so
+            // we simply forward every content delta.
+            if (ttsSession && typeof ttsSession.write === 'function') {
+              try { ttsSession.write(chunk) } catch { /* announcer already emitted error */ }
+            }
             // Code review fix (High): set stopReason='length' when we hit the
             // char cap so the renderer can distinguish truncation from natural
             // EOS. Without this, the done event defaults to 'eos' and a judge
@@ -700,6 +752,17 @@ function createCommentator (opts = {}) {
         tokensBuf = result
       }
 
+      // Wave 3 F1: close the streaming TTS session. `end()` flushes any
+      // trailing sentence that had no terminal punctuation via the
+      // `flushAfterMs` timer inside the SDK. We await the consumer so pending
+      // PCM chunks are drained before `commentator:done` fires.
+      if (ttsSession && typeof ttsSession.end === 'function') {
+        try { ttsSession.end() } catch { /* noop */ }
+      }
+      if (ttsConsumer) {
+        try { await ttsConsumer } catch { /* noop */ }
+      }
+
       // Flush any accumulated thinking buffer so the renderer's ghost preview
       // shows the final reasoning trace before the done event freezes it.
       maybeEmitThinkingPreview(true)
@@ -733,6 +796,9 @@ function createCommentator (opts = {}) {
       state.lastError = err?.message || 'generation failed'
       emit('commentary:error', { code: err?.code || 'GEN_FAILED', message: state.lastError })
       log('warn', 'commentator run failed', { message: state.lastError })
+      if (ttsSession && typeof ttsSession.destroy === 'function') {
+        try { ttsSession.destroy() } catch { /* noop */ }
+      }
       return false
     } finally {
       state.streaming = false

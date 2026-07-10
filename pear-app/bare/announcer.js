@@ -531,6 +531,284 @@ function createAnnouncer (opts = {}) {
     return payload
   }
 
+  // ---------------------------------------------------------------------------
+  // Wave 3 F1: pipelined streaming TTS via `textToSpeechStream`.
+  //
+  // Docs-verification memo ---------------------------------------------------
+  //
+  // Ground truth (installed):
+  //   pear-app/node_modules/@qvac/sdk/dist/client/api/text-to-speech.d.ts
+  //     `export declare function textToSpeechStream(
+  //         params: TextToSpeechStreamClientParams,
+  //         options?: RPCOptions
+  //       ): Promise<TextToSpeechStreamSession>`
+  //   pear-app/node_modules/@qvac/sdk/dist/schemas/text-to-speech.d.ts:503-565
+  //     `TextToSpeechStreamRequest` fields:
+  //       { modelId, inputType, accumulateSentences?, sentenceDelimiterPreset?,
+  //         maxBufferScalars?, flushAfterMs?, type: 'textToSpeechStream' }
+  //     `TextToSpeechStreamSession` shape:
+  //       { write(fragment), end(), destroy(),
+  //         [Symbol.asyncIterator](): AsyncIterator<TextToSpeechStreamResponse> }
+  //     `TextToSpeechStreamResponse`:
+  //       { type: 'textToSpeechStream', buffer: number[], done?, stats?,
+  //         chunkIndex?, sentenceChunk? }
+  //
+  // Docs: https://docs.qvac.tether.io/ai-capabilities/text-to-speech/ (fetched
+  // 2026-07-10). Cite only what agrees with the installed .d.ts.
+  //
+  // Design:
+  //   - Caller provides `text` (one-shot fragment) OR opens a duplex session
+  //     via `openSpeakStream()`; the commentator uses the latter to pipe
+  //     contentDelta events straight into TTS as sentences complete.
+  //   - `accumulateSentences: true` and `sentenceDelimiterPreset: 'multilingual'`
+  //     let the SDK gather partial writes into full sentences before synthesis,
+  //     matching the Wave 3 F1 brief.
+  //   - We emit `announcer:tts-first-chunk` on the first non-empty PCM chunk
+  //     so DiagnosticsPanel can display end-to-end token->audio latency.
+  //   - Sanitiser: prompt-injection defence for the streaming path mirrors the
+  //     one-shot cap (strip control chars, cap size).
+  // ---------------------------------------------------------------------------
+
+  const STREAM_MAX_FRAGMENT_CHARS = 800
+  const STREAM_MAX_TOTAL_CHARS = 6000
+
+  function sanitizeStreamFragment (fragment) {
+    if (typeof fragment !== 'string') return ''
+    let out = ''
+    for (const ch of fragment) {
+      const code = ch.codePointAt(0)
+      if (code === 0x0A || code === 0x0D || code === 0x09) { out += ' '; continue }
+      if (code < 0x20) continue
+      if (code >= 0x80 && code <= 0x9F) continue
+      if (code === 0xFEFF) continue
+      out += ch
+    }
+    if (out.length > STREAM_MAX_FRAGMENT_CHARS) {
+      out = out.slice(0, STREAM_MAX_FRAGMENT_CHARS)
+    }
+    return out
+  }
+
+  /**
+   * Open a duplex streaming TTS session for a given locale.
+   *
+   * Returns an object with:
+   *   - `write(fragment)`: push a text fragment. Sanitised + length-capped.
+   *   - `end()`: signal end of input; session finishes emitting PCM chunks.
+   *   - `destroy()`: force-close the session (drop any pending audio).
+   *   - `chunks`: `AsyncGenerator<{buffer: number[], sentenceChunk?, chunkIndex?}>`
+   *     yielded per-sentence PCM. First non-empty chunk triggers
+   *     `announcer:tts-first-chunk` with `{latencyMs, locale}`.
+   *
+   * Non-throwing on missing SDK / disabled flag: returns null and emits
+   * `announcer:skip` so the caller can fall through gracefully.
+   *
+   * @param {{
+   *   locale?: string,
+   *   matchId?: string,
+   *   accumulateSentences?: boolean,
+   *   sentenceDelimiterPreset?: 'latin'|'cjk'|'multilingual',
+   *   maxBufferScalars?: number,
+   *   flushAfterMs?: number
+   * }} [opts]
+   */
+  async function openSpeakStream (opts = {}) {
+    if (!announcerFlagEnabled()) return null
+    if (state.destroyed) return null
+
+    const locale = SUPPORTED_LOCALES.has(opts.locale)
+      ? opts.locale
+      : state.defaultLocale
+    const matchId = typeof opts.matchId === 'string' ? opts.matchId : null
+
+    let modelId
+    try {
+      modelId = await ensureModel(locale)
+    } catch (err) {
+      log('warn', 'announcer stream ensureModel failed', {
+        locale, message: err && err.message
+      })
+      return null
+    }
+
+    const sdk = state.sdk
+    if (!sdk || typeof sdk.textToSpeechStream !== 'function') {
+      emit('announcer:skip', {
+        reason: 'STREAM_UNAVAILABLE', locale, matchId,
+        detail: 'sdk.textToSpeechStream missing'
+      })
+      return null
+    }
+
+    // Sensible defaults per the F1 brief: multilingual sentence accumulation
+    // and a modest flushAfterMs to bound the "final sentence has no terminal
+    // punctuation" case.
+    const requestParams = {
+      modelId,
+      inputType: 'text',
+      accumulateSentences: opts.accumulateSentences !== false,
+      sentenceDelimiterPreset: opts.sentenceDelimiterPreset || 'multilingual'
+    }
+    if (Number.isFinite(opts.maxBufferScalars) && opts.maxBufferScalars > 0) {
+      requestParams.maxBufferScalars = Math.floor(opts.maxBufferScalars)
+    }
+    if (Number.isFinite(opts.flushAfterMs) && opts.flushAfterMs > 0) {
+      requestParams.flushAfterMs = Math.floor(opts.flushAfterMs)
+    }
+
+    let session
+    try {
+      session = await sdk.textToSpeechStream(requestParams)
+    } catch (err) {
+      emit('announcer:error', {
+        code: 'STREAM_OPEN_FAILED', locale,
+        message: err && err.message
+      })
+      return null
+    }
+    if (!session || typeof session.write !== 'function' ||
+        typeof session[Symbol.asyncIterator] !== 'function') {
+      emit('announcer:error', {
+        code: 'STREAM_BAD_SESSION', locale,
+        message: 'sdk.textToSpeechStream returned an incompatible session'
+      })
+      return null
+    }
+
+    const openedAt = Date.now()
+    let firstChunkEmitted = false
+    let totalChars = 0
+    let closed = false
+
+    function write (fragment) {
+      if (closed) return false
+      const clean = sanitizeStreamFragment(fragment)
+      if (clean.length === 0) return false
+      if (totalChars + clean.length > STREAM_MAX_TOTAL_CHARS) {
+        // Refuse further input rather than truncate mid-fragment. Caller can
+        // decide whether to `end()` and open a new session for the next batch.
+        emit('announcer:skip', {
+          reason: 'STREAM_CAP_REACHED', locale, matchId,
+          totalChars
+        })
+        return false
+      }
+      totalChars += clean.length
+      try {
+        session.write(clean)
+        return true
+      } catch (err) {
+        emit('announcer:error', {
+          code: 'STREAM_WRITE_FAILED', locale,
+          message: err && err.message
+        })
+        return false
+      }
+    }
+
+    function end () {
+      if (closed) return
+      closed = true
+      try { session.end() } catch { /* noop */ }
+    }
+
+    function destroy () {
+      if (closed) return
+      closed = true
+      try { session.destroy() } catch { /* noop */ }
+    }
+
+    async function * chunks () {
+      let chunkIndex = 0
+      try {
+        for await (const response of session) {
+          if (!response || typeof response !== 'object') continue
+          const buf = Array.isArray(response.buffer) ? response.buffer : null
+          if (!buf || buf.length === 0) continue
+          if (!firstChunkEmitted) {
+            firstChunkEmitted = true
+            emit('announcer:tts-first-chunk', {
+              locale,
+              matchId,
+              latencyMs: Date.now() - openedAt
+            })
+          }
+          yield {
+            buffer: buf,
+            chunkIndex: response.chunkIndex ?? chunkIndex,
+            sentenceChunk: typeof response.sentenceChunk === 'string'
+              ? response.sentenceChunk
+              : null,
+            done: !!response.done
+          }
+          chunkIndex += 1
+        }
+      } catch (err) {
+        emit('announcer:error', {
+          code: 'STREAM_ITER_FAILED', locale,
+          message: err && err.message
+        })
+      }
+    }
+
+    emit('announcer:stream-open', { locale, matchId })
+    return {
+      write,
+      end,
+      destroy,
+      chunks: chunks(),
+      locale,
+      openedAt
+    }
+  }
+
+  /**
+   * Convenience one-shot: run a full text buffer through the streaming API
+   * and accumulate PCM. Used by the commentator when the total text is known
+   * up-front (e.g. a pre-formatted "goal!" announcement). Prefer
+   * openSpeakStream() when piping token deltas.
+   */
+  async function speakStream ({ text, locale, matchId, minute } = {}) {
+    if (!announcerFlagEnabled()) return null
+    if (state.destroyed) return null
+    if (typeof text !== 'string' || text.length === 0) {
+      emit('announcer:skip', { reason: 'EMPTY_TEXT', locale: locale || null, matchId: matchId || null })
+      return null
+    }
+    const session = await openSpeakStream({ locale, matchId })
+    if (!session) return null
+    session.write(text)
+    session.end()
+
+    const samples = []
+    for await (const chunk of session.chunks) {
+      if (samples.length + chunk.buffer.length > MAX_SAMPLES) {
+        // Truncate rather than allocate unbounded memory if the model runs
+        // away. The renderer's Audio element handles 30s @ 44.1k fine.
+        const remaining = MAX_SAMPLES - samples.length
+        if (remaining > 0) {
+          for (let i = 0; i < remaining; i++) samples.push(chunk.buffer[i])
+        }
+        break
+      }
+      for (let i = 0; i < chunk.buffer.length; i++) samples.push(chunk.buffer[i])
+    }
+    if (samples.length === 0) {
+      emit('announcer:skip', { reason: 'EMPTY_BUFFER', locale: locale || null, matchId: matchId || null })
+      return null
+    }
+    const { wavBuffer, sizeBytes } = pcmToWav(samples, SUPERTONIC_SAMPLE_RATE)
+    return {
+      wavBase64: wavBuffer.toString('base64'),
+      lang: session.locale,
+      matchId: matchId || null,
+      minute: normaliseMinute(minute) || null,
+      sizeBytes,
+      sampleRate: SUPERTONIC_SAMPLE_RATE,
+      text: sanitizeStreamFragment(text)
+    }
+  }
+
   function status () {
     return {
       enabled: state.enabled,
@@ -559,6 +837,8 @@ function createAnnouncer (opts = {}) {
   return {
     enable,
     speak,
+    speakStream,
+    openSpeakStream,
     setPhrasebook,
     status,
     close,
@@ -572,7 +852,8 @@ function createAnnouncer (opts = {}) {
       normaliseMinute,
       createWavHeader,
       int16ArrayToBuffer,
-      pcmToWav
+      pcmToWav,
+      sanitizeStreamFragment
     }
   }
 }
@@ -592,4 +873,7 @@ module.exports = {
   SUPERTONIC_MODEL_SIZE,
   SUPPORTED_LOCALES,
   MAX_TEXT_CHARS
+  // Note: streaming helpers (openSpeakStream, speakStream) are exposed on the
+  // instance returned by createAnnouncer(). They are not module-level exports
+  // because they close over per-instance state (sdk handle, locale cache).
 }
