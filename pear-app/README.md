@@ -33,12 +33,6 @@ A fully P2P watch-party desktop app. Pears (Holepunch) is the whole distribution
 
 </div>
 
-> **For code reviewers.** Start at [`../CODE_REVIEW.md`](../CODE_REVIEW.md) at the
-> repo root. It maps every wave 2 to 5 feature to a file:line anchor, groups
-> tests by concern, lists what we deliberately did not build, and gives the
-> feature-flag boot matrix so you can pick a subset for a shallow pass or the
-> full set for a deep dive.
-
 ---
 
 ## Judge quick-start

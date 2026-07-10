@@ -22,16 +22,6 @@ For football fans separated by continents who still want to react to the same go
 
 Built for the **Tether Developers Cup 2026** by **Team Indonesia**. Track: **Pears** (primary) with working **WDK** and **QVAC** cameos.
 
-<br />
-
-**Reviewers start here.** Three sections in this README directly answer the semifinal code-review brief:
-
-- **[Code review guide](#code-review-guide)** — grep-friendly file:line index, 5-minute walkthrough, what each test proves, honest not-built list
-- **[Tether stack accountability](#tether-stack-accountability)** — every Pears / QVAC / WDK package with the "why chose / how wired / trade-off accepted" triple
-- **[Commit-pinned permalinks](#commit-pinned-permalinks)** — 24 permalinks locked to a specific commit hash so line numbers never drift
-
-Scoped depth per subproject: [`pear-app/README.md`](pear-app/README.md) (client-side permalinks + stack), [`backend/README.md`](backend/README.md) (companion-side permalinks + stack), [`docs/adr/README.md`](docs/adr/README.md) (ten ADRs).
-
 </div>
 
 ---
