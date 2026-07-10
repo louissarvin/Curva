@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="web/src/logo.svg" alt="Curva" width="200" />
+<img src="web/public/assets/logo.svg" alt="Curva" width="400" />
 
 **P2P watch-party for the World Cup, powered by the Tether developer stack.**
 
@@ -37,8 +37,6 @@ Curva rebuilds that watch-party on the Tether stack because Tether ships the pri
 - **QVAC** gives us on-device AI. Bergamot translates chat between Torino and Jakarta with zero cloud round-trips. Qwen3 narrates the match in the room's language. Whisper turns a mic into chat. All models cache once, work offline forever.
 
 The three stacks reinforce each other. Pears carries the trust (every action is a signed log any peer can audit). WDK carries the settlement (a tip is the payoff for a good reaction). QVAC carries the voice (commentator, STT, TTS, translation make a two-peer room feel like a full stadium).
-
-**Every stack piece is exercised in the same 90-second demo** — a real Autobase chat sync, a real Sepolia gasless USDT tx, and real on-device Qwen3 commentary in one continuous take.
 
 ---
 
@@ -194,6 +192,23 @@ The 13 primitives above are the load-bearing core. Waves 2 through 5 added the t
 | **blind-peering explicit target + suspend/resume** | blind-peering | We pass `target: base.wakeupCapability.key` per Autobase and `target: core.key` per Hypercore at [`bare/blindPeering.js:217-380`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/blindPeering.js#L217-L380). Suspend/resume are wired to Pear teardown so the seeder does not leak workers on close. | Room replication is deterministic and idempotent even when the host laptop hard-crashes; no orphaned seeder subprocesses |
 | **hypertrace + hypertrace-prometheus** | hypertrace family | `startPrometheus()` at [`bare/observability.js:340-385`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/observability.js#L340-L385) explicitly binds to `127.0.0.1:<port>`, not `0.0.0.0`. `hypercore-stats`, `hyperswarm-stats`, `hyperdht-stats` all register on the same registry so `/metrics` returns one federated view. | Ops can attach Grafana to any peer without opening the exporter to the LAN |
 
+
+#### Trade-offs we accepted for Pears
+
+Every choice below names the alternative we rejected and what we gave up.
+
+- **`hyperswarm`** — Rejected libp2p and WebRTC + signaling because both force a coordinator; that kills the "no server" claim. Trade-off: room slug is trivially guessable, so we defend at the writer-invitation layer (not at discovery). Any peer can dial in; only invited peers become writers.
+- **`corestore`** — Rejected one shared corestore across rooms because a single peer with N rooms would multiplex all their traffic through one store, defeating per-room isolation. Trade-off: room storage is not shared across rooms even if the same peer joins many rooms. We chose isolation over reuse.
+- **`hypercore`** — Rejected symmetric encryption keyed per-message (would need out-of-band key exchange). Trade-off: encryption key is per-epoch; if the host secret leaks, every past epoch under that secret decrypts. Acceptable because per-epoch rotation matches the prediction pool's natural cadence.
+- **`hyperbee`** — Rejected a fresh hyperbee for each namespace because each bee is a full Autobase view materialisation. Trade-off: the migration window costs one extra `get()` per read until every peer has migrated its keys from the legacy flat prefix. `readRoomKey()` hides the fallback.
+- **`autobase` (Pattern B)** — Rejected Pattern A (auto-promote on presence) because it opens the room to any peer that dials in. Trade-off: only the host can promote writers, so losing the host's device without a backup mnemonic bricks writer promotions.
+- **`hyperdrive`** — Rejected one shared drive for all peers' clips because concurrent writes to a shared drive contend. Trade-off: N drives for N peers means N replication pipes at once.
+- **`hypercore-blob-server`** — Rejected exposing the blob server to the LAN because that opens a fetch surface for anything on the same network. Trade-off: loopback-only, so remote fetch must go through blind-peering. That is by design.
+- **`blind-peering`** — Rejected relying on the package's default target because a future default change would silently break replication. Trade-off: extra dial cost from pinning `target: base.wakeupCapability.key` explicitly.
+- **`keet-identity-key`** — Rejected making identity the authorization primitive because that would let a compromised identity keypair silently escalate. Trade-off: we surface identity but do not gate authorization on it; the roomState writer roster is what actually gates writes.
+- **`hypertrace` + `hypertrace-prometheus`** — Rejected exposing `/metrics` to `0.0.0.0` because it lets any LAN peer scrape another peer's counters. Trade-off: loopback-only means no LAN scrape; federation happens via the backend companion, per peer opt-in.
+- **`pear-runtime`** — Rejected npm-only distribution because a fix could not roll out the same day. Trade-off: production release cadence still relies on `pear stage` + `pear release`, so a mis-published stage cannot be silently rolled back.
+
 ### WDK (cameo, gasless USDT tips)
 
 WDK is Tether's Wallet Development Kit. Curva uses two pieces: the wallet library for signing and the secret-manager for at-rest encryption of the seed. Together they turn a peer laptop into a self-custodial USDT wallet the user never has to top up with ETH.
@@ -218,6 +233,16 @@ The five components above are the primary tip path. The rows below are what make
 | **`onChainIdentifier: 'curva'` marker** | WDK docs pattern | Every EIP-3009 authorization and every ERC-4337 UserOp carries the 50-byte project marker per the WDK docs. See [`bare/wallet/eip3009.js#L34-L57`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/wallet/eip3009.js#L34-L57). | Every Curva-originated tx is provable on-chain from calldata alone; downstream indexers can attribute usage back to us |
 | **WDK passcode gate on first boot** | `@tetherto/wdk-secret-manager` + `PasscodePrompt` renderer | Passcode enters via the renderer, travels one-way to the Bare worklet, derives the KDF that unlocks the encrypted seed. Never emitted back to renderer. | Wallet works across restarts; a lost laptop with an unknown passcode reveals nothing usable |
 | **Sepolia USDT-branded EIP-3009 token (honest cameo)** | Foundry-deployed contract | The token is [`0x6F51...7739`](https://sepolia.etherscan.io/address/0x6F51d2428AD208eb1cdE38e5CF7C0D7E2c5E7739), branded `Tether USD` / `USDT` / `decimals=6`. Not real mainnet USDT. This is the honest scope: cup rules disallow mainnet spend, and Sepolia has no real USDT, so we deploy a compatible ERC-20 with the EIP-3009 extension so the wire is 1:1 with what mainnet ship would look like. | Judges see a real `AuthorizationUsed` event on a USDT-branded contract and read the mainnet-equivalent code path in `contracts/src/CurvaUSDT.sol` |
+
+
+#### Trade-offs we accepted for WDK
+
+- **`@tetherto/wdk` (meta)** — Rejected rolling our own EVM wallet because the WDK is the Tether-native way and it ships the `onChainIdentifier` marker for free. Trade-off: we bind to a specific WDK beta line, so beta churn can break boot. We accept that as the cost of being on the frontier.
+- **`@tetherto/wdk-wallet-evm-erc-4337`** — Rejected single-path settlement because the facilitator can go down; ERC-4337 + Candide gives us a fallback. Trade-off: two paths have different UX (single sign vs userOp signing) and different failure modes. We route by chain, not by user preference.
+- **`@tetherto/wdk-secret-manager`** — Rejected raw file + OS keychain storage because it is platform-specific and less portable. Trade-off: if the user forgets their password, the seed is unrecoverable. This is a feature (no backdoor) but a bad UX; we compensate with a recovery-phrase export.
+- **EIP-3009 primary tip path** — Rejected requiring the tipper to hold ETH because a new fan will not top up a wallet just to try tipping. Trade-off: the backend must have gas; if the sponsor treasury dries up, tips queue. We surface treasury state at `GET /pears/status`.
+- **ERC-4337 Candide fallback** — Rejected treating the facilitator as always-on because that would surface an error to the user on a bad day. Trade-off: two code paths for the same conceptual action; more testing surface.
+- **USDT-branded EIP-3009 Sepolia token** — Rejected skipping the WDK track entirely because that would leave a gap in the submission. Trade-off: **it is not real USDT — it is a USDT-branded testnet token**. We are explicit about this in the video and DoraHacks details. The wire-in code (WDK + facilitator + on-chain marker) is real.
 
 ### QVAC (cameo, on-device AI)
 
@@ -255,6 +280,52 @@ The five features above are the baseline. Waves 2 through 5 layered nine more ca
 | **Streaming knobs (kvCache + reasoning_budget + deleteCache)** | Every `completion` call in commentator, voiceCoach, roomBot, askTheFrame, goalPipeline | `reasoning_budget: 0` on fast paths (voice coach, ask-frame), `-1` on tactical (roomBot). `remove_thinking_from_context: true` everywhere. `deleteCache` on room close so kv is not leaked between rooms. | Every millisecond of first-token latency saved shows up on camera; kvCache means the second tick in a room is materially faster than the first |
 
 Cross-capability flows are the biggest signal that Curva actually reasoned about how to combine QVAC primitives rather than just calling each in isolation. The voice-coach and ask-the-frame flows chain five capabilities in a single user gesture; the goal pipeline chains six. All three are covered by end-to-end integration tests under [`pear-app/test/integration/`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/test/integration/) that exercise the full stitching with a fake SDK.
+
+
+#### Trade-offs we accepted for QVAC
+
+- **Bergamot NMT** — Rejected cloud translators because on-device translation with no data egress is the "no servers" property. Trade-off: Bergamot's coverage is smaller than a cloud translator. We support EN/IT/ID (the target audience) and pivot elsewhere.
+- **Qwen3 LLM** — Rejected loading a separate LLM per consumer because on 8 GB devices we can only load one at a time. Trade-off: commentator and voice coach share one `sharedLlmHandle` constructed at boot.
+- **Whisper Tiny STT** — Rejected Whisper Base because it is materially slower to first partial. Trade-off: less accurate on hard accents; we chose speed over accuracy for push-to-talk.
+- **Supertonic multilingual TTS** — Rejected cloud TTS because it needs a round-trip. Trade-off: first-token latency is higher; we hide behind a "thinking" indicator.
+- **Chatterbox voice cloning** — Rejected cloud voice clone because uploading a voice sample to a third party is a privacy nightmare. Trade-off: EN/IT only; ID cloning is on roadmap, not shipped. We call this out explicitly in the UI.
+- **Llama-3.2 streaming commentator** — Rejected Qwen3 for the commentator because Qwen3 loads slower and the commentator is a monologue that does not need MCP tool calling. Trade-off: less reliable MCP tool calling; commentator is monologue only.
+- **SmolVLM2 500M + mmproj** — Rejected LLaVA-1.5 because it is 4x the size. Trade-off: first download is ~521 MB; we fall back to text-only ask-the-frame if the model is not yet cached.
+- **MobileNetV3 pre-filter** — Rejected running SmolVLM2 on every frame because it burns battery on garbage frames. Trade-off: fail-open means a broken classifier is silently ignored; we accept because pre-filter is a cost saver, not a correctness gate.
+- **OCR_LATIN** — Rejected a general OCR model because Latin-only is the target for football jerseys. Trade-off: Arabic and CJK jerseys are out of scope; we skip those matches.
+- **Parakeet CTC 0.6B** — Rejected forcing Whisper on every locale because Parakeet is smaller for EN-only rooms. Trade-off: English-only.
+- **EmbeddingGemma 300M Q4** — Rejected prompt-stuffing chat history because it does not scale past a few hundred messages. Trade-off: HyperDB requires >=16 docs before reindex is meaningful; we degrade `reindexed:false` with reason until threshold.
+- **MCP tool calling** — Rejected model-specific function calling because it couples the agent to one model. Trade-off: in-process only; we do not expose MCP over the swarm because the tool sender would need to trust the room.
+- **Delegated inference (P2P GPU sharing)** — Rejected cloud inference because it defeats the on-device property. Trade-off: a malicious provider could return garbage tokens; we do not have integrity attestation on delegated inference yet; trust is at the friendship layer.
+- **Streaming knobs (kvCache + reasoning_budget + deleteCache)** — Rejected default SDK settings because every ms of first-token latency shows on camera. Trade-off: per-session kvCache; switching rooms starts cold on the new one.
+- **`@qvac/langdetect-text`** — Rejected forcing the user to pick source language because it kills the UX. Trade-off: short strings (<8 chars) are unreliable to detect; we skip translation on those.
+
+
+### Architecture Decision Records (10 total)
+
+Every ADR is a self-contained decision with context, alternatives considered, consequences, and references. Format: Context / Decision / Consequences / References.
+
+- [ADR-001 Autobase Pattern B multi-writer](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/docs/adr/001-autobase-pattern-b-multi-writer.md)
+- [ADR-002 keet-identity attestation](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/docs/adr/002-keet-identity-attestation.md)
+- [ADR-003 blind-peering target strategy](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/docs/adr/003-blind-peering-target-strategy.md)
+- [ADR-004 base.ack() cadence](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/docs/adr/004-base-ack-cadence.md)
+- [ADR-005 voice coach orchestration](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/docs/adr/005-voice-coach-orchestration.md)
+- [ADR-006 apply middleware observational](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/docs/adr/006-apply-middleware-observational.md)
+- [ADR-007 goal pipeline fanout](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/docs/adr/007-goal-pipeline-fanout.md)
+- [ADR-008 hypercore sealed predictions](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/docs/adr/008-hypercore-sealed-predictions.md)
+- [ADR-009 Prometheus loopback federation](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/docs/adr/009-prometheus-loopback-federation.md)
+- [ADR-010 design tokens minimalism](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/docs/adr/010-design-tokens-minimalism.md)
+- [ADR index README](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/docs/adr/README.md)
+
+### What to click if you only have 90 seconds
+
+The Additional Pears / WDK / QVAC technique tables above embed a commit-pinned permalink in every row. If you only have 90 seconds:
+
+1. **Autobase Pattern B**: [`bare/room.js#L698-L961`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/room.js#L698-L961) (host-side control block) + [`bare/chat.js#L234-L318`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/chat.js#L234-L318) (apply purity) + [`autobase-divergence.test.js`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/test/autobase-divergence.test.js) (flagship correctness test).
+2. **QVAC depth**: [`bare/voiceCoach.js#L205-L235`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/voiceCoach.js#L205-L235) (5-cap factory) + [`bare/voiceCoach.js#L511-L540`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/voiceCoach.js#L511-L540) (prompt-injection defense) — one push-to-talk turn, five capabilities, defense in depth.
+3. **One security decision, well done**: [`bare/observability.js#L340-L385`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/observability.js#L340-L385) (Prometheus loopback bind) — one line of listen args that turns a network-exposed exporter into a loopback-only one.
+
+Everything else fans out from those three.
 
 ### Integration story summary
 
@@ -610,213 +681,6 @@ curl -s -X POST http://localhost:3700/rag/search -d '{"query":"Argentina","topK"
 See [`pear-app/README.md`](pear-app/README.md) "Full feature demo (semifinal max-out)" section for the exact peer-A / peer-B / backend boot commands with every flag pinned. Reviewers can pick a subset for a shallow pass or the full set for a deep dive.
 
 Flag defaults are all OFF so a clean checkout has zero opt-in surface. Every module fails closed when its flag is missing, so a mis-configured env produces `NOT_READY` events rather than crashes.
-
----
-
-## Tether stack accountability
-
-Direct response to the judges' brief: "For each piece: why you chose it, how you've implemented it, and why you did it that way. 'We used it' scores far below 'we chose it for X, wired it in like Y, and here's the trade-off we accepted'."
-
-Every package below is pinned to the version in `pear-app/package.json` or `backend/package.json` at commit `517cff08`. Where a package is transitive (no top-level pin), the entry says so.
-
-### Pears (Holepunch) — primary track
-
-| Package | Version | Role in Curva |
-|---|---|---|
-| `hyperswarm` | ^4.17.0 | Peer discovery on `sha256("curva/<slug>")` |
-| `corestore` | ^7.11.0 | Per-room store, replication multiplexer |
-| `hypercore` | transitive via autobase | Playhead + chat writers + sealed-prediction epochs |
-| `hyperbee` | ^2.27.3 | Chat view + roomState with `sub()` namespaces |
-| `autobase` | ^7.28.1 | Pattern B multi-writer chat + playhead |
-| `hyperdrive` | ^13.3.2 | Per-peer clip filesystem |
-| `hyperblobs` | ^2.12.1 | Clip thumbnails |
-| `hypercore-blob-server` | ^1.15.0 | HTTP range serve for local clip playback |
-| `blind-peering` | ^2.4.0 | Companion attachment for offline persistence |
-| `keet-identity-key` | ^3.2.0 | Portable-device identity attestation |
-| `hypertrace` + `hypertrace-prometheus` | ^1 | Trace-counter instrumentation + `/metrics` exporter |
-| `pear-runtime` | ^1.3.1 | The runtime shell that hosts the app |
-
-**`hyperswarm`** — Chose it because peer discovery without a coordinator is table stakes for "no server" claims; libp2p or WebRTC + signaling force a signaling server. Wired via `sha256("curva/<slug>")` topic derivation; `CURVA_FORCE_RELAY=1` in the demo path enables `relayThrough` when hole-punching fails. Trade-off: room slug is trivially guessable, so we defend at the writer-invitation layer, not at discovery. Any peer can dial; only invited peers become writers.
-
-**`HyperDHT` (transitive)** — Chose it because it makes zero-server operation credible; `relayThrough` is a full fallback ladder. Trade-off: relay mode is measurably slower than direct hole-punching.
-
-**`corestore`** — Chose it because autobase + every hypercore needs one replication pipe; corestore is canonical. Wired one corestore per room, namespaced by slug. Trade-off: room storage is not shared across rooms; we chose isolation over reuse.
-
-**`hypercore`** — Chose it because we need append-only signed logs both inside Autobase and as standalone encrypted epochs for sealed predictions. Wired sealed predictions via `hypercore(store, {encryptionKey: deriveSealKey({slug, epoch, hostSecret})})` — BLAKE2b-256 key derivation. Trade-off: encryption key is per-epoch; if the host secret leaks, every past epoch under that secret decrypts.
-
-**`hyperbee`** — Chose it because we need range queries (`chat/<seq>`, `writers/<hex>`, `providers/<pubkey>`) with cheap prefix reads. Wired via `roomState.sub('room' | 'qvac' | 'providers' | 'presence')` — four byte-prefixed namespaces on one bee, with `readRoomKey()` falling back to the legacy flat prefix. Trade-off: migration window costs one extra `get()` per read until every peer has migrated.
-
-**`autobase`** — Chose it because chat is bidirectional and needs deterministic linearization; Pattern B (host-controlled `addWriter`) fits exactly. Wired with a PURE apply reducer (memo at `chat.js:234`), observational middleware chain via `base.on('update')` (not inside apply — ADR-006), 30s background ack + post-append fire, `checkoutAt(v)` for read-only chat scrubbing. Trade-off: Pattern B means only the host can promote writers; losing the host bricks writer promotions. We accepted this over Pattern A (auto-promote on presence) which would open the room to any peer.
-
-**`hyperdrive`** — Chose it because clips are big; we want a filesystem, not raw blocks. Wired one drive per peer at `<store>/clips/<peerKeyHex>/`. Trade-off: one drive per peer means N drives for N peers; we chose that over one shared drive to avoid write contention.
-
-**`hyperblobs`** — Chose it because thumbnails are content-addressed image blobs. Wired one blob id per clip via the clip index Hyperbee. Trade-off: missing thumbnails cannot be regenerated on-demand from remote video; we ship thumbnails eagerly.
-
-**`hypercore-blob-server`** — Chose it because the renderer needs HTTP range requests for `<video>` seek; hypercore natively cannot. Wired one BlobServer per peer, bound to loopback. Trade-off: loopback-only, so browser plays but remote fetch must go through blind-peering. That is by design.
-
-**`blind-peering`** — Chose it because watch parties happen while friends are offline. Wired with an explicit `target` per base (`auto.wakeupCapability.key`) and per core (`core.key`) rather than package default; suspend/resume tied to Pear teardown. Trade-off: extra dial cost from explicit target pinning; we chose that over silent breakage from a future default change.
-
-**`keet-identity-key`** — Chose it because we want portable identity across devices without a coordinator. Wired via `verifyPeerProof(proof, attestedData)` on every presence beacon; green shield renders on match. Trade-off: we surface identity but do not gate authorization on it; roomState writer roster is what actually gates writes.
-
-**`hypertrace` + `hypertrace-prometheus` + stats packages** — Chose them because we wanted production-grade counters, not `console.log`. Wired via `startPrometheus()` bound explicitly to `127.0.0.1:<port>` (not `0.0.0.0` — audit fix C1). `hypercore-stats`, `hyperswarm-stats`, `hyperdht-stats` loaded dynamically and registered on the same registry. Trade-off: loopback-only means no LAN scrape; federation happens via backend companion, per peer opt-in.
-
-**`pear-runtime`** — Chose it because Pear is the whole distribution story; users `pear run pear://<key>`. Wired following `holepunchto/hello-pear-electron@1.0.0`. Trade-off: production release cadence still relies on `pear stage` + `pear release`; a mis-published stage cannot be silently rolled back.
-
-### QVAC — 15 on-device AI capabilities
-
-Every capability runs on-device via `@qvac/sdk@^0.14.0`. No cloud fallback. Model registry pinned in `backend/src/data/qvac-models.json`.
-
-| Capability | SDK entrypoint | Wire-in file |
-|---|---|---|
-| Bergamot NMT | `translate` + langdetect routing | `bare/translate.js`, `bare/llmTranslate.js` |
-| Qwen3 LLM | `completion` streaming + `json_schema` | `bare/commentator.js`, `roomBot.js`, `voiceCoach.js`, `askTheFrame.js`, `goalCard.js` |
-| Whisper Tiny STT | `whisperConfigSchema` + VAD Silero 5.1.2 | `bare/voiceCoach.js`, `bare/diarization.js` |
-| Supertonic multilingual TTS | streaming synthesis | `bare/announcer.js` |
-| Chatterbox voice cloning (EN/IT only) | `voiceClone` API | `bare/voiceClone.js` |
-| Llama-3.2 streaming commentator | `contentDelta` + `thinkingDelta` + `completionStats` | `bare/commentator.js` |
-| SmolVLM2 500M + mmproj | multimodal `completion` | `bare/vlmCaption.js` |
-| MobileNetV3 pre-filter | `sdk.classify({modelId, image, topK})` | `bare/vlmCaption.js#L234-L275` |
-| OCR_LATIN | two-stage CRAFT + Latin recognizer | `bare/ocr.js` |
-| Parakeet CTC 0.6B (EN fallback) | streaming partials | `bare/diarization.js` |
-| EmbeddingGemma 300M Q4 | `ragIngest` + `ragSearch` + `embed` | `bare/rag.js`, `bare/semanticSearch.js`, `backend/src/lib/qvac/sharedRag.ts` |
-| MCP tool calling | in-process McpClient shape | `bare/mcpTools.js` |
-| Delegated inference | `startQVACProvider` + firewall + `loadModel({delegate})` | `backend/src/lib/qvac/delegatedProvider.ts`, `bare/delegatedProvider.js` |
-| Streaming knobs | kvCache + reasoning_budget + remove_thinking_from_context | `bare/announcer.js`, `bare/commentator.js` |
-| `@qvac/langdetect-text` | auto pivot pair routing | `bare/langDetectRouter.js` |
-
-**Bergamot NMT** — Chose it because on-device translation with no data egress kills the "no servers" property claim. Wired via `translate({from, to, text})` with EN-hub pivot for IT<->ID / IT<->EN / EN<->ID (`modelConfig.pivotModel`). Trade-off: Bergamot coverage is smaller than cloud translators; we support EN/IT/ID and pivot elsewhere.
-
-**Qwen3 LLM** — Chose it because it supports MCP tool calling AND `json_schema` structured output — the two features we depend on most. Wired one shared `sharedLlmHandle` at boot passed to every consumer so we do not reload the model. Trade-off: memory-heavy; on 8GB devices only one LLM at a time, so commentator and voice coach share.
-
-**Whisper Tiny STT** — Chose it because streaming STT with VAD gives us end-of-turn detection for push-to-talk. Wired with `whisperConfigSchema.vadModelSrc = VAD_SILERO_5_1_2`, tuned per voice-assistant docs (threshold 0.6, min_speech 300ms, min_silence 700ms). Trade-off: less accurate than Whisper Base; we chose speed over accuracy for push-to-talk.
-
-**Supertonic multilingual TTS** — Chose it because on-device streaming TTS in EN/IT/ID matches our target audience. Wired as a streaming pipeline emitting audio chunks as they synthesize. Trade-off: first-token latency is higher than cloud TTS; we hide behind a "thinking" indicator.
-
-**Chatterbox voice cloning** — Chose it because a personal announcer voice makes the watch-party feel like your friends' voices; cloud voice clone is a privacy nightmare. Wired via 10-second sample recorded in-app; voice profile stored locally. Trade-off: **EN/IT only**; ID cloning is on roadmap, not shipped. We call this out explicitly in the UI.
-
-**Llama-3.2 streaming commentator** — Chose it because smaller than Qwen3, streaming-optimized. Wired with `contentDelta`, `thinkingDelta`, `completionStats` all surfaced in the UI; kvCache session key means sub-100ms time-to-first-token per tick after warmup. Trade-off: does not do MCP tool calling as reliably as Qwen3; commentator is monologue only.
-
-**SmolVLM2 500M + mmproj** — Chose it because it is the only on-device VLM at ~500MB that captions football scenes coherently; alternatives (LLaVA-1.5) are 4x bigger. Wired via `sdk.completion` with the projection model on paused frames; caption goes into chat as `system:vlm-caption` and into the ask-the-frame RAG workspace. Trade-off: first download is ~521MB; we fall back to text-only ask-the-frame if not cached.
-
-**MobileNetV3 pre-filter** — Chose it because running SmolVLM2 on every paused frame is expensive; MobileNetV3 gates in ~50ms. Wired via `preFilter(imageBuffer)` calling `sdk.classify({modelId, image, topK})` and deciding whether to hand off to SmolVLM2. Fails open on any classifier error. Trade-off: fail-open means a broken classifier is silently ignored; we accept because pre-filter is a cost saver, not a correctness gate.
-
-**OCR_LATIN** — Chose it for reading jersey numbers and scoreboards; two-stage (CRAFT + Latin recognizer) handles rotated jerseys via `defaultRotationAngles`. Wired via `sdk.ocr({image})` returning blocks with confidence; `extractScore(blocks)` regex turns `"MAN 2 - 1 LIV"` into `{home:2, away:1}`. Trade-off: Latin-only; Arabic and CJK jerseys are out of scope.
-
-**Parakeet CTC 0.6B** — Chose it because on English-only rooms with tight RAM, Parakeet is smaller than Whisper and streams partials at 1s chunks. Wired as fallback when Whisper is unavailable or room language is EN. Trade-off: English-only.
-
-**EmbeddingGemma 300M Q4** — Chose it because we wanted true RAG (not "prompt stuffing") for voice coach, ask-the-frame, shared WC26 fixtures; small enough to co-load with Qwen3. Wired with debounced per-workspace reindex bookkeeping; timers cleared on `close()`. Backend shares WC26 fixtures via companion. Trade-off: HyperDB requires >=16 docs before reindex is meaningful; we degrade `reindexed:false` with reason until threshold.
-
-**MCP tool calling** — Chose it because it turns the LLM into an on-device agent; alternative (function calling only) is coupled to a specific model. Wired via in-process McpClient shape `{listTools, callTool}`. Backend exposes room MCP tools; peer exposes local tools. Trade-off: in-process only; we do not expose MCP over the swarm because that would require the tool sender to trust the room.
-
-**Delegated inference** — Chose it because a peer with a strong GPU can serve a peer with a weak one — real P2P inference. Wired via `startQVACProvider({firewall: {mode, publicKeys}})` with fail-closed empty allow-list; peer advertises pubkey in Hyperbee; consumer calls `loadModel({delegate})`; streaming events flow via DHT. Trade-off: a malicious provider could return garbage tokens; we do not have integrity attestation yet — trust is at the friendship layer.
-
-**Streaming knobs (kvCache + reasoning_budget + remove_thinking_from_context)** — Chose them because every millisecond of first-token latency shows on camera. Wired with `deleteCache` on room close so kv is not leaked between rooms. Trade-off: per-session kvCache; switching rooms starts cold on the new one.
-
-**`@qvac/langdetect-text`** — Chose it because we need to auto-route translation without asking "what language is this?". Wired via detection on incoming chat text; pivot via EN hub if direct pair not installed. Trade-off: short strings (<8 chars) are unreliable; we skip translation on those.
-
-### WDK — cameo track (honest scope)
-
-Curva is primarily Pears + QVAC. WDK is a cameo, but every piece we ship is real and provable on Sepolia.
-
-| Package | Version | Role |
-|---|---|---|
-| `@tetherto/wdk` | ^1.0.0-beta.12 | Umbrella meta-package |
-| `@tetherto/wdk-wallet-evm-erc-4337` | ^1.0.0-beta.10 | Safe smart account + Candide bundler fallback |
-| `@tetherto/wdk-secret-manager` | ^1.0.0-beta.3 | PBKDF2 + XSalsa20-Poly1305 seed encryption |
-
-**`@tetherto/wdk` (meta)** — Chose it because Curva ships a wallet inside the app so tipping requires no external wallet install; WDK is the Tether-native way. Wired via `pear-app/bare/wallet/worklet.js` importing the wallet factory with `onChainIdentifier: {name: 'curva', version: '0.1.0'}` so any WDK-instrumented telemetry attributes usage back to us. Trade-off: we bind to a specific WDK beta line, so beta churn can break boot. We accept that as the cost of being on the frontier.
-
-**`@tetherto/wdk-wallet-evm-erc-4337`** — Chose it for two settlement paths: EIP-3009 (peer signs off-chain, backend facilitator submits and pays gas) as primary, and ERC-4337 Safe smart account via Candide bundler as fallback for chains without EIP-3009. Wired via `bare/wallet/eip3009.js` (primary) and `bare/wallet/worklet.js` (fallback), with the `onChainIdentifier: 'curva'` marker at `eip3009.js#L34-L57`. Trade-off: our token is a **USDT-branded EIP-3009 token on Sepolia**, not real mainnet USDT. Cup rules disallow real mainnet spend and Sepolia has no real USDT. We deploy a compatible ERC-20 with the EIP-3009 extension so the code path is identical to what mainnet ship would look like.
-
-**`@tetherto/wdk-secret-manager`** — Chose it because PBKDF2 + XSalsa20-Poly1305 is the WDK-native way to store seeds; alternative (raw file + OS keychain) is platform-specific and less portable. Wired via `bare/wallet/worklet.js` — user password derives the KDF; encrypted seed lives in the pear data directory. Trade-off: if the user forgets their password, the seed is unrecoverable. This is a feature (no backdoor) but a bad UX; we compensate with a recovery-phrase export.
-
-**EIP-3009 primary tip path** — Chose it because gasless tips mean the tipper does not need ETH — matches the WDK "money-native UX" philosophy. Wired via `bare/wallet/eip3009.js`; peer signs authorization off-chain, backend `facilitatorRoutes.ts` submits via sponsor treasury. Trade-off: backend must have gas; if sponsor treasury dries up, tips queue. We surface treasury state at `GET /pears/status`.
-
-**ERC-4337 Candide fallback** — Chose it because for chains where EIP-3009 is not available, ERC-4337 + Candide bundler is the account-abstraction path. Wired via the same WDK wallet factory; different `chainId` triggers the ERC-4337 branch; `onChainIdentifier: 'curva'` marker surfaces on the bundler side. Trade-off: two paths have different UX (single sign vs userOp signing) and failure modes; we route by chain, not by user preference.
-
-**USDT-branded EIP-3009 Sepolia token** — Chose it because real mainnet USDT is not available on Sepolia. Rather than skip the WDK track entirely, we deploy a USDT-branded ERC-20 with the EIP-3009 extension so the code path is 1:1 with mainnet ship. Wired via `contracts/src/CurvaUSDT.sol` (Foundry); OpenZeppelin `ERC20Permit` + EIP-3009 extension; address wired into `backend/src/config/main-config.ts`. Trade-off: **it is not real USDT — it is a USDT-branded testnet token**. We are explicit about this in the video and DoraHacks details. The wire-in code (WDK + facilitator + on-chain marker) is real.
-
----
-
-## Commit-pinned permalinks
-
-Every link below is pinned to commit `517cff080a013ec94dece86c02a35821cab7e726`. GitHub freezes the file to that commit, so the exact line numbers cited will never drift even if `main` moves on. Land on the block, verify the claim, walk out.
-
-### Pears architecture depth
-
-1. **Autobase Pattern B addWriter** (host-side control block, rate-limited): [`bare/room.js#L698-L961`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/room.js#L698-L961) — related test: [`autobase-divergence.test.js#L1-L240`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/test/autobase-divergence.test.js#L1-L240) — ADR-001.
-2. **Chat apply() purity + writer promotion inside reducer**: [`bare/chat.js#L234-L318`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/chat.js#L234-L318) — ADR-001.
-3. **base.ack() background loop**: [`bare/room.js#L74-L94`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/room.js#L74-L94).
-4. **base.ack() post-append fire**: [`bare/room.js#L100-L111`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/room.js#L100-L111) — ADR-004.
-5. **Autobase view.checkout(v) chat scrubber**: [`bare/chat.js#L697-L735`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/chat.js#L697-L735).
-6. **Hyperbee sub() namespacing**: [`bare/room.js#L324-L365`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/room.js#L324-L365).
-7. **Hypercore-encrypted sealed predictions (BLAKE2b-256 key derivation)**: [`bare/predictions.js#L835-L870`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/predictions.js#L835-L870) — ADR-008.
-8. **Apply middleware compose pattern**: [`bare/lib/applyMiddleware.js#L80-L110`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/lib/applyMiddleware.js#L80-L110) — ADR-006.
-9. **Apply middleware observational wire-in**: [`bare/room.js#L125-L187`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/room.js#L125-L187) — ADR-006.
-10. **keet-identity verifyPeerProof**: [`bare/keetIdentity.js#L353-L400`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/keetIdentity.js#L353-L400) — ADR-002.
-11. **blind-peering registerAutobase (explicit target)**: [`bare/blindPeering.js#L217-L260`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/blindPeering.js#L217-L260) — ADR-003.
-12. **blind-peering suspend/resume**: [`bare/blindPeering.js#L343-L380`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/blindPeering.js#L343-L380).
-13. **Autobase divergence + reorder test**: [`test/autobase-divergence.test.js#L1-L240`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/test/autobase-divergence.test.js#L1-L240).
-
-### QVAC breadth
-
-14. **Voice coach factory (5-cap orchestration)**: [`bare/voiceCoach.js#L205-L235`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/voiceCoach.js#L205-L235) — ADR-005.
-15. **Voice coach prompt-injection defense** (NFKC + bidi + zero-width strip + `<retrieved_untrusted>` tags): [`bare/voiceCoach.js#L511-L540`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/voiceCoach.js#L511-L540).
-16. **Goal pipeline 6-capability fanout**: [`bare/goalPipeline.js#L298-L370`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/goalPipeline.js#L298-L370) — ADR-007.
-17. **Ask-the-frame sanitizer**: [`bare/askTheFrame.js#L82-L107`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/askTheFrame.js#L82-L107).
-18. **Ask-the-frame caption tag fence** (`<current_frame_untrusted>` + `<retrieved_untrusted>`): [`bare/askTheFrame.js#L250-L295`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/askTheFrame.js#L250-L295).
-19. **RAG workspace lifecycle**: [`bare/rag.js#L105-L165`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/rag.js#L105-L165).
-20. **MobileNetV3 pre-filter** (cheap classifier gates SmolVLM2): [`bare/vlmCaption.js#L234-L275`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/vlmCaption.js#L234-L275).
-21. **JSON schema goal card** (QVAC `responseFormat.json_schema`): [`bare/goalCard.js#L45-L108`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/goalCard.js#L45-L108).
-22. **Delegated QVAC provider (backend)** with fail-closed allow-list: [`backend/src/lib/qvac/delegatedProvider.ts#L1-L313`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/backend/src/lib/qvac/delegatedProvider.ts#L1-L313).
-23. **FIFA 2026 shared RAG (backend)**: [`backend/src/lib/qvac/sharedRag.ts#L1-L450`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/backend/src/lib/qvac/sharedRag.ts#L1-L450).
-
-### Observability
-
-24. **Prometheus loopback bind** (audit fix C1, 127.0.0.1 not 0.0.0.0): [`bare/observability.js#L340-L385`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/observability.js#L340-L385) — ADR-009.
-25. **hypertrace + Prometheus registry federation** (`register: promClient.register` passed to hypertrace-prometheus so hypercore/hyperswarm/dht/udx gauges share one `/metrics` response): [`bare/observability.js#L241-L339`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/observability.js#L241-L339).
-
-### Backend companion
-
-26. **Match-clip Hyperdrive** (peer-replicable highlight distribution over Hyperdrive + Hyperblobs): [`backend/src/lib/pears/matchClipDrive.ts`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/backend/src/lib/pears/matchClipDrive.ts).
-27. **Blind-peering seeder subprocess pool** (per-room subprocess with `noise pubkey captured` handshake): [`backend/src/lib/pears/seeder.ts`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/backend/src/lib/pears/seeder.ts).
-28. **Pear app distribution seeder** (permanent `pear seed` subprocess for the app itself): [`backend/src/lib/pears/appDistribution.ts`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/backend/src/lib/pears/appDistribution.ts).
-29. **Backend Prometheus registry** (dedicated `curva_backend_*` counter families + HTTP histogram + bounded-cardinality labels): [`backend/src/lib/observability.ts`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/backend/src/lib/observability.ts).
-30. **Backend MCP tools** (7 tools: `score.getLive`, `ref.discipline`, `stadium.getFixtures`, `roster.getSquad`, `venue.getDetails`, `standings.getTable`, `broadcast.getRegions`): [`backend/src/lib/mcp/tools.ts`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/backend/src/lib/mcp/tools.ts).
-31. **EIP-3009 facilitator** (sponsor-submitted `transferWithAuthorization` for gasless USDT tips): [`backend/src/routes/facilitatorRoutes.ts`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/backend/src/routes/facilitatorRoutes.ts).
-32. **Tip indexer worker** (watches Sepolia for `AuthorizationUsed` + `Transfer` events, indexes them for the room directory): [`backend/src/workers/tipIndexerWorker.ts`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/backend/src/workers/tipIndexerWorker.ts).
-
-### Integration tests (cross-capability correctness)
-
-33. **Voice coach 5-cap end-to-end** (fake SDK, real orchestration): [`test/integration/voice-coach-e2e.test.js`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/test/integration/voice-coach-e2e.test.js).
-34. **Ask-the-frame 5-cap end-to-end** (VLM caption + RAG ingest + LLM stream + TTS): [`test/integration/ask-the-frame-e2e.test.js`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/test/integration/ask-the-frame-e2e.test.js).
-35. **Goal pipeline 6-cap end-to-end** (OCR → goalCard → MCP → Bergamot → TTS → Autobase): [`test/integration/goal-pipeline-e2e.test.js`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/test/integration/goal-pipeline-e2e.test.js).
-
-### Architecture Decision Records (10 total)
-
-Every ADR is a self-contained decision with context, alternatives considered, consequences, and references. Format: Context / Decision / Consequences / References.
-
-- [ADR-001 Autobase Pattern B multi-writer](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/docs/adr/001-autobase-pattern-b-multi-writer.md)
-- [ADR-002 keet-identity attestation](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/docs/adr/002-keet-identity-attestation.md)
-- [ADR-003 blind-peering target strategy](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/docs/adr/003-blind-peering-target-strategy.md)
-- [ADR-004 base.ack() cadence](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/docs/adr/004-base-ack-cadence.md)
-- [ADR-005 voice coach orchestration](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/docs/adr/005-voice-coach-orchestration.md)
-- [ADR-006 apply middleware observational](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/docs/adr/006-apply-middleware-observational.md)
-- [ADR-007 goal pipeline fanout](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/docs/adr/007-goal-pipeline-fanout.md)
-- [ADR-008 hypercore sealed predictions](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/docs/adr/008-hypercore-sealed-predictions.md)
-- [ADR-009 Prometheus loopback federation](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/docs/adr/009-prometheus-loopback-federation.md)
-- [ADR-010 design tokens minimalism](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/docs/adr/010-design-tokens-minimalism.md)
-- [ADR index README](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/docs/adr/README.md)
-
-### What to click if you only have 90 seconds
-
-1. **Autobase Pattern B**: permalinks 1 (room.js) + 2 (chat.js) + 13 (divergence test).
-2. **QVAC depth**: permalink 14 (voice coach factory) + 15 (injection defense) — one push-to-talk turn, five capabilities, defense in depth.
-3. **One security decision, well done**: permalink 24 (Prometheus loopback bind) — one line of listen args that turns a network-exposed exporter into a loopback-only one.
-
-Everything else fans out from those three.
-
----
 
 <div align="center">
 
