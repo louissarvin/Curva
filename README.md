@@ -10,7 +10,7 @@ For football fans separated by continents who still want to react to the same go
 
 Built for the **Tether Developers Cup 2026** by **Team Indonesia**. Track: **Pears** (primary) with working **WDK** and **QVAC** cameos.
 
-**Reviewers start here:** [`CODE_REVIEW.md`](CODE_REVIEW.md) - grep-friendly index of every wave 2 to 5 feature with file:line anchors, test coverage by concern, the feature-flag boot matrix, and an honest list of what we did not build. Companion reads: [`pear-app/README.md`](pear-app/README.md), [`backend/README.md`](backend/README.md), [`docs/adr/README.md`](docs/adr/README.md).
+**Reviewers start here:** the [Code review guide](#code-review-guide) section below has a grep-friendly file:line index, the [Commit-pinned permalinks](#commit-pinned-permalinks) section links directly to every high-value block, and [`TETHER_STACK.md`](TETHER_STACK.md) accounts for every Tether-stack piece with the "why chose / how wired / trade-off accepted" triple. Companion reads: [`pear-app/README.md`](pear-app/README.md), [`backend/README.md`](backend/README.md), [`docs/adr/README.md`](docs/adr/README.md).
 
 </div>
 
@@ -459,6 +459,145 @@ MIT. See [`LICENSE`](LICENSE). Copyright the Curva contributors, 2026.
 - **Sepolia only.** Every USDT figure, tx hash, and settlement path in this repo is on Ethereum Sepolia testnet. Do not send mainnet funds to any address in this repo.
 - **Unsigned builds.** If a `.dmg` is attached to the submission it is unsigned; macOS Gatekeeper will warn. Verify the SHA-256 posted in the submission thread before opening.
 - **Model downloads.** First run of the Pear app downloads roughly 500 MB of QVAC models. Subsequent runs are instant.
+
+---
+
+## Code review guide
+
+Direct response to the semifinal judges' brief. This section walks the codebase in the order judges will read it. Every claim below is grep-verifiable.
+
+### 5-minute walkthrough
+
+```sh
+git clone https://github.com/louissarvin/Curva
+cd Curva/pear-app && npm install
+npm test                                        # expected: 400+ pass, 1600+ asserts
+cd ../backend && bun install && bun test        # expected: 536 pass
+bun run dev                                     # backend up on :3700
+curl -s http://localhost:3700/health | jq .success                                          # true
+curl -s http://localhost:3700/metrics | head -3                                             # Prometheus text
+curl -s http://localhost:3700/rag/status                                                    # {ready:true, corpusSize:166, competition:"FIFA World Cup 2026"}
+curl -s -X POST http://localhost:3700/rag/search -d '{"query":"Argentina","topK":2}' \
+  -H 'Content-Type: application/json' | jq .data.hits[0].title                              # "Argentina (ARG)"
+```
+
+### Where the depth lives (grep-friendly)
+
+| Concern | File | Grep for |
+|---|---|---|
+| Autobase Pattern B addWriter host-side gate | `pear-app/bare/room.js` | `addWriter` around L698-L961 |
+| Chat apply purity + host-only writer promotion | `pear-app/bare/chat.js` | `apply() is PURE` around L234-L318 |
+| base.ack() cadence (background loop + post-append) | `pear-app/bare/room.js` | `startAckLoop`, `appendThenAck` around L74-L111 |
+| Autobase view.checkout(v) chat scrubber | `pear-app/bare/chat.js` | `checkoutAt` around L697-L735 |
+| Hyperbee sub() namespacing (4 subs on one bee) | `pear-app/bare/room.js` | `roomStateSubs`, `readRoomKey` around L324-L365 |
+| Hypercore encryption for sealed predictions | `pear-app/bare/predictions.js` | `deriveSealKey` around L835-L870 |
+| Apply middleware compose pattern (koa-style) | `pear-app/bare/lib/applyMiddleware.js` | `composeApply` around L80-L110 |
+| Apply middleware observational wire-in | `pear-app/bare/room.js` | `attachApplyMiddleware` around L125-L187 |
+| keet-identity verifyPeerProof | `pear-app/bare/keetIdentity.js` | `verifyPeerProof` around L353-L400 |
+| blind-peering explicit target + suspend/resume | `pear-app/bare/blindPeering.js` | `registerAutobase`, `suspend` around L217-L380 |
+| Voice coach 5-cap prompt-injection defense | `pear-app/bare/voiceCoach.js` | `<retrieved_untrusted>` around L511-L540 |
+| Goal pipeline 6-cap fanout | `pear-app/bare/goalPipeline.js` | `runPipeline` around L298-L370 |
+| Ask-the-frame injection defense | `pear-app/bare/askTheFrame.js` | `sanitizeUntrusted`, `<current_frame_untrusted>` around L82-L295 |
+| MobileNetV3 pre-filter | `pear-app/bare/vlmCaption.js` | `preFilter` around L234-L275 |
+| JSON schema goal card | `pear-app/bare/goalCard.js` | `GOAL_CARD_SCHEMA`, `responseFormat` around L45-L108 |
+| Prometheus loopback bind (audit fix C1) | `pear-app/bare/observability.js` | `127.0.0.1` around L340-L385 |
+| Delegated QVAC provider (backend) | `backend/src/lib/qvac/delegatedProvider.ts` | `startQVACProvider`, allow-list refusal |
+| FIFA 2026 shared RAG (backend) | `backend/src/lib/qvac/sharedRag.ts` | `EmbeddingGemma`, WC26 fixtures |
+| Autobase divergence + reorder test | `pear-app/test/autobase-divergence.test.js` | flagship correctness test for ADR-001 |
+
+### What each test file proves
+
+- **Autobase determinism**: `chat-determinism.test.js`, `autobase-divergence.test.js`, `playhead-determinism.test.js`
+- **QVAC completion behavior**: `voice-coach.test.js`, `ask-the-frame.test.js`, `goal-pipeline.test.js`, `commentator.test.js`, `commentator-streaming.test.js`, `commentator-stt.test.js`, plus integration/*.test.js
+- **Pears primitives**: `chat-checkout.test.js`, `room-state-sub.test.js`, `predictions-encryption.test.js`, `blind-peering-lifecycle.test.js`, `keet-identity.test.js`
+- **Observability**: `observability.test.js`, `observability-stats.test.js`, `model-snapshot.test.js`
+- **Prompt-injection defense**: assertions across `test/integration/`, `voice-coach.test.js`, `ask-the-frame.test.js`
+- **Backend**: `sharedRag.test.js`, `delegatedProvider.test.js`, `matchClipDrive.test.js`, `enhanced-tools.test.js`
+
+### Docs-first discipline evidence
+
+- Every non-trivial module cites the official docs URL with fetched date in its header comment.
+- Every ADR anchors to installed source at `pear-app/node_modules/*` file:line references.
+- One wave-3 agent explicitly rejected a docs-lied situation: `hyperdrive.mount(path, key)` is advertised in the Pears docs but is not in installed `node_modules/hyperdrive/index.js`. Match-clip Hyperdrive works around this without `.mount`.
+
+### What we intentionally did NOT build
+
+- `hyperdb` schema refactor — schema-build step turns a 3h estimate into a full-day trap.
+- `blind-push` FCM notifications — needs a real FCM sender token, out of scope for local demo.
+- x402 VIP room gate — needs real testnet USDT payment plumbing, cameo track scope.
+- BCI transcription, video generation, upscale, fine-tune — off-domain per SDK docs, and SDK explicitly warns against video for demo laptops (OOM).
+- Continuous voice-assistant echo-gating — SDK example shows why it's flaky. Push-to-talk is the shipped compromise.
+- Hyperbeam terminal sharing — off-domain for a watch party.
+- Real mainnet USDT — cup rules disallow; we ship a USDT-branded EIP-3009 token on Sepolia instead, wire-identical.
+
+### Feature-flag boot matrix
+
+See [`pear-app/README.md`](pear-app/README.md) "Full feature demo (semifinal max-out)" section for the exact peer-A / peer-B / backend boot commands with every flag pinned. Reviewers can pick a subset for a shallow pass or the full set for a deep dive.
+
+Flag defaults are all OFF so a clean checkout has zero opt-in surface. Every module fails closed when its flag is missing, so a mis-configured env produces `NOT_READY` events rather than crashes.
+
+---
+
+## Commit-pinned permalinks
+
+Every link below is pinned to commit `517cff080a013ec94dece86c02a35821cab7e726`. GitHub freezes the file to that commit, so the exact line numbers cited will never drift even if `main` moves on. Land on the block, verify the claim, walk out.
+
+### Pears architecture depth
+
+1. **Autobase Pattern B addWriter** (host-side control block, rate-limited): [`bare/room.js#L698-L961`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/room.js#L698-L961) — related test: [`autobase-divergence.test.js#L1-L240`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/test/autobase-divergence.test.js#L1-L240) — ADR-001.
+2. **Chat apply() purity + writer promotion inside reducer**: [`bare/chat.js#L234-L318`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/chat.js#L234-L318) — ADR-001.
+3. **base.ack() background loop**: [`bare/room.js#L74-L94`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/room.js#L74-L94).
+4. **base.ack() post-append fire**: [`bare/room.js#L100-L111`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/room.js#L100-L111) — ADR-004.
+5. **Autobase view.checkout(v) chat scrubber**: [`bare/chat.js#L697-L735`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/chat.js#L697-L735).
+6. **Hyperbee sub() namespacing**: [`bare/room.js#L324-L365`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/room.js#L324-L365).
+7. **Hypercore-encrypted sealed predictions (BLAKE2b-256 key derivation)**: [`bare/predictions.js#L835-L870`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/predictions.js#L835-L870) — ADR-008.
+8. **Apply middleware compose pattern**: [`bare/lib/applyMiddleware.js#L80-L110`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/lib/applyMiddleware.js#L80-L110) — ADR-006.
+9. **Apply middleware observational wire-in**: [`bare/room.js#L125-L187`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/room.js#L125-L187) — ADR-006.
+10. **keet-identity verifyPeerProof**: [`bare/keetIdentity.js#L353-L400`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/keetIdentity.js#L353-L400) — ADR-002.
+11. **blind-peering registerAutobase (explicit target)**: [`bare/blindPeering.js#L217-L260`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/blindPeering.js#L217-L260) — ADR-003.
+12. **blind-peering suspend/resume**: [`bare/blindPeering.js#L343-L380`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/blindPeering.js#L343-L380).
+13. **Autobase divergence + reorder test**: [`test/autobase-divergence.test.js#L1-L240`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/test/autobase-divergence.test.js#L1-L240).
+
+### QVAC breadth
+
+14. **Voice coach factory (5-cap orchestration)**: [`bare/voiceCoach.js#L205-L235`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/voiceCoach.js#L205-L235) — ADR-005.
+15. **Voice coach prompt-injection defense** (NFKC + bidi + zero-width strip + `<retrieved_untrusted>` tags): [`bare/voiceCoach.js#L511-L540`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/voiceCoach.js#L511-L540).
+16. **Goal pipeline 6-capability fanout**: [`bare/goalPipeline.js#L298-L370`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/goalPipeline.js#L298-L370) — ADR-007.
+17. **Ask-the-frame sanitizer**: [`bare/askTheFrame.js#L82-L107`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/askTheFrame.js#L82-L107).
+18. **Ask-the-frame caption tag fence** (`<current_frame_untrusted>` + `<retrieved_untrusted>`): [`bare/askTheFrame.js#L250-L295`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/askTheFrame.js#L250-L295).
+19. **RAG workspace lifecycle**: [`bare/rag.js#L105-L165`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/rag.js#L105-L165).
+20. **MobileNetV3 pre-filter** (cheap classifier gates SmolVLM2): [`bare/vlmCaption.js#L234-L275`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/vlmCaption.js#L234-L275).
+21. **JSON schema goal card** (QVAC `responseFormat.json_schema`): [`bare/goalCard.js#L45-L108`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/goalCard.js#L45-L108).
+22. **Delegated QVAC provider (backend)** with fail-closed allow-list: [`backend/src/lib/qvac/delegatedProvider.ts#L1-L313`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/backend/src/lib/qvac/delegatedProvider.ts#L1-L313).
+23. **FIFA 2026 shared RAG (backend)**: [`backend/src/lib/qvac/sharedRag.ts#L1-L450`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/backend/src/lib/qvac/sharedRag.ts#L1-L450).
+
+### Observability
+
+24. **Prometheus loopback bind** (audit fix C1, 127.0.0.1 not 0.0.0.0): [`bare/observability.js#L340-L385`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/observability.js#L340-L385) — ADR-009.
+
+### Architecture Decision Records (10 total)
+
+Every ADR is a self-contained decision with context, alternatives considered, consequences, and references. Format: Context / Decision / Consequences / References.
+
+- [ADR-001 Autobase Pattern B multi-writer](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/docs/adr/001-autobase-pattern-b-multi-writer.md)
+- [ADR-002 keet-identity attestation](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/docs/adr/002-keet-identity-attestation.md)
+- [ADR-003 blind-peering target strategy](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/docs/adr/003-blind-peering-target-strategy.md)
+- [ADR-004 base.ack() cadence](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/docs/adr/004-base-ack-cadence.md)
+- [ADR-005 voice coach orchestration](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/docs/adr/005-voice-coach-orchestration.md)
+- [ADR-006 apply middleware observational](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/docs/adr/006-apply-middleware-observational.md)
+- [ADR-007 goal pipeline fanout](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/docs/adr/007-goal-pipeline-fanout.md)
+- [ADR-008 hypercore sealed predictions](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/docs/adr/008-hypercore-sealed-predictions.md)
+- [ADR-009 Prometheus loopback federation](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/docs/adr/009-prometheus-loopback-federation.md)
+- [ADR-010 design tokens minimalism](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/docs/adr/010-design-tokens-minimalism.md)
+- [ADR index README](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/docs/adr/README.md)
+
+### What to click if you only have 90 seconds
+
+1. **Autobase Pattern B**: permalinks 1 (room.js) + 2 (chat.js) + 13 (divergence test).
+2. **QVAC depth**: permalink 14 (voice coach factory) + 15 (injection defense) — one push-to-talk turn, five capabilities, defense in depth.
+3. **One security decision, well done**: permalink 24 (Prometheus loopback bind) — one line of listen args that turns a network-exposed exporter into a loopback-only one.
+
+Everything else fans out from those three.
 
 ---
 
