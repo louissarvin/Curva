@@ -213,6 +213,13 @@ function createVoiceCoach (opts = {}) {
     now = () => Date.now()
   } = opts
 
+  // Stable per-room kvCache key. Reused across turns so Qwen3's KV state can
+  // shortcut prefix work on the second and later turns (verified per
+  // https://docs.qvac.tether.io/ai-capabilities/text-generation/ kvCache
+  // section, fetched 2026-07-10). close() calls sdk.deleteCache({kvCacheKey})
+  // so a hot room switch releases the KV memory instead of letting it linger.
+  const KV_CACHE_KEY = 'voicecoach:room:' + String(roomSlug || 'default').slice(0, 64)
+
   if (!chat || typeof chat.send !== 'function' || typeof chat.sendSystem !== 'function') {
     throw new TypeError('createVoiceCoach: chat with send + sendSystem required')
   }
@@ -554,12 +561,21 @@ function createVoiceCoach (opts = {}) {
     }, TURN_TIMEOUT_MS)
 
     try {
+      // Wave-final QVAC polish (F1):
+      //   - reasoning_budget: 0  -> disable per-request thinking channel for a
+      //     spoken reply. Voice coach must answer FAST (single sentence, no
+      //     multi-step reasoning). Verified per @qvac/sdk
+      //     dist/schemas/completion-stream.js:66-73 (fetched 2026-07-10).
+      //   - remove_thinking_from_context: true -> keep chat context clean of
+      //     model reasoning traces so kvCache reuse across turns stays lean.
       const run = sharedLlmHandle.completion({
         modelId: sharedLlmHandle.modelId,
         history,
         stream: true,
         mcp: mcpClients.length > 0 ? mcpClients : undefined,
-        kvCache: 'voicecoach:room:' + String(roomSlug || 'default').slice(0, 64)
+        kvCache: KV_CACHE_KEY,
+        reasoning_budget: 0,
+        remove_thinking_from_context: true
       })
       if (!run || !run.events || typeof run.events[Symbol.asyncIterator] !== 'function') {
         throw new Error('completion() returned no events iterable')
@@ -697,6 +713,20 @@ function createVoiceCoach (opts = {}) {
     state.isSpeaking = false
     pipelineRunOnce = new Set()
     state.endedTurns.clear()
+    // Wave-final QVAC polish (F1): release the per-room KV cache so a hot room
+    // switch does not accumulate megabytes of stale prefix state across the
+    // process. Verified per @qvac/sdk dist/client/api/delete-cache.d.ts:22
+    // (fetched 2026-07-10): deleteCache({kvCacheKey}) drops that key's caches
+    // across every model that used it. Best-effort; SDK errors are non-fatal
+    // because the process may already be tearing down.
+    if (sdk && typeof sdk.deleteCache === 'function') {
+      try {
+        await sdk.deleteCache({ kvCacheKey: KV_CACHE_KEY })
+        emit('voice:kvcache-cleared', { key: KV_CACHE_KEY })
+      } catch (err) {
+        log('warn', 'voiceCoach: deleteCache failed', { message: err && err.message })
+      }
+    }
     emit('voice:closed', {})
   }
 

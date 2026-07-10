@@ -34,6 +34,39 @@ const MAX_QUERY_CHARS = 1024
 const MAX_DOC_BATCH = 128        // hard cap so a malicious peer cannot spam ingest
 const MAX_WORKSPACES = 32        // per-room cap so we do not leak vector DBs
 
+// Wave-final QVAC polish (F2) --------------------------------------------
+//
+// Docs-verification memo for the added lifecycle surface
+//
+// Ground truth (installed):
+//   pear-app/node_modules/@qvac/sdk/dist/client/api/rag.d.ts
+//     - ragChunk({documents, chunkOpts}) : Promise<RagDoc[]>
+//     - ragReindex({workspace}) : Promise<RagReindexResult>
+//         result shape: { reindexed:boolean, details?:{reason?:string, ...} }
+//         Requires >= 16 docs (HyperDB) or reindexed=false with details.
+//     - ragCloseWorkspace({workspace, deleteOnClose?}) : Promise<void>
+//     - ragDeleteWorkspace({workspace}) : Promise<void>
+//
+// Periodic reindex scheduler:
+//   Every REINDEX_INGEST_THRESHOLD ingests to a workspace schedules a debounced
+//   reindex (REINDEX_DEBOUNCE_MS after the last ingest). Emits
+//   `rag:reindexed {workspace, durationMs, reindexed, reason?}`.
+//   Feature flag CURVA_RAG_REINDEX_ENABLED (default: on) suppresses scheduling
+//   entirely when set to '0' or 'false'.
+const REINDEX_INGEST_THRESHOLD = 100
+const REINDEX_DEBOUNCE_MS = 5_000
+const REINDEX_MAX_DURATION_MS = 60_000
+
+function reindexFlagEnabled () {
+  try {
+    const raw = (typeof process !== 'undefined' && process.env &&
+      process.env.CURVA_RAG_REINDEX_ENABLED) || ''
+    if (raw === '') return true  // default ON
+    const s = String(raw).toLowerCase()
+    return s === '1' || s === 'true' || s === 'yes' || s === 'on'
+  } catch { return true }
+}
+
 function slugifyWorkspacePart (s) {
   return String(s || 'default')
     .toLowerCase()
@@ -75,7 +108,16 @@ function createRag (opts = {}) {
     sdk: null,
     lastError: null,
     // Whether ragIngest is available. Older SDK builds may only ship search.
-    hasIngest: false
+    hasIngest: false,
+    // Wave-final QVAC polish (F2): periodic reindex bookkeeping. Per-workspace
+    // ingest counter; when it crosses REINDEX_INGEST_THRESHOLD we (re)schedule
+    // a debounced reindex. Timers are cleared on close() so a stray reindex
+    // cannot fire against a closed workspace. Map value shape:
+    //   { count:number, timer:Timeout|null, inFlight:boolean }
+    reindexBookkeeping: new Map(),
+    reindexEnabled: reindexFlagEnabled(),
+    reindexTotal: 0,
+    closed: false
   }
 
   function status () {
@@ -85,7 +127,13 @@ function createRag (opts = {}) {
       modelSrc: state.modelSrc,
       workspaces: Array.from(state.workspaces),
       lastError: state.lastError,
-      hasIngest: state.hasIngest
+      hasIngest: state.hasIngest,
+      // Wave-final QVAC polish (F2) observability
+      reindexEnabled: !!state.reindexEnabled,
+      reindexTotal: state.reindexTotal,
+      pendingReindexes: Array.from(state.reindexBookkeeping.entries())
+        .filter(([, v]) => !!v.timer || !!v.inFlight)
+        .map(([ws]) => ws)
     }
   }
 
@@ -185,6 +233,12 @@ function createRag (opts = {}) {
       const processed = Array.isArray(res?.processed) ? res.processed.length : 0
       const dropped = Array.isArray(res?.droppedIndices) ? res.droppedIndices.length : 0
       emit('rag:ingested', { workspace, processed, dropped })
+      // Wave-final QVAC polish (F2): bump the per-workspace ingest counter and
+      // debounce a reindex. bumpAndMaybeSchedule() is a noop when the feature
+      // flag is off (CURVA_RAG_REINDEX_ENABLED=0) or the SDK does not expose
+      // ragReindex. Only counts successfully-processed docs so a batch that
+      // was fully dropped does not trip the threshold.
+      if (processed > 0) bumpAndMaybeScheduleReindex(workspace, processed)
       return { ok: true, processed, dropped, workspace }
     } catch (err) {
       state.lastError = (err && err.message) || 'ingest failed'
@@ -264,17 +318,217 @@ function createRag (opts = {}) {
     return out
   }
 
+  // Wave-final QVAC polish (F2) -----------------------------------------
+  //
+  // Public lifecycle wrappers. All are idempotent + graceful: they resolve
+  // with `{ok:false, reason}` on failure instead of throwing so a caller
+  // sequencing chunk -> ingest -> reindex does not need a try/catch chain.
+
+  /**
+   * Wrap ragChunk.
+   * @param {{ workspace?: string, document?: string|string[], chunkOpts?: object }} opts
+   * @returns {Promise<{ ok:boolean, chunks?:Array, reason?:string }>}
+   */
+  async function chunk ({ workspace, document, chunkOpts } = {}) {
+    if (document == null) return { ok: false, reason: 'EMPTY_DOCUMENT' }
+    const docs = Array.isArray(document)
+      ? document.filter((d) => typeof d === 'string' && d.length > 0)
+      : (typeof document === 'string' && document.length > 0 ? [document] : [])
+    if (docs.length === 0) return { ok: false, reason: 'EMPTY_DOCUMENT' }
+    if (docs.length > MAX_DOC_BATCH) docs.length = MAX_DOC_BATCH
+    const ready = await ensureReady()
+    if (!ready) return { ok: false, reason: 'NOT_READY' }
+    if (!state.sdk || typeof state.sdk.ragChunk !== 'function') {
+      return { ok: false, reason: 'CHUNK_UNAVAILABLE' }
+    }
+    try {
+      const params = { documents: docs }
+      if (chunkOpts && typeof chunkOpts === 'object') params.chunkOpts = chunkOpts
+      const chunks = await state.sdk.ragChunk(params)
+      const arr = Array.isArray(chunks) ? chunks : []
+      emit('rag:chunked', {
+        workspace: workspace || null,
+        docCount: docs.length,
+        chunkCount: arr.length
+      })
+      return { ok: true, chunks: arr }
+    } catch (err) {
+      state.lastError = (err && err.message) || 'chunk failed'
+      emit('rag:error', { code: err?.code || 'CHUNK_FAILED', message: state.lastError, workspace: workspace || null })
+      return { ok: false, reason: 'CHUNK_FAILED' }
+    }
+  }
+
+  /**
+   * Wrap ragReindex. Called on-demand by the scheduler or by tests.
+   * @param {{ workspace?: string }} opts
+   * @returns {Promise<{ ok:boolean, reindexed?:boolean, reason?:string, durationMs?:number, details?:object }>}
+   */
+  async function reindex ({ workspace } = {}) {
+    if (typeof workspace !== 'string' || workspace.length === 0) {
+      return { ok: false, reason: 'BAD_WORKSPACE' }
+    }
+    if (state.closed) return { ok: false, reason: 'CLOSED' }
+    const ready = await ensureReady()
+    if (!ready) return { ok: false, reason: 'NOT_READY' }
+    if (!state.sdk || typeof state.sdk.ragReindex !== 'function') {
+      return { ok: false, reason: 'REINDEX_UNAVAILABLE' }
+    }
+    const book = state.reindexBookkeeping.get(workspace) || { count: 0, timer: null, inFlight: false }
+    // Skip if a reindex is already in flight for this workspace; the caller
+    // should await the previous one before scheduling another.
+    if (book.inFlight) return { ok: false, reason: 'IN_FLIGHT' }
+    book.inFlight = true
+    state.reindexBookkeeping.set(workspace, book)
+    const started = Date.now()
+    try {
+      const res = await state.sdk.ragReindex({ workspace })
+      const durationMs = Date.now() - started
+      const wasReindexed = !!(res && res.reindexed)
+      // Reset the ingest counter only when the SDK confirmed reindex happened;
+      // otherwise a below-min-doc-count workspace would loop forever without a
+      // successful reindex.
+      if (wasReindexed) book.count = 0
+      book.inFlight = false
+      state.reindexBookkeeping.set(workspace, book)
+      state.reindexTotal += 1
+      emit('rag:reindexed', {
+        workspace,
+        durationMs,
+        reindexed: wasReindexed,
+        reason: res?.details?.reason || null
+      })
+      return { ok: true, reindexed: wasReindexed, durationMs, details: res?.details || null }
+    } catch (err) {
+      book.inFlight = false
+      state.reindexBookkeeping.set(workspace, book)
+      state.lastError = (err && err.message) || 'reindex failed'
+      emit('rag:error', { code: err?.code || 'REINDEX_FAILED', message: state.lastError, workspace })
+      return { ok: false, reason: 'REINDEX_FAILED' }
+    }
+  }
+
+  /**
+   * Debounce scheduler. Called from ingest().
+   * @param {string} workspace
+   * @param {number} processed
+   */
+  function bumpAndMaybeScheduleReindex (workspace, processed) {
+    if (!state.reindexEnabled) return
+    if (state.closed) return
+    if (!state.sdk || typeof state.sdk.ragReindex !== 'function') return
+    const book = state.reindexBookkeeping.get(workspace) || { count: 0, timer: null, inFlight: false }
+    book.count += Math.max(0, Number(processed) || 0)
+    state.reindexBookkeeping.set(workspace, book)
+    if (book.count < REINDEX_INGEST_THRESHOLD) return
+    // Debounce: clear any pending timer and start a fresh one. Prevents
+    // reindex thrash while a batch ingest is still landing.
+    if (book.timer) {
+      try { clearTimeout(book.timer) } catch { /* noop */ }
+    }
+    book.timer = setTimeout(() => {
+      book.timer = null
+      state.reindexBookkeeping.set(workspace, book)
+      // Fire-and-forget. reindex() is idempotent + gated on inFlight.
+      reindex({ workspace }).catch((err) => {
+        log('warn', 'scheduled reindex threw', { workspace, message: err && err.message })
+      })
+    }, REINDEX_DEBOUNCE_MS)
+    // Do not keep the process alive purely to fire a reindex.
+    try { book.timer.unref && book.timer.unref() } catch { /* noop */ }
+    state.reindexBookkeeping.set(workspace, book)
+    emit('rag:reindex-scheduled', { workspace, count: book.count })
+  }
+
+  /**
+   * Wrap ragCloseWorkspace. Idempotent and safe when the SDK does not ship it.
+   * @param {{ workspace?: string, deleteOnClose?: boolean }} opts
+   * @returns {Promise<{ ok:boolean, reason?:string }>}
+   */
+  async function closeWorkspace ({ workspace, deleteOnClose = false } = {}) {
+    if (typeof workspace !== 'string' || workspace.length === 0) {
+      return { ok: false, reason: 'BAD_WORKSPACE' }
+    }
+    // Cancel any pending reindex timer for this workspace so we do not fire
+    // against a workspace we just released.
+    const book = state.reindexBookkeeping.get(workspace)
+    if (book && book.timer) {
+      try { clearTimeout(book.timer) } catch { /* noop */ }
+      book.timer = null
+    }
+    if (!state.sdk || typeof state.sdk.ragCloseWorkspace !== 'function') {
+      return { ok: false, reason: 'CLOSE_UNAVAILABLE' }
+    }
+    try {
+      await state.sdk.ragCloseWorkspace({ workspace, deleteOnClose: !!deleteOnClose })
+      state.workspaces.delete(workspace)
+      state.reindexBookkeeping.delete(workspace)
+      emit('rag:workspace-closed', { workspace, deleted: !!deleteOnClose })
+      return { ok: true }
+    } catch (err) {
+      state.lastError = (err && err.message) || 'closeWorkspace failed'
+      emit('rag:error', { code: err?.code || 'CLOSE_FAILED', message: state.lastError, workspace })
+      return { ok: false, reason: 'CLOSE_FAILED' }
+    }
+  }
+
+  /**
+   * Wrap ragDeleteWorkspace. The SDK contract requires the workspace to be
+   * closed first; we handle that transparently.
+   * @param {{ workspace?: string }} opts
+   * @returns {Promise<{ ok:boolean, reason?:string }>}
+   */
+  async function deleteWorkspace ({ workspace } = {}) {
+    if (typeof workspace !== 'string' || workspace.length === 0) {
+      return { ok: false, reason: 'BAD_WORKSPACE' }
+    }
+    // Best-effort close first (SDK contract). Ignore its result: if the
+    // workspace was never opened, close will fail but delete may still work.
+    if (state.sdk && typeof state.sdk.ragCloseWorkspace === 'function') {
+      try { await state.sdk.ragCloseWorkspace({ workspace }) } catch { /* noop */ }
+    }
+    if (!state.sdk || typeof state.sdk.ragDeleteWorkspace !== 'function') {
+      return { ok: false, reason: 'DELETE_UNAVAILABLE' }
+    }
+    try {
+      await state.sdk.ragDeleteWorkspace({ workspace })
+      state.workspaces.delete(workspace)
+      state.reindexBookkeeping.delete(workspace)
+      emit('rag:workspace-deleted', { workspace })
+      return { ok: true }
+    } catch (err) {
+      state.lastError = (err && err.message) || 'deleteWorkspace failed'
+      emit('rag:error', { code: err?.code || 'DELETE_FAILED', message: state.lastError, workspace })
+      return { ok: false, reason: 'DELETE_FAILED' }
+    }
+  }
+
   /**
    * Close one or all workspaces. Called on room close.
    */
   async function close (closeOpts = {}) {
     const { workspace = null, deleteOnClose = false } = closeOpts || {}
+    // Wave-final QVAC polish (F2): flip closed BEFORE tearing down timers so a
+    // concurrent bumpAndMaybeScheduleReindex is a no-op and we do not race a
+    // fresh timer against the shutdown path.
+    if (!workspace) state.closed = true
+    // Cancel every pending reindex timer for the targeted workspaces so the
+    // shutdown path is idempotent.
+    const timerTargets = workspace ? [workspace] : Array.from(state.reindexBookkeeping.keys())
+    for (const ws of timerTargets) {
+      const book = state.reindexBookkeeping.get(ws)
+      if (book && book.timer) {
+        try { clearTimeout(book.timer) } catch { /* noop */ }
+        book.timer = null
+      }
+    }
     if (!state.sdk || typeof state.sdk.ragCloseWorkspace !== 'function') return
     const targets = workspace ? [workspace] : Array.from(state.workspaces)
     for (const ws of targets) {
       try {
         await state.sdk.ragCloseWorkspace({ workspace: ws, deleteOnClose: !!deleteOnClose })
         state.workspaces.delete(ws)
+        state.reindexBookkeeping.delete(ws)
       } catch (err) {
         log('warn', 'ragCloseWorkspace failed', { workspace: ws, message: err?.message })
       }
@@ -293,8 +547,13 @@ function createRag (opts = {}) {
     close,
     ensureReady,
     status,
+    // Wave-final QVAC polish (F2) additions
+    chunk,
+    reindex,
+    closeWorkspace,
+    deleteWorkspace,
     workspaceFor: (kind) => workspaceFor(roomSlug, kind),
-    _internal: { state }
+    _internal: { state, bumpAndMaybeScheduleReindex }
   }
 }
 
@@ -332,9 +591,13 @@ module.exports = {
   glossaryToDocuments,
   workspaceFor,
   slugifyWorkspacePart,
+  reindexFlagEnabled,
   DEFAULT_EMBED_MODEL_SRC,
   DEFAULT_TOP_K,
   MAX_QUERY_CHARS,
   MAX_DOC_BATCH,
-  MAX_WORKSPACES
+  MAX_WORKSPACES,
+  REINDEX_INGEST_THRESHOLD,
+  REINDEX_DEBOUNCE_MS,
+  REINDEX_MAX_DURATION_MS
 }

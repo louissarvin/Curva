@@ -208,6 +208,11 @@ function createRoomBot (opts = {}) {
     now = () => Date.now(),
     mcpClientImpl = null,
     fetchImpl = null,
+    // Wave-final QVAC polish (F1): injected `deleteCache` fn. close() calls
+    // it with the room-scoped kvCache key so a hot room switch drops the KV
+    // state instead of retaining megabytes of prefix cache. See @qvac/sdk
+    // dist/client/api/delete-cache.d.ts:22 for signature.
+    deleteCacheImpl = null,
     // Deep-QVAC options: in-process MCP tool client + RAG handle.
     roomSlug = 'default',
     roomMcpClient = null,
@@ -443,12 +448,25 @@ function createRoomBot (opts = {}) {
       const mcpClients = []
       if (state.roomMcp) mcpClients.push({ client: state.roomMcp, includeResources: false })
       if (state.mcp) mcpClients.push({ client: state.mcp, includeResources: true })
+      // Wave-final QVAC polish (F1):
+      //   - reasoning_budget: -1 -> keep the reasoning channel UNLIMITED.
+      //     roomBot answers tactical questions ("should we press?", "why is
+      //     that offside?") that genuinely benefit from multi-step thought.
+      //     The channel is still bounded by the model's context window and by
+      //     our own MAX_REPLY_CHARS / MAX_TOOL_ROUNDS envelopes. Verified per
+      //     @qvac/sdk dist/schemas/completion-stream.js:66-73 (fetched
+      //     2026-07-10): `-1` = keep on, `0` = disable, positive = cap.
+      //   - remove_thinking_from_context: true -> keep the shared kvCache lean
+      //     between /bot invocations so we don't carry model reasoning traces
+      //     into the next tactical answer.
       const run = state.completion({
         modelId: state.modelId,
         history,
         stream: true,
         mcp: mcpClients,
-        kvCache: 'roombot:room:' + (state.roomSlug || 'default')
+        kvCache: 'roombot:room:' + (state.roomSlug || 'default'),
+        reasoning_budget: -1,
+        remove_thinking_from_context: true
       })
       if (!run || !run.events || typeof run.events[Symbol.asyncIterator] !== 'function') {
         throw new Error('completion() returned no events iterable')
@@ -564,6 +582,26 @@ function createRoomBot (opts = {}) {
     // commentator's close().
     if (state.ownedUnloadModel && state.modelId) {
       try { await state.ownedUnloadModel({ modelId: state.modelId }) } catch { /* noop */ }
+    }
+    // Wave-final QVAC polish (F1): release the room-scoped kvCache so a
+    // subsequent room does not inherit stale prefix state. Prefer the
+    // injected impl; fall back to sdkImpl.deleteCache when the caller passed
+    // a fake SDK bundle. Non-fatal on failure. We deliberately do NOT
+    // dynamic-import '@qvac/sdk' from close() — that would spin up the SDK
+    // worker in test environments that never touched it. workers/main.js
+    // wires the real deleteCache via `deleteCacheImpl` at construction.
+    const key = 'roombot:room:' + (state.roomSlug || 'default')
+    let deleteFn = typeof deleteCacheImpl === 'function' ? deleteCacheImpl : null
+    if (!deleteFn && sdkImpl && typeof sdkImpl.deleteCache === 'function') {
+      deleteFn = sdkImpl.deleteCache.bind(sdkImpl)
+    }
+    if (deleteFn) {
+      try {
+        await deleteFn({ kvCacheKey: key })
+        emit('roombot:kvcache-cleared', { key })
+      } catch (err) {
+        log('warn', 'roomBot: deleteCache failed', { message: err && err.message })
+      }
     }
     state.modelLoaded = false
     state.completion = null

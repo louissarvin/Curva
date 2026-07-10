@@ -124,6 +124,10 @@ function createAskTheFrame (opts = {}) {
     rag = null,
     sharedLlmHandle = null,
     sdk = null,
+    // Wave-final QVAC polish (F1): injected `deleteCache` fn for close(). Same
+    // seam as commentator/roomBot. See @qvac/sdk
+    // dist/client/api/delete-cache.d.ts:22.
+    deleteCacheImpl = null,
     announcer = null,
     chat = null,
     mcpClient = null,
@@ -313,12 +317,22 @@ function createAskTheFrame (opts = {}) {
 
       let run
       try {
+        // Wave-final QVAC polish (F1):
+        //   - reasoning_budget: 0 -> fast turn-around on a paused-frame Q&A.
+        //     Judge fires this while pointing at a moment on-screen; a
+        //     reasoning trace only adds latency for a one-sentence answer.
+        //   - remove_thinking_from_context: true -> keep the room-scoped
+        //     kvCache lean across successive asks.
+        // Verified per @qvac/sdk dist/schemas/completion-stream.js:66-73
+        // (fetched 2026-07-10).
         run = sharedLlmHandle.completion({
           modelId: sharedLlmHandle.modelId,
           history,
           stream: true,
           mcp: mcpClients.length > 0 ? mcpClients : undefined,
-          kvCache: 'askframe:room:' + cleanRoomSlug
+          kvCache: 'askframe:room:' + cleanRoomSlug,
+          reasoning_budget: 0,
+          remove_thinking_from_context: true
         })
       } catch (err) {
         state.lastError = err?.message || 'completion threw'
@@ -482,6 +496,25 @@ function createAskTheFrame (opts = {}) {
     state.closed = true
     state.inFlight = false
     state.currentAskId = null
+    // Wave-final QVAC polish (F1): release the room-scoped kvCache. Prefer
+    // injected impl; fall back to `sdk.deleteCache` (when a raw SDK ref was
+    // provided). Non-fatal on failure. We deliberately do NOT dynamic-import
+    // '@qvac/sdk' from close() — that would spin up the SDK worker in test
+    // environments. workers/main.js wires the real deleteCache via
+    // `deleteCacheImpl` at construction.
+    const key = 'askframe:room:' + cleanRoomSlug
+    let deleteFn = typeof deleteCacheImpl === 'function' ? deleteCacheImpl : null
+    if (!deleteFn && sdk && typeof sdk.deleteCache === 'function') {
+      deleteFn = sdk.deleteCache.bind(sdk)
+    }
+    if (deleteFn) {
+      try {
+        await deleteFn({ kvCacheKey: key })
+        emit('askframe:kvcache-cleared', { key })
+      } catch (err) {
+        log('warn', 'askTheFrame: deleteCache failed', { message: err && err.message })
+      }
+    }
   }
 
   return {

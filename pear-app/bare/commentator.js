@@ -353,6 +353,13 @@ function createCommentator (opts = {}) {
     getMatchTitle = () => 'unknown match',
     getRecentChat = () => [],
     sdkFactory = null,
+    // Wave-final QVAC polish (F1): injected `deleteCache` fn for KV-cache
+    // teardown. When the caller does not supply one, close() attempts a
+    // dynamic import of `@qvac/sdk` and calls its named `deleteCache` export.
+    // Passing a stub is the test seam. Signature matches the SDK contract:
+    //   deleteCache({kvCacheKey}) -> Promise<{success:boolean}>
+    // Verified per @qvac/sdk dist/client/api/delete-cache.d.ts:22.
+    deleteCacheImpl = null,
     // Wave 3 F1: optional Supertonic streaming TTS handle. When present, the
     // commentator opens a `textToSpeechStream` session for each trigger and
     // feeds every `contentDelta` chunk into it. The session's PCM output is
@@ -444,10 +451,14 @@ function createCommentator (opts = {}) {
           loaded = await sdkFactory()
           if (loaded && typeof loaded.completion === 'function') {
             // Test seam: sdkFactory returns a ready handle (may include modelId).
+            // Wave-final QVAC polish (F1): preserve `deleteCache` when the
+            // factory hands one back so close() can release the room-scoped
+            // kvCache. Production wire is via workers/main.js.
             sdkHandle = {
               modelId: loaded.modelId || 'test-model',
               completion: loaded.completion,
-              unloadModel: typeof loaded.unloadModel === 'function' ? loaded.unloadModel : null
+              unloadModel: typeof loaded.unloadModel === 'function' ? loaded.unloadModel : null,
+              deleteCache: typeof loaded.deleteCache === 'function' ? loaded.deleteCache : null
             }
           } else {
             sdkHandle = null
@@ -662,7 +673,15 @@ function createCommentator (opts = {}) {
         // node_modules/@qvac/sdk/dist/schemas/completion-stream.js:138 which
         // defines `captureThinking` as an optional boolean on the completion
         // request schema (docs fetched 2026-07-10).
-        captureThinking: true
+        captureThinking: true,
+        // Wave-final QVAC polish (F1):
+        //   - reasoning_budget: 0 -> single-sentence commentary needs no
+        //     multi-step thinking. Verified per @qvac/sdk
+        //     dist/schemas/completion-stream.js:66-73.
+        //   - remove_thinking_from_context: true -> keep the shared kvCache
+        //     lean; consecutive tick triggers reuse the same prefix state.
+        reasoning_budget: 0,
+        remove_thinking_from_context: true
       })
 
       // Preferred path: `result.events` is the discriminated union stream
@@ -1048,6 +1067,34 @@ function createCommentator (opts = {}) {
     }
     if (sdkHandle?.unloadModel && sdkHandle.modelId) {
       try { await sdkHandle.unloadModel({ modelId: sdkHandle.modelId }) } catch { /* noop */ }
+    }
+    // Wave-final QVAC polish (F1): release per-room kvCache so a hot room
+    // switch does not accumulate stale prefix state. Best-effort: SDK errors
+    // are non-fatal because we may already be tearing down the process.
+    //
+    // Resolution order:
+    //   1. Explicit `deleteCacheImpl` opt (production wire path, tests can
+    //      also inject a stub here for observability).
+    //   2. `sdkHandle.deleteCache` when the sdkFactory returned one alongside
+    //      the completion handle.
+    //
+    // We deliberately do NOT dynamic-import '@qvac/sdk' from close() because
+    // that would spin up the SDK worker in test environments that never
+    // touched it, causing the process to hang open on the worker thread.
+    // workers/main.js already has the SDK singleton at boot; it passes the
+    // real deleteCache in via `deleteCacheImpl`.
+    const key = 'commentator:room:' + (roomSlug || 'default')
+    let deleteFn = typeof deleteCacheImpl === 'function' ? deleteCacheImpl : null
+    if (!deleteFn && sdkHandle && typeof sdkHandle.deleteCache === 'function') {
+      deleteFn = sdkHandle.deleteCache
+    }
+    if (deleteFn) {
+      try {
+        await deleteFn({ kvCacheKey: key })
+        emit('commentator:kvcache-cleared', { key })
+      } catch (err) {
+        log('warn', 'commentator: deleteCache failed', { message: err && err.message })
+      }
     }
     sdkHandle = null
     state.modelLoaded = false

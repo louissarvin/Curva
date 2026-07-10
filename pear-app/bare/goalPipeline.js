@@ -234,7 +234,13 @@ function createGoalPipeline (deps = {}) {
     locales = DEFAULT_LOCALES,
     log = () => {},
     emit = () => {},
-    flagOverride = null
+    flagOverride = null,
+    // Wave-final QVAC polish (F1): injected `deleteCache` fn. goalPipeline
+    // itself does not call completion() directly (goalCard owns that seam),
+    // but close() still clears the room-scoped kvCache for the goal-pipeline
+    // namespace so a hot room switch does not leak KV state from prior goal
+    // events. Verified per @qvac/sdk dist/client/api/delete-cache.d.ts:22.
+    deleteCacheImpl = null
   } = deps
 
   if (!ocr || typeof ocr.read !== 'function') {
@@ -399,8 +405,23 @@ function createGoalPipeline (deps = {}) {
     }
   }
 
-  function close () {
+  async function close () {
     state.destroyed = true
+    // Wave-final QVAC polish (F1): best-effort per-room kvCache release. Only
+    // fires when an injected deleteCacheImpl is present. We do NOT dynamic-
+    // import '@qvac/sdk' from close() to avoid spinning up the SDK worker in
+    // test environments. workers/main.js wires the real deleteCache via
+    // `deleteCacheImpl` at construction.
+    const key = 'goalpipe:room:' + String(roomSlug || 'default').slice(0, 64)
+    const deleteFn = typeof deleteCacheImpl === 'function' ? deleteCacheImpl : null
+    if (deleteFn) {
+      try {
+        await deleteFn({ kvCacheKey: key })
+        emit('goalpipe:kvcache-cleared', { key })
+      } catch (err) {
+        log('warn', 'goalPipeline: deleteCache failed', { message: err && err.message })
+      }
+    }
   }
 
   function status () {
