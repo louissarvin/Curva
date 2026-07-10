@@ -580,3 +580,65 @@ The `Dockerfile` is Bun-based (`oven/bun:1`), installs with `bun install --froze
 Final: 2026-07-15
 
 </div>
+
+---
+
+## Code review permalinks (companion-side)
+
+Direct response to the judges' semifinal brief. Every URL below is pinned to commit `517cff080a013ec94dece86c02a35821cab7e726` on `github.com/louissarvin/Curva` so line numbers never drift. See the [root README's Tether stack accountability](../README.md#tether-stack-accountability) for the "why chose / how wired / trade-off accepted" triple per package.
+
+### QVAC — companion-side depth
+
+1. **Delegated QVAC provider** (fail-closed allow-list refuses to boot with empty allowlist unless `QVAC_FIREWALL_MODE=allow-all` is explicitly set): [`backend/src/lib/qvac/delegatedProvider.ts#L1-L313`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/backend/src/lib/qvac/delegatedProvider.ts#L1-L313).
+2. **FIFA 2026 shared RAG service** (BM25 index over 166 fixtures, teams, groups): [`backend/src/lib/qvac/sharedRag.ts#L1-L450`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/backend/src/lib/qvac/sharedRag.ts#L1-L450).
+3. **Backend MCP tools** (`score.getLive`, `ref.discipline`, `stadium.getFixtures`, `roster.getSquad`, `venue.getDetails`, `standings.getTable`, `broadcast.getRegions`): [`backend/src/lib/mcp/tools.ts`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/backend/src/lib/mcp/tools.ts).
+
+### Pears — companion-side depth
+
+4. **Match-clip Hyperdrive** (peer-replicable highlight distribution over Hyperdrive + Hyperblobs): [`backend/src/lib/pears/matchClipDrive.ts`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/backend/src/lib/pears/matchClipDrive.ts).
+5. **Blind-peering seeder** (subprocess pool that keeps every announced room replicating even when the host is offline): [`backend/src/lib/pears/seeder.ts`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/backend/src/lib/pears/seeder.ts).
+6. **Pear app distribution seeder** (permanent `pear seed` subprocess for the app itself): [`backend/src/lib/pears/appDistribution.ts`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/backend/src/lib/pears/appDistribution.ts).
+
+### WDK — companion-side depth (cameo track)
+
+7. **EIP-3009 facilitator** (submits `transferWithAuthorization` on behalf of peers, pays gas from sponsor treasury): [`backend/src/routes/facilitatorRoutes.ts`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/backend/src/routes/facilitatorRoutes.ts).
+8. **Tip indexer** (watches Sepolia for `AuthorizationUsed` + `Transfer` events, indexes them for the room directory): [`backend/src/workers/tipIndexerWorker.ts`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/backend/src/workers/tipIndexerWorker.ts).
+9. **Sponsor treasury health** (surfaces sponsor ETH balance + ability-to-relay at `/pears/status`): [`backend/src/lib/evm/`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/backend/src/lib/evm/).
+
+### Observability — companion-side depth
+
+10. **Backend Prometheus federation** (dedicated Registry with `curva_backend_*` counter families, cardinality-bounded labels): [`backend/src/lib/observability.ts`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/backend/src/lib/observability.ts).
+
+## Tether stack usage (backend scope)
+
+Detailed why/how/trade-off per package lives in the [root README](../README.md#tether-stack-accountability). Below is the companion-side wire-in summary: which backend file each Tether-stack piece lands in.
+
+### Pears (companion-side wire-in)
+
+| Package | backend file | What it does companion-side |
+|---|---|---|
+| `hyperswarm` + `corestore` + `hyperdrive` + `blind-peering` | `src/lib/pears/seeder.ts`, `src/lib/pears/appDistribution.ts` | Room seeder + Pear app distribution seeder subprocess pool |
+| `hyperdrive` + `hyperblobs` | `src/lib/pears/matchClipDrive.ts` | Highlight-clip drive peers can replicate read-only |
+
+### QVAC (companion-side wire-in)
+
+| Capability | backend file | What it does companion-side |
+|---|---|---|
+| EmbeddingGemma 300M Q4 (shared RAG) | `src/lib/qvac/sharedRag.ts` | BM25 + embedding search over FIFA 2026 fixtures + squads + venues + broadcasts |
+| Delegated inference (provider side) | `src/lib/qvac/delegatedProvider.ts` | Companion runs `startQVACProvider` for peers offloading inference |
+| MCP tool calling (server side) | `src/lib/mcp/tools.ts`, `src/lib/mcp/server.ts` | 7 backend tools (score, ref, stadium, roster, venue, standings, broadcast) |
+| Model registry mirror | `src/routes/qvacRoutes.ts` + `qvac-models.json` | SHA-256 pinned Bergamot + Whisper + Supertonic + Qwen3 + Llama models |
+
+### WDK (companion-side wire-in, cameo track)
+
+| Package | backend file | What it does companion-side |
+|---|---|---|
+| `@tetherto/wdk-wallet-evm-erc-4337` | `src/routes/facilitatorRoutes.ts`, `src/lib/evm/` | Sponsor-signed EIP-3009 facilitator that submits authorizations and pays gas |
+| Contract indexer | `src/workers/tipIndexerWorker.ts` | Watches Sepolia for `AuthorizationUsed` + `Transfer` events on the Curva USDT token |
+| Multi-chain indexer | `src/lib/evm/chains.ts` | F10 chain configs (Sepolia enabled; Plasma testnet queued behind USDT0 deployment) |
+
+### Observability (companion-side wire-in)
+
+| Package | backend file | What it does companion-side |
+|---|---|---|
+| `prom-client` | `src/lib/observability.ts` | `curva_backend_delegated_requests_total`, `sponsor_tx_total`, `rag_search_total`, `mcp_tool_call_total` + HTTP histogram |
