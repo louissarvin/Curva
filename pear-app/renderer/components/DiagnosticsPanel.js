@@ -1,7 +1,8 @@
-// Curva DiagnosticsPanel: two-tab (Metrics + Logs) diagnostics UI backed by
-// bare/observability.js (Hypertrace + hypertrace-prometheus). Reads directly
-// from http://localhost:{port}/metrics OR from an IPC-forwarded snapshot when
-// the port cannot be reached (Bare renderer sandbox).
+// Curva DiagnosticsPanel: three-tab (Metrics + Logs + Models) diagnostics UI
+// backed by bare/observability.js (Hypertrace + hypertrace-prometheus) and
+// the @qvac/sdk model-info surface. Reads metrics directly from
+// http://localhost:{port}/metrics OR from an IPC-forwarded snapshot when the
+// port cannot be reached (Bare renderer sandbox).
 //
 // Docs consulted:
 //   https://prometheus.io/docs/instrumenting/exposition_formats/  (fetched 2026-07-10)
@@ -9,16 +10,29 @@
 //   https://github.com/holepunchto/hypertrace-prometheus  (fetched 2026-07-10)
 //     confirms /metrics endpoint and single "trace_counter" counter with
 //     object_classname, id, caller_functionname labels.
+//   node_modules/@qvac/sdk/dist/client/api/get-model-info.d.ts:10-42 (0.14.0)
+//     shape of the model snapshot rows rendered by the Models tab.
+//   node_modules/@qvac/sdk/dist/client/api/get-loaded-model-info.d.ts:24
+//     handlers[] + isDelegated + providerInfo fields shown on the row.
 //
 // Security discipline (matches Chat.js / CommentaryPanel.js / DelegatedInferencePanel.js):
 //   - EVERY user- or metric-supplied string set via .textContent, never innerHTML.
 //   - No inline event handlers on injected DOM.
 //   - Metrics fetch is same-origin loopback only (http://localhost:{port}).
 //   - Log message body clipped to 2048 chars before rendering.
+//   - Model ids and provider pubkeys are hex-only-validated before render
+//     and shortened to prevent layout attacks or log injection.
 
 const DEFAULT_PROMETHEUS_URL = 'http://localhost:4343/metrics'
 const MAX_LOG_LINES = 100
 const REFRESH_MS = 5000
+const MODEL_REFRESH_MS = 5000
+
+// Validation helpers for anything a model or provider returns before we let it
+// hit the DOM. Model ids should be short opaque strings; provider pubkeys are
+// hex. Reject anything else outright.
+const SAFE_ID_RE = /^[A-Za-z0-9_\-.]+$/
+const HEX_RE = /^[a-fA-F0-9]+$/
 
 /**
  * Feature-flag check for the panel. Follows the same shape as
@@ -141,6 +155,37 @@ function parseLabels (blob) {
 }
 
 /**
+ * Sanitize+shorten a model id for display. Returns null when the id doesn't
+ * match our allowlist so the render path can show "invalid" instead of
+ * leaking arbitrary bytes into the DOM.
+ */
+export function safeModelId (id) {
+  if (typeof id !== 'string') return null
+  if (id.length === 0 || id.length > 128) return null
+  if (!SAFE_ID_RE.test(id)) return null
+  return id
+}
+
+/**
+ * Shorten a hex pubkey for display: first-8 + '…' + last-6. Returns null
+ * when the input is not valid hex.
+ */
+export function shortHex (hex) {
+  if (typeof hex !== 'string') return null
+  if (!HEX_RE.test(hex)) return null
+  if (hex.length <= 16) return hex
+  return hex.slice(0, 8) + '…' + hex.slice(-6)
+}
+
+/**
+ * Format a byte count as MB with 1 decimal. Returns '—' for missing values.
+ */
+export function formatMB (bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '—'
+  return (bytes / (1024 * 1024)).toFixed(1) + ' MB'
+}
+
+/**
  * Fetch metrics from the loopback exporter. Falls back to
  * curva.diagnostics.metrics() when direct HTTP is unreachable (Bare sandbox).
  * Never throws — always returns { ok: boolean, text: string, source: string }.
@@ -210,8 +255,10 @@ export function mountDiagnosticsPanel (opts = {}) {
   tabbar.className = 'curva-diagnostics-tabs'
   const metricsTab = tabButton('Metrics')
   const logsTab = tabButton('Logs')
+  const modelsTab = tabButton('Models')
   tabbar.appendChild(metricsTab)
   tabbar.appendChild(logsTab)
+  tabbar.appendChild(modelsTab)
   container.appendChild(tabbar)
 
   // -- Panels -------------------------------------------------------------
@@ -259,12 +306,49 @@ export function mountDiagnosticsPanel (opts = {}) {
   logsPanel.appendChild(logsEmpty)
   container.appendChild(logsPanel)
 
+  // -- Models panel (Wave 4 F2) ------------------------------------------
+  const modelsPanel = document.createElement('div')
+  modelsPanel.className = 'curva-diagnostics-panel curva-diagnostics-models'
+  const modelsToolbar = document.createElement('div')
+  modelsToolbar.className = 'curva-diagnostics-toolbar'
+  const modelsRefreshBtn = document.createElement('button')
+  modelsRefreshBtn.type = 'button'
+  modelsRefreshBtn.textContent = 'Refresh'
+  modelsToolbar.appendChild(modelsRefreshBtn)
+  const modelsSource = document.createElement('span')
+  modelsSource.className = 'curva-diagnostics-source'
+  modelsSource.textContent = ''
+  modelsToolbar.appendChild(modelsSource)
+  modelsPanel.appendChild(modelsToolbar)
+  const modelsTable = document.createElement('table')
+  modelsTable.className = 'curva-diagnostics-table curva-diagnostics-models-table'
+  const modelsThead = document.createElement('thead')
+  const modelsHeadRow = document.createElement('tr')
+  for (const h of ['Model', 'Addon', 'Loaded', 'Cached', 'Size', 'Handlers', 'Delegated', 'Last log', '']) {
+    const th = document.createElement('th')
+    th.textContent = h
+    modelsHeadRow.appendChild(th)
+  }
+  modelsThead.appendChild(modelsHeadRow)
+  modelsTable.appendChild(modelsThead)
+  const modelsTbody = document.createElement('tbody')
+  modelsTable.appendChild(modelsTbody)
+  modelsPanel.appendChild(modelsTable)
+  const modelsEmpty = document.createElement('div')
+  modelsEmpty.className = 'curva-diagnostics-empty'
+  modelsEmpty.textContent = 'No models loaded yet.'
+  modelsPanel.appendChild(modelsEmpty)
+  container.appendChild(modelsPanel)
+
   // -- State --------------------------------------------------------------
   const state = {
     tab: 'metrics',
     logs: [],
     unsubLogs: null,
     timer: null,
+    modelsTimer: null,
+    modelsInFlight: false,
+    lastLogPerModel: new Map(), // model-id -> last log entry
     destroyed: false,
     inFlight: false,
     lastMetricsText: ''
@@ -282,14 +366,20 @@ export function mountDiagnosticsPanel (opts = {}) {
     state.tab = name
     metricsPanel.hidden = name !== 'metrics'
     logsPanel.hidden = name !== 'logs'
+    modelsPanel.hidden = name !== 'models'
     metricsTab.classList.toggle('is-active', name === 'metrics')
     logsTab.classList.toggle('is-active', name === 'logs')
-    // Restart polling loop so we only poll while the active tab is metrics.
+    modelsTab.classList.toggle('is-active', name === 'models')
+    // Restart polling loops so we only poll while their tab is active.
     stopPolling()
-    if (name === 'metrics' && !state.destroyed) startPolling()
+    stopModelsPolling()
+    if (state.destroyed) return
+    if (name === 'metrics') startPolling()
+    if (name === 'models') startModelsPolling()
   }
   metricsTab.addEventListener('click', () => selectTab('metrics'))
   logsTab.addEventListener('click', () => selectTab('logs'))
+  modelsTab.addEventListener('click', () => selectTab('models'))
 
   async function refresh () {
     if (state.destroyed || state.inFlight) return
@@ -337,6 +427,18 @@ export function mountDiagnosticsPanel (opts = {}) {
     state.logs.push(entry)
     while (state.logs.length > MAX_LOG_LINES) state.logs.shift()
     renderLogs()
+    // F2: capture the most recent log per model id so the Models tab can show
+    // it inline. `entry.id` is set by the SDK subscribeServerLogs stream
+    // (subscribe-logs.d.ts:5-7). Validate before storing.
+    const modelId = safeModelId(entry.id)
+    if (modelId) {
+      state.lastLogPerModel.set(modelId, {
+        ts: entry.ts,
+        level: entry.level,
+        message: entry.message,
+        namespace: entry.namespace
+      })
+    }
   }
 
   function renderLogs () {
@@ -371,6 +473,157 @@ export function mountDiagnosticsPanel (opts = {}) {
     if (state.timer) { clearInterval(state.timer); state.timer = null }
   }
 
+  // -- Models tab (Wave 4 F2) --------------------------------------------
+
+  async function refreshModels () {
+    if (state.destroyed || state.modelsInFlight) return
+    state.modelsInFlight = true
+    try {
+      const bridge = curva?.models?.list
+      if (typeof bridge !== 'function') {
+        modelsSource.textContent = 'source: unavailable'
+        renderModels([])
+        return
+      }
+      let list
+      try {
+        list = await bridge()
+      } catch (err) {
+        modelsSource.textContent = 'error: ' + safeMessage(err)
+        renderModels([])
+        return
+      }
+      modelsSource.textContent = 'source: ipc'
+      renderModels(Array.isArray(list) ? list : [])
+    } finally {
+      state.modelsInFlight = false
+    }
+  }
+
+  function renderModels (rows) {
+    modelsTbody.textContent = ''
+    if (!Array.isArray(rows) || rows.length === 0) {
+      modelsEmpty.hidden = false
+      modelsTable.hidden = true
+      return
+    }
+    modelsEmpty.hidden = true
+    modelsTable.hidden = false
+    for (const row of rows) {
+      const tr = document.createElement('tr')
+
+      // Name column: display name + short model id
+      const tdName = document.createElement('td')
+      const nameEl = document.createElement('div')
+      nameEl.className = 'curva-model-name'
+      nameEl.textContent = typeof row.name === 'string' ? row.name.slice(0, 96) : '(unnamed)'
+      tdName.appendChild(nameEl)
+      const idSafe = safeModelId(row.modelId)
+      if (idSafe) {
+        const idEl = document.createElement('div')
+        idEl.className = 'curva-model-id'
+        idEl.textContent = idSafe.length > 24 ? idSafe.slice(0, 12) + '…' + idSafe.slice(-6) : idSafe
+        tdName.appendChild(idEl)
+      }
+      tr.appendChild(tdName)
+
+      // Addon column
+      const tdAddon = document.createElement('td')
+      tdAddon.textContent = typeof row.addon === 'string' ? row.addon : '—'
+      tr.appendChild(tdAddon)
+
+      // Loaded column
+      const tdLoaded = document.createElement('td')
+      tdLoaded.textContent = row.isLoaded ? 'yes' : 'no'
+      tr.appendChild(tdLoaded)
+
+      // Cached column
+      const tdCached = document.createElement('td')
+      tdCached.textContent = row.isCached ? 'yes' : 'no'
+      tr.appendChild(tdCached)
+
+      // Size column
+      const tdSize = document.createElement('td')
+      tdSize.textContent = formatMB(row.sizeBytes)
+      tr.appendChild(tdSize)
+
+      // Handlers column
+      const tdHandlers = document.createElement('td')
+      tdHandlers.textContent = Array.isArray(row.handlers) && row.handlers.length > 0
+        ? row.handlers.slice(0, 6).join(', ')
+        : '—'
+      tr.appendChild(tdHandlers)
+
+      // Delegated column
+      const tdDelegated = document.createElement('td')
+      if (row.isDelegated) {
+        const short = shortHex(row.providerPubkey)
+        tdDelegated.textContent = short ? 'yes (' + short + ')' : 'yes'
+      } else {
+        tdDelegated.textContent = 'no'
+      }
+      tr.appendChild(tdDelegated)
+
+      // Last log column
+      const tdLog = document.createElement('td')
+      const last = idSafe ? state.lastLogPerModel.get(idSafe) : null
+      if (last && typeof last.message === 'string') {
+        tdLog.className = 'curva-model-lastlog'
+        tdLog.textContent = String(last.message).slice(0, 240)
+        tdLog.title = String(last.level || 'info') + ': ' + String(last.message || '').slice(0, 512)
+      } else {
+        tdLog.textContent = '—'
+      }
+      tr.appendChild(tdLog)
+
+      // Actions column (unload button — only for loaded local models)
+      const tdActions = document.createElement('td')
+      if (row.isLoaded && !row.isDelegated && idSafe) {
+        const unloadBtn = document.createElement('button')
+        unloadBtn.type = 'button'
+        unloadBtn.className = 'curva-model-unload'
+        unloadBtn.textContent = 'Unload'
+        unloadBtn.addEventListener('click', async () => {
+          // Confirmation step — unload can be expensive (must reload later).
+          const confirmed = typeof window !== 'undefined' && typeof window.confirm === 'function'
+            ? window.confirm('Unload ' + (row.name || idSafe) + '? It will be reloaded on next use.')
+            : true
+          if (!confirmed) return
+          const bridge = curva?.models?.unload
+          if (typeof bridge !== 'function') {
+            status.textContent = 'unload bridge unavailable'
+            return
+          }
+          unloadBtn.disabled = true
+          unloadBtn.textContent = 'Unloading…'
+          try {
+            await bridge(idSafe)
+            status.textContent = 'unloaded ' + (row.name || idSafe)
+            refreshModels()
+          } catch (err) {
+            status.textContent = 'unload error: ' + safeMessage(err)
+            unloadBtn.disabled = false
+            unloadBtn.textContent = 'Unload'
+          }
+        })
+        tdActions.appendChild(unloadBtn)
+      }
+      tr.appendChild(tdActions)
+
+      modelsTbody.appendChild(tr)
+    }
+  }
+
+  function startModelsPolling () {
+    if (state.modelsTimer) return
+    refreshModels()
+    state.modelsTimer = setInterval(refreshModels, MODEL_REFRESH_MS)
+  }
+  function stopModelsPolling () {
+    if (state.modelsTimer) { clearInterval(state.modelsTimer); state.modelsTimer = null }
+  }
+  modelsRefreshBtn.addEventListener('click', () => refreshModels())
+
   copyBtn.addEventListener('click', async () => {
     const text = state.lastMetricsText || ''
     if (!text) return
@@ -394,13 +647,23 @@ export function mountDiagnosticsPanel (opts = {}) {
 
   return {
     refresh,
+    refreshModels,
     selectTab,
-    getState () { return { tab: state.tab, logs: state.logs.slice(), lastMetricsText: state.lastMetricsText } },
+    getState () {
+      return {
+        tab: state.tab,
+        logs: state.logs.slice(),
+        lastMetricsText: state.lastMetricsText,
+        lastLogPerModel: Object.fromEntries(state.lastLogPerModel)
+      }
+    },
     appendLogLine, // exported for tests
+    renderModels,  // exported for tests
     destroy () {
       if (state.destroyed) return
       state.destroyed = true
       stopPolling()
+      stopModelsPolling()
       if (state.unsubLogs) { try { state.unsubLogs() } catch {} }
       container.textContent = ''
       container.classList.remove('curva-diagnostics')

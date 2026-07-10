@@ -7,7 +7,25 @@
 //   - https://docs.qvac.tether.io/ai-capabilities/text-generation/
 //     Completion result exposes `events` (canonical async iterator of typed
 //     events: contentDelta / completionStats / completionDone).
+//   - https://docs.qvac.tether.io/ai-capabilities/classification/
+//     ggml-classification addon: `sdk.loadModel({modelType:'ggml-classification'})`
+//     returns a modelId; `sdk.classify({modelId, image, topK})` returns
+//     `[{label, confidence}]` sorted descending. Bundled MobileNetV3-Small emits
+//     the three labels: "food" | "report" | "other".
 //   - https://docs.qvac.tether.io/reference/api/  (SDK reference)
+//
+// Ground truth (installed @qvac/sdk 0.14.0):
+//   - node_modules/@qvac/sdk/dist/client/api/classify.d.ts:22
+//       classify(params: ClassifyClientParams): Promise<ClassificationResult[]>
+//   - Same file, JSDoc lines 4-6: MobileNetV3-Small produces "food"/"report"/"other".
+//
+// Wave 4 feature F1 (pre-filter): every N-th captured frame is first pushed
+// through the cheap MobileNetV3-Small classifier. If the top confidence is low
+// OR the top label is "food" (definitionally off-topic for football), we skip
+// the expensive SmolVLM2 caption and emit `vlm:pre-filter-skip`. This is a
+// hard cost reducer — SmolVLM2 completion is ~100x the classify cost. The
+// pre-filter is off by default and gated behind CURVA_VLM_PREFILTER_ENABLED so
+// existing callers see identical behavior.
 //
 // Ground truth (installed @qvac/sdk 0.14.0):
 //   - pear-app/node_modules/@qvac/sdk/dist/schemas/completion-stream.d.ts
@@ -55,6 +73,23 @@ const DEFAULT_PROMPT =
 const DEFAULT_MODEL_SRC_NAME = 'SMOLVLM2_500M_MULTIMODAL_Q8_0'
 const DEFAULT_PROJECTION_NAME = 'MMPROJ_SMOLVLM2_500M_MULTIMODAL_Q8_0'
 
+// F1: pre-filter defaults. MobileNetV3-Small classifier thresholds.
+const PREFILTER_MIN_CONFIDENCE = 0.4
+const PREFILTER_SKIP_LABELS = new Set(['food'])
+const PREFILTER_TOP_K = 3
+
+/**
+ * Read the pre-filter feature flag. Only "true" (case-insensitive) enables.
+ * Any other value, or an unset env, keeps the pre-filter off so existing
+ * callers see identical behavior. Never throws.
+ */
+function prefilterEnabled () {
+  try {
+    if (typeof process === 'undefined' || !process.env) return false
+    return String(process.env.CURVA_VLM_PREFILTER_ENABLED || '').toLowerCase() === 'true'
+  } catch { return false }
+}
+
 /**
  * @typedef {Object} VlmCaptionResult
  * @property {boolean} ok
@@ -91,6 +126,14 @@ function createVlmCaption (opts = {}) {
   let loading = null // Promise<modelId>|null while loading is in-flight
   let closed = false
   let lastError = null
+
+  // F1 pre-filter state. Lazily initialized on first prefilter call.
+  let classifierModelId = null
+  let classifierLoading = null
+  let classifierLoadFailed = false
+  // Counters exposed via status() so DiagnosticsPanel can render
+  // vlm_frames_saved_total{reason=...} from a Prometheus-compatible source.
+  const prefilterCounters = { passed: 0, skippedLowConf: 0, skippedLabel: 0, error: 0 }
 
   async function resolveSdk () {
     if (sdk) return sdk
@@ -153,6 +196,103 @@ function createVlmCaption (opts = {}) {
   }
 
   /**
+   * F1: ensure the MobileNetV3 classifier model is loaded. Only called when
+   * the pre-filter feature flag is on. Cached across calls; a single failure
+   * disables the pre-filter for the rest of the process lifetime so a broken
+   * classifier never blocks captioning.
+   */
+  async function ensureClassifierLoaded () {
+    if (closed) throw withCode('CLOSED', 'vlm caption module closed')
+    if (classifierModelId) return classifierModelId
+    if (classifierLoadFailed) return null
+    if (classifierLoading) return classifierLoading
+    classifierLoading = (async () => {
+      const s = await resolveSdk()
+      if (typeof s.loadModel !== 'function' || typeof s.classify !== 'function') {
+        classifierLoadFailed = true
+        return null
+      }
+      try {
+        // Per classify.d.ts:15 example, loadModel({modelType:'ggml-classification'})
+        // returns the modelId for the bundled MobileNetV3-Small model.
+        const id = await s.loadModel({ modelType: 'ggml-classification' })
+        classifierModelId = id
+        emit('vlm:pre-filter-loaded', { modelId: id })
+        return id
+      } catch (err) {
+        classifierLoadFailed = true
+        emit('vlm:pre-filter-error', { code: err?.code || 'CLASSIFIER_LOAD_FAILED', message: err?.message || String(err) })
+        return null
+      } finally {
+        classifierLoading = null
+      }
+    })()
+    return classifierLoading
+  }
+
+  /**
+   * F1: run the cheap MobileNetV3-Small classifier and decide whether the
+   * frame is worth sending to SmolVLM2.
+   *
+   * @param {Uint8Array|Buffer} imageBuffer  raw JPEG/PNG bytes
+   * @returns {Promise<{shouldCaption:boolean, reason:string, topLabel:string|null, topConfidence:number}>}
+   */
+  async function preFilter (imageBuffer) {
+    if (!imageBuffer || (typeof imageBuffer !== 'object' && !Buffer.isBuffer?.(imageBuffer))) {
+      // Path-only inputs cannot be pre-filtered without reading them first.
+      // Fail open — pass through to VLM. This preserves back-compat for
+      // callers that pass file paths.
+      return { shouldCaption: true, reason: 'no-buffer', topLabel: null, topConfidence: 0 }
+    }
+    const classifierId = await ensureClassifierLoaded()
+    if (!classifierId) {
+      // Classifier unavailable — fail open. VLM gate is only a cost saver, not
+      // a correctness gate; we must not drop frames on infra failure.
+      return { shouldCaption: true, reason: 'classifier-unavailable', topLabel: null, topConfidence: 0 }
+    }
+    const s = await resolveSdk()
+    let results
+    try {
+      // ClassifyClientParams (classify.d.ts:1 + schemas): {modelId, image, topK}
+      // image accepts a JPEG/PNG buffer (Uint8Array) directly.
+      const image = imageBuffer instanceof Uint8Array
+        ? imageBuffer
+        : new Uint8Array(imageBuffer.buffer, imageBuffer.byteOffset || 0, imageBuffer.byteLength)
+      results = await s.classify({ modelId: classifierId, image, topK: PREFILTER_TOP_K })
+    } catch (err) {
+      prefilterCounters.error += 1
+      emit('vlm:pre-filter-error', { code: err?.code || 'CLASSIFY_FAILED', message: err?.message || String(err) })
+      // Fail open on classifier errors.
+      return { shouldCaption: true, reason: 'classifier-error', topLabel: null, topConfidence: 0 }
+    }
+    if (!Array.isArray(results) || results.length === 0) {
+      return { shouldCaption: true, reason: 'empty-results', topLabel: null, topConfidence: 0 }
+    }
+    // Per classify.d.ts:11 results are sorted highest-first.
+    const top = results[0] || {}
+    const topLabel = typeof top.label === 'string' ? top.label : null
+    const topConfidence = Number.isFinite(top.confidence) ? top.confidence : 0
+
+    if (topConfidence < PREFILTER_MIN_CONFIDENCE) {
+      return {
+        shouldCaption: false,
+        reason: 'low-confidence',
+        topLabel,
+        topConfidence
+      }
+    }
+    if (topLabel && PREFILTER_SKIP_LABELS.has(topLabel.toLowerCase())) {
+      return {
+        shouldCaption: false,
+        reason: 'off-topic-label',
+        topLabel,
+        topConfidence
+      }
+    }
+    return { shouldCaption: true, reason: 'pass', topLabel, topConfidence }
+  }
+
+  /**
    * Produce a caption for one image.
    *
    * @param {string|Buffer|Uint8Array} imageInput
@@ -160,13 +300,33 @@ function createVlmCaption (opts = {}) {
    *   are written to a tmp file before being passed as `attachments:[{path}]`
    *   because the SDK schema (schemas/completion-stream.d.ts:23-25) only
    *   accepts `{path}` attachments.
-   * @param {{ prompt?: string, maxImageBytes?: number, signal?: AbortSignal }} [opts2]
+   * @param {{ prompt?: string, maxImageBytes?: number, signal?: AbortSignal, usePreFilter?: boolean }} [opts2]
    * @returns {Promise<VlmCaptionResult>}
    */
   async function caption (imageInput, opts2 = {}) {
     const startedAt = nowMs()
     try {
       const { prompt = DEFAULT_PROMPT, maxImageBytes = MAX_IMAGE_BYTES } = opts2
+
+      // F1 pre-filter gate. Runs only when caller opts in (default true) AND
+      // the feature flag is on. Path-only inputs are not pre-filtered (see
+      // preFilter comment: fail-open behavior).
+      const wantsPrefilter = opts2.usePreFilter !== false && prefilterEnabled()
+      if (wantsPrefilter && typeof imageInput !== 'string') {
+        const pf = await preFilter(imageInput)
+        if (!pf.shouldCaption) {
+          if (pf.reason === 'low-confidence') prefilterCounters.skippedLowConf += 1
+          else if (pf.reason === 'off-topic-label') prefilterCounters.skippedLabel += 1
+          emit('vlm:pre-filter-skip', {
+            reason: pf.reason,
+            topLabel: pf.topLabel,
+            topConfidence: pf.topConfidence
+          })
+          return { ok: false, code: 'PRE_FILTER', reason: pf.reason, topLabel: pf.topLabel, topConfidence: pf.topConfidence }
+        }
+        prefilterCounters.passed += 1
+        emit('vlm:pre-filter-passed', { topLabel: pf.topLabel, topConfidence: pf.topConfidence })
+      }
 
       // Input validation. Reject at the boundary — never let the SDK or the
       // filesystem get raw untrusted input.
@@ -248,7 +408,13 @@ function createVlmCaption (opts = {}) {
     if (modelId && sdk && typeof sdk.unloadModel === 'function') {
       try { await sdk.unloadModel({ modelId }) } catch { /* noop */ }
     }
+    // Also unload the classifier — cheap but still uses memory in the SDK
+    // worker. Best-effort; a failing unload cannot re-throw here.
+    if (classifierModelId && sdk && typeof sdk.unloadModel === 'function') {
+      try { await sdk.unloadModel({ modelId: classifierModelId }) } catch { /* noop */ }
+    }
     modelId = null
+    classifierModelId = null
   }
 
   function status () {
@@ -256,11 +422,34 @@ function createVlmCaption (opts = {}) {
       ready: !!modelId,
       loading: !!loading,
       closed,
-      lastError: lastError ? (lastError.code || 'ERROR') : null
+      lastError: lastError ? (lastError.code || 'ERROR') : null,
+      // F1 counters. DiagnosticsPanel reads these to render
+      // vlm_frames_saved_total{reason=...}. Snapshot copy so callers cannot
+      // mutate our internal state.
+      prefilter: {
+        enabled: prefilterEnabled(),
+        classifierReady: !!classifierModelId,
+        classifierFailed: classifierLoadFailed,
+        passed: prefilterCounters.passed,
+        skippedLowConf: prefilterCounters.skippedLowConf,
+        skippedLabel: prefilterCounters.skippedLabel,
+        error: prefilterCounters.error
+      }
     }
   }
 
-  return { caption, close, status, _internal: { get modelId () { return modelId } } }
+  return {
+    caption,
+    close,
+    status,
+    // Exposed for observability wiring + tests. Not part of the stable API
+    // surface for room bot callers.
+    preFilter,
+    _internal: {
+      get modelId () { return modelId },
+      get classifierModelId () { return classifierModelId }
+    }
+  }
 }
 
 // -- Helpers ------------------------------------------------------------------
@@ -393,6 +582,10 @@ module.exports = {
   MAX_IMAGE_BYTES,
   MAX_PROMPT_CHARS,
   MAX_CAPTION_CHARS,
+  // F1 exports
+  prefilterEnabled,
+  PREFILTER_MIN_CONFIDENCE,
+  PREFILTER_SKIP_LABELS,
   _internal: {
     sanitizePrompt,
     sanitizeCaption,

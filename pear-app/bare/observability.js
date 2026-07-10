@@ -3,11 +3,25 @@
 // own room/commentator classes report structured trace counts to a
 // Prometheus exporter on http://localhost:4343/metrics.
 //
+// Wave 3 deepening (F1): adds gauge families sourced from hypercore-stats,
+// hyperswarm-stats, and hyperdht-stats. These packages read counters that
+// live INSIDE the primitives (replicator rx/tx, DHT punches, swarm connect
+// attempts) and expose them via a `.registerPrometheusMetrics(promClient)`
+// method that installs `new promClient.Gauge({ collect() {...} })` on the
+// DEFAULT prom-client registry. To keep everything on one /metrics
+// response, we pass `register: promClient.register` to the
+// hypertrace-prometheus factory so trace_counter also lands on the default
+// registry — otherwise the stats gauges and trace_counter would live in two
+// disjoint Registry instances and /metrics would show only one.
+//
 // Docs-verification memo -----------------------------------------------------
 //
 // URLs consulted:
 //   https://github.com/holepunchto/hypertrace                 (README, fetched 2026-07-10)
 //   https://github.com/holepunchto/hypertrace-prometheus      (README, fetched 2026-07-10)
+//   https://github.com/holepunchto/hypercore-stats            (README, fetched 2026-07-10)
+//   https://github.com/holepunchto/hyperswarm-stats           (README, fetched 2026-07-10)
+//   https://github.com/holepunchto/hyperdht-stats             (README, fetched 2026-07-10)
 //   https://docs.pears.com/reference/building-blocks/         (observability section, fetched 2026-07-10)
 //   https://docs.qvac.tether.io/ai-capabilities/text-generation/  (thinkingDelta / captureThinking, fetched 2026-07-10)
 //
@@ -28,6 +42,25 @@
 //         .metrics() returns a Promise<string> of the current registry
 //     - The server is started synchronously inside the constructor when
 //       `port` is set. There is NO separate `await prom.start()` step.
+//
+//   hypercore-stats (node_modules/hypercore-stats/index.js:492-507, 253-489):
+//     HypercoreStats.fromCorestore(store) → HypercoreStats
+//     hs.registerPrometheusMetrics(promClient) → installs hypercore_* gauges
+//     Uses PassiveWatcher(store) so it does not hold strong refs — safe to
+//     leave running for the process lifetime. Emits `internal-error` on the
+//     stats instance if a watched core fails to open; we listen and log at
+//     debug level.
+//
+//   hyperdht-stats (node_modules/hyperdht-stats/index.js:1-575):
+//     new HyperDhtStats(dht).registerPrometheusMetrics(promClient) installs
+//     dht_*, udx_* gauges.
+//
+//   hyperswarm-stats (node_modules/hyperswarm-stats/index.js:1-289):
+//     new HyperswarmStats(swarm).registerPrometheusMetrics(promClient)
+//     ALSO registers the underlying HyperDhtStats — so registering both
+//     Swarm+Dht separately would double-register dht_* gauges and prom-client
+//     throws. We guard against this by tracking which gauges are already
+//     installed on the shared prom-client register.
 //
 // Feature flags (both must be `true` to enable):
 //   CURVA_OBSERVABILITY_ENABLED=true   turn on the whole subsystem
@@ -88,6 +121,28 @@ function loadHypertracePrometheus () {
     _hypertracePromLoadError = err
     return null
   }
+}
+
+// prom-client is a peer dep of hypertrace-prometheus. We load it directly so
+// stats packages (hypercore-stats, hyperswarm-stats, hyperdht-stats) can
+// install their gauges on the SAME default registry that hypertrace-prometheus
+// scrapes. If prom-client is missing the whole subsystem degrades to no-op.
+let _promClientMod = null
+let _promClientLoadError = null
+function loadPromClient () {
+  if (_promClientMod) return _promClientMod
+  if (_promClientLoadError) return null
+  try {
+    _promClientMod = require('prom-client')
+    return _promClientMod
+  } catch (err) {
+    _promClientLoadError = err
+    return null
+  }
+}
+
+function loadStatsPackage (name) {
+  try { return require(name) } catch { return null }
 }
 
 /**
@@ -169,6 +224,9 @@ const _prometheusHandles = new Map() // port -> handle
  *   port?: number,
  *   allowedProps?: string[],
  *   collectDefaults?: boolean,
+ *   corestore?: object,   // optional: enables hypercore_* gauges
+ *   swarm?: object,       // optional: enables hyperswarm_* + dht_* gauges
+ *   dht?: object,         // optional: enables dht_* gauges (skip if swarm is passed)
  *   logger?: {info?:Function, warn?:Function, error?:Function}
  * }} [opts]
  * @returns {{
@@ -176,6 +234,7 @@ const _prometheusHandles = new Map() // port -> handle
  *   port: number|null,
  *   reason?: string,
  *   metrics?: () => Promise<string>,
+ *   statsRegistered?: { hypercore: boolean, swarm: boolean, dht: boolean },
  *   stop: () => Promise<void>
  * }}
  */
@@ -204,10 +263,19 @@ async function startPrometheus (opts = {}) {
   // our own http server explicitly bound to 127.0.0.1 that serves the same
   // metrics via traceFn.metrics(). Verified against installed source at
   // node_modules/hypertrace-prometheus/index.js:37-47.
+  //
+  // F1 Wave 3: we also pass an explicit `register` so it matches the default
+  // prom-client register that the stats packages use. Without this,
+  // trace_counter would land on a fresh Registry while hypercore/swarm/dht
+  // gauges land on prom-client.register — and only one set would appear on
+  // /metrics. Falls back to a new Registry if prom-client is not installed.
+  const promClient = loadPromClient()
+  const sharedRegister = promClient ? promClient.register : null
   let traceFn
   try {
     traceFn = hp({
       // Deliberately omit port so hp does not open a socket.
+      register: sharedRegister || undefined,
       allowedProps: Array.isArray(opts.allowedProps) && opts.allowedProps.length > 0
         ? opts.allowedProps
         : ['name'],
@@ -216,6 +284,57 @@ async function startPrometheus (opts = {}) {
   } catch (err) {
     log.error('Prometheus exporter factory failed', { message: err?.message || String(err) })
     return makeNoopPrometheusHandle('start-failed:' + (err?.message || 'unknown'))
+  }
+
+  // F1 Wave 3: register hypercore/swarm/dht stats gauges on the shared
+  // default registry so they show up in the same /metrics response. Only
+  // attempts registration when the caller passed the primitive AND
+  // prom-client is available. Any single package missing or failing does not
+  // block the exporter from coming up.
+  const statsRegistered = { hypercore: false, swarm: false, dht: false }
+  if (promClient) {
+    if (opts.corestore) {
+      try {
+        const HypercoreStats = loadStatsPackage('hypercore-stats')
+        if (HypercoreStats && typeof HypercoreStats.fromCorestore === 'function') {
+          const hs = HypercoreStats.fromCorestore(opts.corestore)
+          // Debug channel for oncoreopen errors — do not throw upward.
+          try { hs.on('internal-error', (e) => log.warn('hypercore-stats internal-error', { message: e?.message })) } catch {}
+          hs.registerPrometheusMetrics(promClient)
+          statsRegistered.hypercore = true
+        }
+      } catch (err) {
+        log.warn('hypercore-stats registration failed', { message: err?.message || String(err) })
+      }
+    }
+    if (opts.swarm) {
+      try {
+        const HyperswarmStats = loadStatsPackage('hyperswarm-stats')
+        if (HyperswarmStats) {
+          const ss = new HyperswarmStats(opts.swarm)
+          ss.registerPrometheusMetrics(promClient)
+          statsRegistered.swarm = true
+          // HyperswarmStats internally registers HyperDhtStats too. Skip the
+          // separate dht registration below to avoid the prom-client
+          // "already registered" throw on dht_* gauges.
+          statsRegistered.dht = true
+        }
+      } catch (err) {
+        log.warn('hyperswarm-stats registration failed', { message: err?.message || String(err) })
+      }
+    }
+    if (opts.dht && !statsRegistered.dht) {
+      try {
+        const HyperDhtStats = loadStatsPackage('hyperdht-stats')
+        if (HyperDhtStats) {
+          const ds = new HyperDhtStats(opts.dht)
+          ds.registerPrometheusMetrics(promClient)
+          statsRegistered.dht = true
+        }
+      } catch (err) {
+        log.warn('hyperdht-stats registration failed', { message: err?.message || String(err) })
+      }
+    }
   }
 
   // Start a loopback-only HTTP server. This mirrors the upstream server's
@@ -267,6 +386,7 @@ async function startPrometheus (opts = {}) {
     started: true,
     stopped: false,
     port,
+    statsRegistered,
     metrics: () => {
       try { return traceFn.metrics() } catch { return Promise.resolve('') }
     },
@@ -340,12 +460,338 @@ function normalizeServerLogEntry (log) {
   return { ts, level, message: message.slice(0, 2048) }
 }
 
+// -----------------------------------------------------------------------------
+// F1 Wave 3: standalone stats registration helpers.
+//
+// These are exposed for callers that already have a running Prometheus
+// exporter and just want to attach one more stats family (e.g. tests, or a
+// boot path where the corestore is created after startPrometheus was called).
+// All three are no-ops when:
+//   - the observability flag is off
+//   - prom-client is not installed
+//   - the specific stats package is not installed
+//   - the target primitive is missing or already registered on the shared
+//     registry (prom-client throws on duplicate metric name)
+// -----------------------------------------------------------------------------
+
+function _statsAlreadyRegistered (promClient, probeName) {
+  try {
+    // getSingleMetric throws for unknown metrics on older prom-client; catch
+    // any surprise and treat as "not yet registered".
+    return typeof promClient.register.getSingleMetric === 'function' &&
+      promClient.register.getSingleMetric(probeName) !== undefined
+  } catch { return false }
+}
+
+/**
+ * Attach hypercore_* gauges to the default prom-client registry. Safe to
+ * call multiple times per process — returns `{registered:false, reason}` if
+ * a previous call already installed the gauges.
+ * @param {object} corestore
+ * @param {{logger?:object}} [opts]
+ */
+function registerHypercoreStats (corestore, opts = {}) {
+  const log = normalizeLogger(opts.logger)
+  if (!observabilityEnabled()) return { registered: false, reason: 'flag-off' }
+  const promClient = loadPromClient()
+  if (!promClient) return { registered: false, reason: 'prom-client-missing' }
+  if (!corestore || typeof corestore !== 'object') return { registered: false, reason: 'no-corestore' }
+  if (_statsAlreadyRegistered(promClient, 'hypercore_total_cores')) {
+    return { registered: false, reason: 'already-registered' }
+  }
+  const HypercoreStats = loadStatsPackage('hypercore-stats')
+  if (!HypercoreStats || typeof HypercoreStats.fromCorestore !== 'function') {
+    return { registered: false, reason: 'hypercore-stats-missing' }
+  }
+  try {
+    const hs = HypercoreStats.fromCorestore(corestore)
+    try { hs.on('internal-error', (e) => log.warn('hypercore-stats internal-error', { message: e?.message })) } catch {}
+    hs.registerPrometheusMetrics(promClient)
+    return { registered: true, stats: hs }
+  } catch (err) {
+    log.warn('registerHypercoreStats failed', { message: err?.message || String(err) })
+    return { registered: false, reason: 'threw:' + (err?.message || 'unknown') }
+  }
+}
+
+/**
+ * Attach hyperswarm_* AND dht_* AND udx_* gauges to the default prom-client
+ * registry. HyperswarmStats internally instantiates HyperDhtStats, so this
+ * covers the DHT surface too — do not also call `registerHyperdhtStats` on
+ * the same swarm.dht or prom-client will throw on duplicate metric names.
+ * @param {object} swarm
+ * @param {{logger?:object}} [opts]
+ */
+function registerHyperswarmStats (swarm, opts = {}) {
+  const log = normalizeLogger(opts.logger)
+  if (!observabilityEnabled()) return { registered: false, reason: 'flag-off' }
+  const promClient = loadPromClient()
+  if (!promClient) return { registered: false, reason: 'prom-client-missing' }
+  if (!swarm || typeof swarm !== 'object') return { registered: false, reason: 'no-swarm' }
+  if (_statsAlreadyRegistered(promClient, 'hyperswarm_nr_peers')) {
+    return { registered: false, reason: 'already-registered' }
+  }
+  const HyperswarmStats = loadStatsPackage('hyperswarm-stats')
+  if (!HyperswarmStats) return { registered: false, reason: 'hyperswarm-stats-missing' }
+  try {
+    const ss = new HyperswarmStats(swarm)
+    ss.registerPrometheusMetrics(promClient)
+    return { registered: true, stats: ss }
+  } catch (err) {
+    log.warn('registerHyperswarmStats failed', { message: err?.message || String(err) })
+    return { registered: false, reason: 'threw:' + (err?.message || 'unknown') }
+  }
+}
+
+/**
+ * Attach dht_* + udx_* gauges to the default prom-client registry.
+ * Do NOT call after `registerHyperswarmStats(swarm)` where swarm.dht === dht —
+ * the swarm registration already installs the DHT gauges.
+ * @param {object} dht
+ * @param {{logger?:object}} [opts]
+ */
+function registerHyperdhtStats (dht, opts = {}) {
+  const log = normalizeLogger(opts.logger)
+  if (!observabilityEnabled()) return { registered: false, reason: 'flag-off' }
+  const promClient = loadPromClient()
+  if (!promClient) return { registered: false, reason: 'prom-client-missing' }
+  if (!dht || typeof dht !== 'object') return { registered: false, reason: 'no-dht' }
+  if (_statsAlreadyRegistered(promClient, 'dht_consistent_punches')) {
+    return { registered: false, reason: 'already-registered' }
+  }
+  const HyperDhtStats = loadStatsPackage('hyperdht-stats')
+  if (!HyperDhtStats) return { registered: false, reason: 'hyperdht-stats-missing' }
+  try {
+    const ds = new HyperDhtStats(dht)
+    ds.registerPrometheusMetrics(promClient)
+    return { registered: true, stats: ds }
+  } catch (err) {
+    log.warn('registerHyperdhtStats failed', { message: err?.message || String(err) })
+    return { registered: false, reason: 'threw:' + (err?.message || 'unknown') }
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Wave 4 F2: Live Models panel helpers.
+//
+// The DiagnosticsPanel Models tab needs two things:
+//   1. A snapshot of every known model (catalog + loaded) with cache/size/type
+//      info so the tab can render a table.
+//   2. A rolling log ring keyed by model id so the panel can show the last N
+//      log lines emitted by each addon (llama.cpp stderr, whisper, etc.).
+//
+// Verified against installed .d.ts:
+//   node_modules/@qvac/sdk/dist/client/api/get-model-info.d.ts:10-42
+//     getModelInfo({name}) => Promise<{name, modelId, expectedSize,
+//     sha256Checksum, addon, isCached, isLoaded, cacheFiles[], loadedInstances?}>
+//   node_modules/@qvac/sdk/dist/client/api/get-loaded-model-info.d.ts:24
+//     getLoadedModelInfo({modelId}) => Promise<LoadedModelInfo>
+//     (throws ModelNotFoundError for unknown ids)
+//   node_modules/@qvac/sdk/dist/client/api/subscribe-logs.d.ts:27
+//     subscribeServerLogs(handler) => () => void   (unsubscribe)
+//     handler receives {level, id, namespace, message}. `id` is either the
+//     SDK_LOG_ID sentinel, a model id, or a RAG workspace key.
+//
+// Both helpers are no-ops when sdk lacks the required APIs so they can be
+// wired into boot paths that may or may not have the qvac SDK available.
+// -----------------------------------------------------------------------------
+
+const DEFAULT_MODEL_LOG_RING_SIZE = 100
+
+/**
+ * Take a snapshot of every model the SDK knows about, enriched with the
+ * loaded-instance info for the ones currently in memory.
+ *
+ * Never throws. Returns `[]` when the SDK cannot answer. Individual
+ * per-model errors are logged into the entry as `.error` so the panel can
+ * render "unavailable" without dropping the row.
+ *
+ * @param {object} sdk    an object exposing `getModelInfo` / `getLoadedModelInfo`
+ * @param {{
+ *   allNames?: string[],       // catalog names to query — required, no auto-discovery
+ *   logger?: object
+ * }} [opts]
+ * @returns {Promise<Array<object>>}
+ */
+async function getModelSnapshot (sdk, opts = {}) {
+  const log = normalizeLogger(opts.logger)
+  if (!sdk || typeof sdk.getModelInfo !== 'function') return []
+  const names = Array.isArray(opts.allNames) ? opts.allNames.filter((n) => typeof n === 'string' && n.length > 0 && n.length < 128) : []
+  if (names.length === 0) return []
+  const out = []
+  for (const name of names) {
+    let info
+    try {
+      info = await sdk.getModelInfo({ name })
+    } catch (err) {
+      log.warn('getModelInfo failed', { name, message: err?.message || String(err) })
+      out.push({ name, error: err?.message || 'unknown', isCached: false, isLoaded: false, cacheFiles: [] })
+      continue
+    }
+    if (!info || typeof info !== 'object') {
+      out.push({ name, error: 'no-info', isCached: false, isLoaded: false, cacheFiles: [] })
+      continue
+    }
+    // Merge in loaded-instance metadata only when the model is actually loaded
+    // AND the SDK exposes getLoadedModelInfo. This surfaces isDelegated and
+    // handlers[] on the row so the panel can show "delegated" badges.
+    let loaded = null
+    if (info.isLoaded && typeof sdk.getLoadedModelInfo === 'function' && info.modelId) {
+      try {
+        loaded = await sdk.getLoadedModelInfo({ modelId: info.modelId })
+      } catch (err) {
+        // ModelNotFoundError is expected if the model was unloaded between
+        // the two RPCs — treat as "not loaded" rather than a hard error.
+        log.warn('getLoadedModelInfo failed', { modelId: info.modelId, message: err?.message || String(err) })
+        loaded = null
+      }
+    }
+    out.push(mergeSnapshotEntry(info, loaded))
+  }
+  return out
+}
+
+function mergeSnapshotEntry (info, loaded) {
+  // Sum cache file sizes for the "size on disk" column. Prefer actualSize when
+  // present; fall back to expectedSize.
+  let sizeBytes = 0
+  const cacheFiles = Array.isArray(info.cacheFiles) ? info.cacheFiles : []
+  for (const cf of cacheFiles) {
+    if (!cf) continue
+    if (Number.isFinite(cf.actualSize)) sizeBytes += cf.actualSize
+    else if (Number.isFinite(cf.expectedSize)) sizeBytes += cf.expectedSize
+  }
+  return {
+    name: info.name,
+    modelId: info.modelId,
+    addon: info.addon,
+    isCached: !!info.isCached,
+    isLoaded: !!info.isLoaded,
+    sizeBytes,
+    expectedSize: Number.isFinite(info.expectedSize) ? info.expectedSize : null,
+    actualSize: Number.isFinite(info.actualSize) ? info.actualSize : null,
+    cachedAt: info.cachedAt || null,
+    cacheFiles: cacheFiles.map((cf) => ({
+      filename: cf?.filename || '',
+      isCached: !!cf?.isCached,
+      expectedSize: Number.isFinite(cf?.expectedSize) ? cf.expectedSize : null,
+      actualSize: Number.isFinite(cf?.actualSize) ? cf.actualSize : null
+    })),
+    loadedInstances: Array.isArray(info.loadedInstances) ? info.loadedInstances.length : 0,
+    // From getLoadedModelInfo (only present when loaded)
+    handlers: loaded?.handlers && Array.isArray(loaded.handlers) ? loaded.handlers.slice(0, 32) : [],
+    isDelegated: !!loaded?.isDelegated,
+    providerPubkey: loaded?.providerInfo?.publicKey || loaded?.providerInfo?.pubkey || null
+  }
+}
+
+/**
+ * Start a per-model log ring buffer backed by `subscribeServerLogs`. Keeps up
+ * to `maxPerId` log entries per `log.id` so the Models panel can render the
+ * last N lines for a selected model.
+ *
+ * @param {object} sdk                              qvac sdk-shaped module
+ * @param {{
+ *   maxPerId?: number,
+ *   onLog?: (entry: object) => void
+ * }} [opts]
+ * @returns {{
+ *   get: (id: string) => Array<object>,
+ *   all: () => Object<string, Array<object>>,
+ *   unsubscribe: () => void
+ * }}
+ */
+function startModelLogRing (sdk, opts = {}) {
+  const maxPerId = Number.isFinite(opts.maxPerId) && opts.maxPerId > 0
+    ? Math.floor(opts.maxPerId)
+    : DEFAULT_MODEL_LOG_RING_SIZE
+  const buffers = new Map() // id -> array
+  let unsub = () => {}
+  if (!sdk || typeof sdk.subscribeServerLogs !== 'function') {
+    return {
+      get: () => [],
+      all: () => ({}),
+      unsubscribe: () => {}
+    }
+  }
+  try {
+    const ret = sdk.subscribeServerLogs((log) => {
+      try {
+        const entry = normalizeModelLogEntry(log)
+        if (!entry) return
+        const id = entry.id || '__unknown__'
+        let arr = buffers.get(id)
+        if (!arr) {
+          arr = []
+          buffers.set(id, arr)
+        }
+        arr.push(entry)
+        // Ring: drop oldest once we exceed cap.
+        while (arr.length > maxPerId) arr.shift()
+        if (typeof opts.onLog === 'function') {
+          try { opts.onLog(entry) } catch { /* swallow — must not break the stream */ }
+        }
+      } catch { /* one bad log line must not break the whole stream */ }
+    })
+    if (typeof ret === 'function') unsub = ret
+  } catch {
+    // subscribe failed at construction — return an inert ring
+    return {
+      get: () => [],
+      all: () => ({}),
+      unsubscribe: () => {}
+    }
+  }
+  let stopped = false
+  return {
+    get (id) {
+      const arr = buffers.get(id)
+      return arr ? arr.slice() : []
+    },
+    all () {
+      const out = {}
+      for (const [id, arr] of buffers.entries()) out[id] = arr.slice()
+      return out
+    },
+    unsubscribe () {
+      if (stopped) return
+      stopped = true
+      try { unsub() } catch { /* noop */ }
+      buffers.clear()
+    }
+  }
+}
+
+/**
+ * Normalize a server-log entry from the SDK stream into the shape the
+ * DiagnosticsPanel expects. Rejects entries with no `id` (cannot key the ring)
+ * and clips oversized messages to 2 KB so a runaway model addon cannot
+ * exhaust renderer memory via the ring buffer.
+ */
+function normalizeModelLogEntry (log) {
+  if (!log || typeof log !== 'object') return null
+  const id = typeof log.id === 'string' ? log.id.slice(0, 128) : null
+  if (!id) return null
+  const message = typeof log.message === 'string' ? log.message
+    : typeof log.text === 'string' ? log.text
+      : typeof log.msg === 'string' ? log.msg : ''
+  if (!message) return null
+  return {
+    ts: Number.isFinite(log.ts) ? log.ts : Date.now(),
+    id,
+    level: typeof log.level === 'string' ? log.level.slice(0, 16) : 'info',
+    namespace: typeof log.namespace === 'string' ? log.namespace.slice(0, 64) : '',
+    message: message.slice(0, 2048)
+  }
+}
+
 function makeNoopPrometheusHandle (reason) {
   return {
     started: false,
     stopped: true,
     port: null,
     reason,
+    statsRegistered: { hypercore: false, swarm: false, dht: false },
     metrics: () => Promise.resolve(''),
     async stop () {}
   }
@@ -367,6 +813,14 @@ module.exports = {
   subscribeToServerLogs,
   observabilityEnabled,
   prometheusPort,
+  registerHypercoreStats,
+  registerHyperswarmStats,
+  registerHyperdhtStats,
+  // Wave 4 F2 exports
+  getModelSnapshot,
+  startModelLogRing,
+  DEFAULT_MODEL_LOG_RING_SIZE,
+  _internal: { normalizeModelLogEntry, mergeSnapshotEntry },
   NOOP_TRACER,
   DEFAULT_PROMETHEUS_PORT,
   // Test-only reset. Clears cached modules + handle map so unit tests can
@@ -380,5 +834,15 @@ module.exports = {
     _hypertracePromMod = null
     _hypertraceLoadError = null
     _hypertracePromLoadError = null
+    _promClientMod = null
+    _promClientLoadError = null
+    // Clear the shared prom-client default registry so the stats packages can
+    // be re-registered by the next test without prom-client throwing on
+    // duplicate metric names. Guarded — if prom-client is not installed this
+    // is a no-op.
+    try {
+      const promClient = require('prom-client')
+      promClient.register.clear()
+    } catch { /* ignore */ }
   }
 }
