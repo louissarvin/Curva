@@ -10,6 +10,8 @@ For football fans separated by continents who still want to react to the same go
 
 Built for the **Tether Developers Cup 2026** by **Team Indonesia**. Track: **Pears** (primary) with working **WDK** and **QVAC** cameos.
 
+**Reviewers start here:** [`CODE_REVIEW.md`](CODE_REVIEW.md) - grep-friendly index of every wave 2 to 5 feature with file:line anchors, test coverage by concern, the feature-flag boot matrix, and an honest list of what we did not build. Companion reads: [`pear-app/README.md`](pear-app/README.md), [`backend/README.md`](backend/README.md), [`docs/adr/README.md`](docs/adr/README.md).
+
 </div>
 
 ---

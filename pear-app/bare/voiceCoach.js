@@ -180,6 +180,11 @@ function coerceAudio (chunk) {
 // -----------------------------------------------------------------------------
 
 /**
+ * Push-to-talk voice coach that combines STT + RAG + LLM + MCP + TTS in a
+ * single turn. Isolating the five capabilities behind one factory keeps the
+ * mic session, cooldown, and rate-limit fuses in one place so any bug
+ * regresses obviously in the e2e test. See ADR-005 for orchestration rationale.
+ *
  * @param {{
  *   sdk?: { transcribeStream: Function, loadModel?: Function, unloadModel?: Function },
  *   sharedLlmHandle: { modelId: string, completion: Function },
@@ -195,6 +200,7 @@ function coerceAudio (chunk) {
  *   emit?: Function,
  *   now?: () => number
  * }} opts
+ * @returns {{ startTurn: Function, pushAudio: Function, endTurn: Function, cancel: Function, close: Function, status: Function }}
  */
 function createVoiceCoach (opts = {}) {
   const {

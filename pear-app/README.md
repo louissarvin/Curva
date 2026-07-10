@@ -26,7 +26,18 @@ A fully P2P watch-party desktop app. Pears (Holepunch) is the whole distribution
 ![Ethers](https://img.shields.io/badge/ethers-6.13-3C3C3D?style=flat-square)
 ![brittle](https://img.shields.io/badge/brittle-4.0-EE6A55?style=flat-square)
 
+![ADRs](https://img.shields.io/badge/ADRs-10-1F6FEB?style=flat-square)
+![QVAC capabilities](https://img.shields.io/badge/QVAC%20capabilities-15%2B-7B3FE4?style=flat-square)
+![Pears primitives](https://img.shields.io/badge/Pears%20primitives-13-000000?style=flat-square)
+![Tests](https://img.shields.io/badge/tests-73%20files-EE6A55?style=flat-square)
+
 </div>
+
+> **For code reviewers.** Start at [`../CODE_REVIEW.md`](../CODE_REVIEW.md) at the
+> repo root. It maps every wave 2 to 5 feature to a file:line anchor, groups
+> tests by concern, lists what we deliberately did not build, and gives the
+> feature-flag boot matrix so you can pick a subset for a shallow pass or the
+> full set for a deep dive.
 
 ---
 

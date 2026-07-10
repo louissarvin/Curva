@@ -84,6 +84,10 @@ function sanitizeText (raw, maxLen) {
 }
 
 /**
+ * Semantic search over VLM captions / clip metadata via `sdk.embed()` +
+ * in-memory cosine ranking. The factory owns the bounded LRU so a hostile
+ * caller cannot balloon memory by streaming unique documents through index().
+ *
  * @param {{
  *   sdk?: { embed: Function, loadModel?: Function, unloadModel?: Function } | null,
  *   sdkImpl?: (() => Promise<any>) | null,
@@ -93,6 +97,7 @@ function sanitizeText (raw, maxLen) {
  *   emit?: (event:string, payload:any) => void,
  *   now?: () => number
  * }} opts
+ * @returns {{ index: Function, search: Function, remove: Function, snapshot: Function, restore: Function, close: Function, status: Function }}
  */
 function createSemanticSearch (opts = {}) {
   const {

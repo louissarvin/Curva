@@ -105,6 +105,11 @@ function extractSpeakerId (segment) {
 }
 
 /**
+ * Parakeet Sortformer diarized transcribeStream session with a per-speaker
+ * turn table. Wrapped in a factory so the audio rate-limit fuse, the
+ * five-minute session cap, and the `unknown` speaker fallback all live in
+ * one place - callers cannot accidentally omit any of them.
+ *
  * @param {{
  *   sdk?: { transcribeStream: Function, loadModel?: Function, unloadModel?: Function } | null,
  *   sttModelSrc?: string | object,
@@ -114,6 +119,7 @@ function extractSpeakerId (segment) {
  *   emit?: (event:string, payload:any) => void,
  *   now?: () => number
  * }} opts
+ * @returns {{ startSession: Function, pushAudio: Function, endSession: Function, close: Function, status: Function }}
  */
 function createDiarization (opts = {}) {
   const {

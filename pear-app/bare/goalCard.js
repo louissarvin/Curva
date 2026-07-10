@@ -193,6 +193,11 @@ function validateCard (obj) {
 }
 
 /**
+ * Structured-output goal card parser that drives the LLM through the SDK's
+ * `json_schema` responseFormat. Wrapping the schema, strict flag, and refusal
+ * path in one factory guarantees every caller gets the same
+ * `additionalProperties: false` discipline the SDK contract requires.
+ *
  * @param {{
  *   sdk?: object | null,
  *   sdkImpl?: object | null,           // test seam (accepts a completion fn directly)
@@ -200,6 +205,7 @@ function validateCard (obj) {
  *   log?: (level: string, msg: string, extra?: any) => void,
  *   emit?: (event: string, payload: any) => void
  * }} opts
+ * @returns {{ parse: Function, close: Function, status: Function }}
  */
 function createGoalCard (opts = {}) {
   const {

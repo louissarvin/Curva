@@ -86,6 +86,10 @@ function normaliseLocale (locale) {
 }
 
 /**
+ * Chatterbox voice-cloned commentator with a Hyperblob-backed reference clip.
+ * A single factory keeps the enrolment path, locale gate, and control-char
+ * sanitiser together so the Chatterbox surface never sees unnormalised text.
+ *
  * @param {{
  *   sdk?: object | null,           // preloaded @qvac/sdk namespace
  *   sdkImpl?: object | null,       // test seam
@@ -95,6 +99,7 @@ function normaliseLocale (locale) {
  *   emit?: (event: string, payload: any) => void,
  *   defaultLocale?: 'en'|'it'
  * }} opts
+ * @returns {{ enroll: Function, speak: Function, close: Function, status: Function }}
  */
 function createVoiceClone (opts = {}) {
   const {

@@ -208,6 +208,11 @@ async function speakOnce (announcer, locale, text, log, emit) {
 }
 
 /**
+ * Six-capability goal pipeline: OCR -> goalCard -> MCP -> Bergamot -> TTS ->
+ * Autobase. Centralising the fan-out means the per-locale best-effort policy,
+ * the 30 s timeout budget, and the BUSY guard live in exactly one place.
+ * See ADR-007 for the failure model and per-locale ordering.
+ *
  * @param {{
  *   ocr:        { read: Function },
  *   goalCard:   { parse: Function },
@@ -221,6 +226,7 @@ async function speakOnce (announcer, locale, text, log, emit) {
  *   emit?:      (event: string, payload: any) => void,
  *   flagOverride?: boolean
  * }} deps
+ * @returns {{ trigger: Function, close: Function, status: Function }}
  */
 function createGoalPipeline (deps = {}) {
   const {

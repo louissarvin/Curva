@@ -103,6 +103,12 @@ function sanitizeUntrusted (raw, maxLen) {
 }
 
 /**
+ * "Ask the frame" orchestrator: one `?` press runs VLM caption -> RAG
+ * ingest+search -> LLM (with optional MCP tools) -> TTS. Concentrating the
+ * five capabilities in one factory keeps the untrusted-input tagging
+ * (`<current_frame_untrusted>`, `<retrieved_untrusted>`) uniform, which is
+ * what the prompt-injection defense assertions rely on.
+ *
  * @param {{
  *   vlm: { caption: (image, opts?) => Promise<{ok:boolean, caption?:string, reason?:string, code?:string}> },
  *   rag: { ingest: Function, search: Function, workspaceFor?: Function } | null,
@@ -117,6 +123,7 @@ function sanitizeUntrusted (raw, maxLen) {
  *   log?: (level:string, msg:string, extra?:any) => void,
  *   now?: () => number
  * }} opts
+ * @returns {{ ask: Function, close: Function, status: Function }}
  */
 function createAskTheFrame (opts = {}) {
   const {

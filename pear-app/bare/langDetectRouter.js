@@ -74,6 +74,10 @@ function normaliseText (text) {
 }
 
 /**
+ * langdetect-text wrapper that returns Curva's routing trio (en/it/id) or null.
+ * A dedicated factory prevents callers from bypassing the confidence floor or
+ * the DoS-bound input cap.
+ *
  * @param {{
  *   detector?: { detectOne?: Function, detectMultiple?: Function } | null,
  *   confidenceFloor?: number,
@@ -81,6 +85,7 @@ function normaliseText (text) {
  *   log?: (level: string, msg: string, extra?: any) => void,
  *   emit?: (event: string, payload: any) => void
  * }} opts
+ * @returns {{ detect: Function, status: Function, close: Function, _internal: object }}
  */
 function createLangDetectRouter (opts = {}) {
   const {
