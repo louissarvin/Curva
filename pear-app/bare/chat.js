@@ -1077,6 +1077,11 @@ function chatKey(msg) {
   if (msg?.type === 'system:reader-joined' && typeof msg.readerHex === 'string') {
     return `chat/${ts}/reader-${msg.readerHex.slice(0, 8)}`
   }
+  // QVAC Ship 3 F3: match-recap keyed on generatedAt so a rebase replaying
+  // the same recap collapses to one row (idempotent).
+  if (msg?.type === 'system:match-recap' && typeof msg.generatedAt === 'number') {
+    return `chat/${ts}/recap-${String(msg.generatedAt).slice(-10)}`
+  }
   const suffix = (msg.by_peer || 'anon').slice(0, 8)
   return `chat/${ts}/${suffix}`
 }
@@ -1154,6 +1159,13 @@ function isValidMessage(v) {
   // F3: system:goal shape validator. Host-only in apply(); shape check here
   // is pure so it can also be exercised directly by the brittle test suite.
   if (v.type === 'system:goal') return isValidSystemGoal(v)
+  // QVAC Ship 3 F3: system:match-recap. Peer-authored (technically the host
+  // runs the recap, but a demo may run it from any peer that owns the LLM).
+  // The reducer does NOT gate authorship — payload is descriptive, not
+  // authoritative (an unrelated peer can't fake a settled prediction into
+  // the room log via a recap because the shape only carries a text +
+  // per-locale blob-key manifest, no cross-referential facts).
+  if (v.type === 'system:match-recap') return isValidSystemMatchRecap(v)
   // D2 demo-mode prediction pills. system:prediction-stake is peer-writer
   // allowed (any peer stakes for themselves). system:prediction-settle is
   // host-only in apply(). Shape validators are pure so brittle tests can
@@ -1511,6 +1523,33 @@ function isValidSystemBotReply(v) {
   return true
 }
 
+// QVAC Ship 3 F3: shape validator for `system:match-recap`. Peer-authored.
+// Fields: recapText (spoken body, capped at 800 chars), audioByLocale (map
+// locale->{blobKey, via, sampleRate}) capped at 8 entries, generatedAt (epoch
+// ms). Strict per-field checks so a forged Autobase append cannot slip past
+// the type gate by wrapping garbage in a known `type` string.
+function isValidSystemMatchRecap (v) {
+  if (!v || typeof v !== 'object') return false
+  if (v.type !== 'system:match-recap') return false
+  if (typeof v.by_peer !== 'string') return false
+  if (typeof v.wall_clock_ms !== 'number' || v.wall_clock_ms < 0) return false
+  if (typeof v.match_time_ms !== 'number' || v.match_time_ms < 0) return false
+  if (typeof v.recapText !== 'string' || v.recapText.length === 0 || v.recapText.length > 800) return false
+  if (typeof v.generatedAt !== 'number' || !Number.isFinite(v.generatedAt) || v.generatedAt <= 0) return false
+  if (!v.audioByLocale || typeof v.audioByLocale !== 'object') return false
+  const localeKeys = Object.keys(v.audioByLocale)
+  if (localeKeys.length === 0 || localeKeys.length > 8) return false
+  for (const k of localeKeys) {
+    if (typeof k !== 'string' || k.length === 0 || k.length > 8) return false
+    const entry = v.audioByLocale[k]
+    if (!entry || typeof entry !== 'object') return false
+    if (entry.blobKey !== null && (typeof entry.blobKey !== 'string' || entry.blobKey.length > 128)) return false
+    if (entry.via !== undefined && (typeof entry.via !== 'string' || entry.via.length > 32)) return false
+    if (entry.sampleRate !== undefined && (typeof entry.sampleRate !== 'number' || entry.sampleRate <= 0 || entry.sampleRate > 96000)) return false
+  }
+  return true
+}
+
 // Wave 10: pure authorship-check helper (used inside apply() and exported for
 // the brittle test suite). Mirrors checkTipAckAuthorship but named separately
 // so future changes to one gate class don't leak into the other.
@@ -1597,6 +1636,8 @@ module.exports = {
     isValidSystemPredictionSettle,
     // Spectator tier exports for brittle tests
     isValidSystemReaderJoined,
+    // QVAC Ship 3 F3 export
+    isValidSystemMatchRecap,
     MAX_GOAL_MINUTE,
     MAX_CHARS,
     GOAL_CLUSTER_COUNT,

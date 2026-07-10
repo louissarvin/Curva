@@ -613,6 +613,24 @@ export function mountChat({ container, curva, tier = 'writer' } = {}) {
       curva.semSearch.index({ id: indexId, text: indexText }).catch(() => {})
     }
 
+    // QVAC Ship 3 F3: `system:match-recap`. Post-match summary pill with
+    // per-locale Play buttons. Every peer-authored/LLM-produced string goes
+    // through textContent — recap text is model output and untrusted.
+    if (msg?.type === 'system:match-recap') {
+      const li = renderSystemMatchRecap(msg, key)
+      list.appendChild(li)
+      rowsByKey.set(key, li)
+      msgCount++
+      count.textContent = msgCount + ' msg' + (msgCount === 1 ? '' : 's')
+      while (list.children.length > 300) {
+        const first = list.firstChild
+        if (first?.dataset?.key) rowsByKey.delete(first.dataset.key)
+        list.removeChild(first)
+      }
+      if (autoScroll) list.scrollTop = list.scrollHeight
+      return
+    }
+
     // F2: system:goal-card — AI-parsed goal event. Gold border-left pill.
     // All fields via textContent — model output is untrusted (defense in depth).
     if (msg?.type === 'system:goal-card') {
@@ -1145,6 +1163,90 @@ export function mountChat({ container, curva, tier = 'writer' } = {}) {
     li.appendChild(marker)
     li.appendChild(body)
     li.appendChild(attribution)
+    return li
+  }
+
+  // QVAC Ship 3 F3: `system:match-recap` renderer.
+  // Pill styling matches the existing system-message pattern. Renders recap
+  // text + one small "Play" button per locale. Playback pulls the blob via
+  // the existing curva.clips.getClip bridge (falls back to a no-op when the
+  // bridge is absent — older previews). All strings via textContent since
+  // recap text is Qwen3 output and translated bodies are Bergamot output;
+  // both are untrusted per Curva's Cup Final security posture.
+  function renderSystemMatchRecap (msg, key) {
+    const li = document.createElement('li')
+    li.className = 'curva-chat__msg curva-chat__msg--system curva-chat__msg--match-recap'
+    li.dataset.key = key
+
+    const inner = document.createElement('div')
+    inner.className = 'curva-chat__match-recap-inner'
+
+    const tag = document.createElement('span')
+    tag.className = 'curva-chat__match-recap-tag'
+    tag.textContent = 'RECAP'
+    inner.appendChild(tag)
+
+    const body = document.createElement('div')
+    body.className = 'curva-chat__match-recap-body'
+    body.textContent = typeof msg.recapText === 'string'
+      ? msg.recapText.slice(0, 800)
+      : ''
+    inner.appendChild(body)
+
+    const audio = (msg.audioByLocale && typeof msg.audioByLocale === 'object')
+      ? msg.audioByLocale : {}
+    const localeKeys = Object.keys(audio).slice(0, 8)
+    if (localeKeys.length > 0) {
+      const playRow = document.createElement('div')
+      playRow.className = 'curva-chat__match-recap-play-row'
+      for (const locale of localeKeys) {
+        const entry = audio[locale] || {}
+        const btn = document.createElement('button')
+        btn.type = 'button'
+        btn.className = 'curva-chat__match-recap-play'
+        btn.textContent = 'Play ' + String(locale).slice(0, 4).toUpperCase()
+        // Only expose a working button if we actually have a blobKey.
+        if (typeof entry.blobKey !== 'string' || entry.blobKey.length === 0) {
+          btn.disabled = true
+          btn.title = 'audio unavailable'
+        } else {
+          btn.addEventListener('click', async () => {
+            btn.disabled = true
+            const orig = btn.textContent
+            btn.textContent = 'Loading...'
+            try {
+              // blobKey shape: `<driveKey>:<path>`. Fall back to a no-op if
+              // the getClip bridge is missing or the parse fails.
+              const sep = entry.blobKey.indexOf(':')
+              const driveKey = sep > 0 ? entry.blobKey.slice(0, sep) : null
+              const path = sep > 0 ? entry.blobKey.slice(sep + 1) : null
+              const clipsBridge = (typeof window !== 'undefined' && window.curva && window.curva.clips) || null
+              if (driveKey && path && clipsBridge && typeof clipsBridge.getClip === 'function') {
+                const bytes = await clipsBridge.getClip({ driveKey, path })
+                if (bytes && bytes.byteLength > 0) {
+                  const blob = new Blob([bytes], { type: 'application/octet-stream' })
+                  const url = URL.createObjectURL(blob)
+                  const audioEl = new Audio(url)
+                  audioEl.addEventListener('ended', () => { URL.revokeObjectURL(url) })
+                  await audioEl.play()
+                }
+              }
+            } catch { /* silent — button is best-effort */ }
+            btn.textContent = orig
+            btn.disabled = false
+          })
+        }
+        playRow.appendChild(btn)
+      }
+      inner.appendChild(playRow)
+    }
+
+    const attribution = document.createElement('div')
+    attribution.className = 'curva-chat__commentary-attribution'
+    attribution.textContent = 'match recap · on-device Qwen3 + Bergamot + Chatterbox'
+    inner.appendChild(attribution)
+
+    li.appendChild(inner)
     return li
   }
 

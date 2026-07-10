@@ -1,4 +1,4 @@
-// Curva Wave 3 F2: Chatterbox voice-cloned commentator.
+// Curva Wave 3 F2 (+ QVAC Ship 3 F1): Chatterbox voice-cloned commentator.
 //
 // Docs-verification memo ----------------------------------------------------
 //
@@ -8,9 +8,11 @@
 //                                  'pl', 'tr', 'sv', 'da', 'fi', 'no', 'el',
 //                                  'ms', 'sw', 'ar', 'ko', 'he', 'ru', 'zh',
 //                                  'hi']`
-//     Indonesian (`id`) is NOT in the Chatterbox language set. We restrict
-//     voice cloning to EN/IT and refuse other locales with a documented
-//     `LOCALE_NOT_SUPPORTED` skip event.
+//     Indonesian (`id`) is NOT in the Chatterbox language set. Ship 3 F1
+//     widens Curva's allowlist from EN/IT to the six-language European/Latin
+//     safe set (EN, IT, ES, FR, DE, PT). Other locales are refused with a
+//     `LOCALE_NOT_SUPPORTED` skip event so the goal pipeline can fall back
+//     to Supertonic via announcer.openSpeakStream.
 //
 //   pear-app/node_modules/@qvac/sdk/dist/schemas/text-to-speech.d.ts:225-261
 //     `referenceAudioSrc` accepts either a `string` (file path / registry
@@ -37,9 +39,15 @@
 
 'use strict'
 
-// The Chatterbox subset we support in Curva demos. `es`, `fr`, etc. are
-// supported by the engine but Curva's UX targets EN/IT for Wave 3.
-const ALLOWED_CLONE_LOCALES = Object.freeze(new Set(['en', 'it']))
+// Ship 3 F1: European/Latin safe set. Verified against the
+// TTS_CHATTERBOX_LANGUAGES literal at text-to-speech.d.ts:2 (fetched
+// 2026-07-10). All six are members of that Chatterbox-supported list. We
+// deliberately stop short of the CJK / Arabic / Cyrillic tail because Curva's
+// current room audience is European-facing and Bergamot's translation
+// coverage is strongest here.
+const ALLOWED_CLONE_LOCALES = Object.freeze(new Set([
+  'en', 'it', 'es', 'fr', 'de', 'pt'
+]))
 
 const CHATTERBOX_MODEL_SRC_KEY = 'TTS_CHATTERBOX_MULTILINGUAL_Q8_0'
 const CHATTERBOX_MODEL_ID_PREFIX = 'tts-chatterbox'
@@ -406,6 +414,106 @@ function createVoiceClone (opts = {}) {
     }
   }
 
+  /**
+   * Streaming parity with announcer.openSpeakStream. Returns
+   * `{ chunks, end, destroy }` where `chunks` is an async iterator of
+   * `{ buffer, sampleRate, done }` frames. When Chatterbox streaming is not
+   * available on the installed SDK (e.g. older builds that only expose the
+   * non-stream `buffer` promise) we degrade to `speak()` and emit ONE chunk
+   * with the full PCM followed by `{ done: true }`. Callers can drain this
+   * exactly like the announcer's session — no branching needed on their side.
+   *
+   * The tts-open / tts-end events on the goal-pipeline bus are emitted by the
+   * pipeline, not here; this seam is intentionally quiet so the pipeline
+   * remains the single point of truth for orchestration events.
+   *
+   * @param {string} text
+   * @param {string} locale
+   * @returns {Promise<{ chunks: AsyncIterable<{buffer:number[],sampleRate:number,done:boolean}>, end: Function, destroy: Function } | null>}
+   */
+  async function speakStream (text, locale) {
+    if (!voiceCloneFlagEnabled()) {
+      emit('voiceClone:skip', { reason: 'FLAG_OFF' })
+      return null
+    }
+    if (state.destroyed) return null
+    const target = normaliseLocale(locale)
+    if (!target) {
+      emit('voiceClone:skip', {
+        reason: 'LOCALE_NOT_SUPPORTED',
+        locale: typeof locale === 'string' ? locale : null,
+        allowed: Array.from(ALLOWED_CLONE_LOCALES)
+      })
+      return null
+    }
+    // Preferred path: SDK exposes a `textToSpeechStream` primitive. This is
+    // the same shape Curva's announcer uses under the hood. When absent, fall
+    // back to the buffer path.
+    const sdk = await loadSdk()
+    if (!sdk) return null
+    const clean = sanitizeText(text)
+    if (clean.length === 0) {
+      emit('voiceClone:skip', { reason: 'EMPTY_TEXT', locale: target })
+      return null
+    }
+    const modelId = await ensureModel(target)
+    if (!modelId) return null
+
+    if (typeof sdk.textToSpeechStream === 'function') {
+      try {
+        const session = sdk.textToSpeechStream({ modelId })
+        if (session && typeof session.write === 'function') {
+          try { session.write(clean) } catch { /* noop */ }
+          try { if (typeof session.end === 'function') session.end() } catch { /* noop */ }
+          const chunks = (async function * () {
+            try {
+              for await (const evt of session) {
+                if (!evt || typeof evt !== 'object') continue
+                const buffer = Array.isArray(evt.buffer) ? evt.buffer : []
+                yield {
+                  buffer,
+                  sampleRate: CHATTERBOX_SAMPLE_RATE,
+                  done: !!evt.done
+                }
+                if (evt.done) break
+              }
+            } catch (err) {
+              emit('voiceClone:error', {
+                code: 'STREAM_FAILED', locale: target,
+                message: err && err.message
+              })
+            }
+          })()
+          return {
+            chunks,
+            end () { try { session.end?.() } catch { /* noop */ } },
+            destroy () { try { session.destroy?.() } catch { /* noop */ } }
+          }
+        }
+      } catch (err) {
+        emit('voiceClone:error', {
+          code: 'STREAM_OPEN_FAILED', locale: target,
+          message: err && err.message
+        })
+        // fall through to buffer degrade path
+      }
+    }
+
+    // Degrade to non-stream speak(): synthesize the whole buffer and emit one
+    // chunk. Preserves the callers' `for await` loop shape.
+    const one = await speak(clean, target)
+    if (!one) return null
+    const chunks = (async function * () {
+      yield { buffer: one.samples, sampleRate: one.sampleRate, done: false }
+      yield { buffer: [], sampleRate: one.sampleRate, done: true }
+    })()
+    return {
+      chunks,
+      end () { /* one-shot; nothing to close */ },
+      destroy () { /* noop */ }
+    }
+  }
+
   function status () {
     return {
       ready: state.ready,
@@ -435,6 +543,7 @@ function createVoiceClone (opts = {}) {
     enroll,
     setReference,
     speak,
+    speakStream,
     status,
     close,
     _internal: {

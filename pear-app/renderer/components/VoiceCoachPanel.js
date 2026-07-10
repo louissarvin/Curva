@@ -82,6 +82,26 @@ export function mountVoiceCoachPanel({ container, curva, roomState } = {}) {
   header.appendChild(title)
   header.appendChild(chip)
 
+  // Ship 3 F2: "Reset conversation" link. Grey, subtle, always visible so
+  // the host can wipe the ring at any time. Wraps the bridge in a
+  // try/catch — a missing bridge (older preload) becomes a silent no-op
+  // rather than a thrown TypeError that breaks the header row.
+  const resetLink = document.createElement('button')
+  resetLink.type = 'button'
+  resetLink.className = 'curva-voice-coach__reset'
+  resetLink.textContent = 'Reset conversation'
+  resetLink.setAttribute('aria-label', 'Reset voice-coach conversation memory')
+  resetLink.addEventListener('click', () => {
+    try {
+      if (typeof curva.voiceCoach.clearMemory === 'function') {
+        Promise.resolve(curva.voiceCoach.clearMemory()).catch(() => {})
+      }
+    } catch { /* older preload without clearMemory — silent no-op */ }
+    resetLink.textContent = 'Cleared'
+    setTimeout(() => { resetLink.textContent = 'Reset conversation' }, 1200)
+  })
+  header.appendChild(resetLink)
+
   const btn = document.createElement('button')
   btn.type = 'button'
   btn.className = 'curva-voice-coach__ptt'

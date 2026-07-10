@@ -6019,6 +6019,29 @@ h2::after {
   border-color: rgba(239, 68, 68, 0.35);
   background: rgba(239, 68, 68, 0.08);
 }
+/* Ship 3 F2: subtle grey "Reset conversation" link in the panel header. */
+.curva-voice-coach__reset {
+  margin-left: auto;
+  padding: 2px 6px;
+  font-family: var(--curva-sans);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--curva-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: color 120ms ease, background 120ms ease, border-color 120ms ease;
+}
+.curva-voice-coach__reset:hover {
+  color: var(--curva-text);
+  background: rgba(255, 255, 255, 0.03);
+  border-color: rgba(255, 255, 255, 0.08);
+}
+.curva-voice-coach__reset:focus-visible {
+  outline: 2px solid var(--curva-focus, rgba(96, 165, 250, 0.5));
+  outline-offset: 2px;
+}
 .curva-voice-coach__ptt {
   padding: 10px 14px;
   font-family: var(--curva-sans);
@@ -6956,6 +6979,68 @@ h2::after {
   background: rgba(245, 158, 11, 0.04);
   padding: 8px 14px;
   position: relative;
+}
+
+/* QVAC Ship 3 F3: match-recap pill. Purple accent so it does not collide
+   visually with goal-card (gold) or tip (green). */
+.curva-chat__msg--match-recap {
+  border-left: 3px solid #a78bfa;
+  background: rgba(167, 139, 250, 0.05);
+  padding: 8px 14px;
+  position: relative;
+}
+.curva-chat__match-recap-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  position: relative;
+}
+.curva-chat__match-recap-tag {
+  align-self: flex-start;
+  font-size: 9px;
+  font-weight: 700;
+  font-family: var(--curva-sans);
+  letter-spacing: 0.14em;
+  color: #a78bfa;
+  background: rgba(167, 139, 250, 0.12);
+  border: 1px solid rgba(167, 139, 250, 0.32);
+  border-radius: 3px;
+  padding: 2px 6px;
+  text-transform: uppercase;
+}
+.curva-chat__match-recap-body {
+  font-family: var(--curva-sans);
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--curva-text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.curva-chat__match-recap-play-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 2px;
+}
+.curva-chat__match-recap-play {
+  padding: 3px 10px;
+  font-family: var(--curva-sans);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--curva-text);
+  background: rgba(167, 139, 250, 0.08);
+  border: 1px solid rgba(167, 139, 250, 0.3);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.curva-chat__match-recap-play:hover:not(:disabled) {
+  background: rgba(167, 139, 250, 0.16);
+  border-color: rgba(167, 139, 250, 0.55);
+}
+.curva-chat__match-recap-play:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .curva-chat__goal-card-inner {

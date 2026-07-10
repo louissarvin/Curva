@@ -161,6 +161,60 @@ async function tryUpdateMatchState (mcp, payload) {
   return { ok: false, reason: 'NO_MCP_TOOL' }
 }
 
+// Ship 3 F1: locale gate for voice-cloned TTS routing. Mirrors the
+// ALLOWED_CLONE_LOCALES set in bare/voiceClone.js. We keep the constant here
+// (rather than import it) so the pipeline can decide routing without waiting
+// for the async voiceClone factory to resolve. Any drift from voiceClone.js
+// costs us a `LOCALE_NOT_SUPPORTED` skip event; graceful fall-through to
+// announcer follows automatically.
+const VOICE_CLONE_ALLOWED = Object.freeze(new Set(['en', 'it', 'es', 'fr', 'de', 'pt']))
+
+// Ship 3 F1: route the announcement through the voice-cloned Chatterbox TTS
+// when a `voiceClone` handle is passed AND the locale is in Chatterbox's
+// supported set. Never fails the pipeline — a thrown voiceClone.speak falls
+// back to announcer. Emits `goalpipe:tts-open` and `goalpipe:tts-end` with a
+// `via` field ('voiceClone' | 'announcer') so the renderer can badge the row.
+async function routeTts (voiceClone, announcer, locale, text, log, emit) {
+  const cloneEligible = !!(voiceClone &&
+    typeof voiceClone.speak === 'function' &&
+    VOICE_CLONE_ALLOWED.has(String(locale).toLowerCase()))
+  if (cloneEligible) {
+    emit('goalpipe:tts-open', { locale, via: 'voiceClone' })
+    try {
+      const result = await voiceClone.speak(text, locale)
+      if (result && (Array.isArray(result.samples) || typeof result.sampleRate === 'number')) {
+        emit('goalpipe:tts-end', {
+          locale,
+          via: 'voiceClone',
+          samples: Array.isArray(result.samples) ? result.samples.length : 0,
+          sampleRate: result.sampleRate || null
+        })
+        // Keep parity with the announcer path for callers that still watch
+        // for the legacy speak-open / speak-end names.
+        emit('goalpipe:speak-open', { locale, via: 'voiceClone' })
+        emit('goalpipe:speak-end', { locale, via: 'voiceClone' })
+        return { ok: true, via: 'voiceClone' }
+      }
+      // null result means the voiceClone factory skipped (no reference, feature
+      // flag off, or empty text). Fall through to announcer.
+      log('warn', 'voiceClone skipped; falling back to announcer', { locale })
+      emit('goalpipe:tts-fallback', { locale, from: 'voiceClone', reason: 'skipped' })
+    } catch (err) {
+      log('warn', 'voiceClone.speak threw; falling back to announcer', {
+        locale, message: err && err.message
+      })
+      emit('goalpipe:tts-fallback', {
+        locale, from: 'voiceClone', reason: 'threw',
+        message: err && err.message
+      })
+    }
+  }
+  emit('goalpipe:tts-open', { locale, via: 'announcer' })
+  const spoken = await speakOnce(announcer, locale, text, log, emit)
+  emit('goalpipe:tts-end', { locale, via: 'announcer', ok: !!spoken.ok })
+  return { ...spoken, via: 'announcer' }
+}
+
 // Duck-type shim for the announcer. In production `announcer.openSpeakStream`
 // returns { write, end, chunks } (see bare/announcer.js:615). We only need to
 // write once and end, then optionally drain `chunks` so the PCM lands on the
@@ -235,6 +289,11 @@ function createGoalPipeline (deps = {}) {
     mcp = null,
     translate = null,
     announcer = null,
+    // Ship 3 F1: optional voice-cloned Chatterbox handle. When present AND
+    // the locale is in VOICE_CLONE_ALLOWED, `routeTts` routes there instead
+    // of announcer.openSpeakStream. Any failure falls back to announcer so
+    // the pipeline never crashes on TTS routing.
+    voiceClone = null,
     chat = null,
     roomSlug = null,
     locales = DEFAULT_LOCALES,
@@ -372,7 +431,7 @@ function createGoalPipeline (deps = {}) {
         }
       }
       emit('goalpipe:translated', { locale, text })
-      const spoken = await speakOnce(announcer, locale, text, log, emit)
+      const spoken = await routeTts(voiceClone, announcer, locale, text, log, emit)
       speakResults.push({ locale, ...spoken })
     }
 
@@ -449,12 +508,14 @@ module.exports = {
   pipelineFlagEnabled,
   DEFAULT_LOCALES,
   MAX_OCR_CHARS,
+  VOICE_CLONE_ALLOWED,
   _internal: {
     joinBlocksForPrompt,
     scoresEqual,
     buildAnnouncement,
     tryUpdateMatchState,
     speakOnce,
+    routeTts,
     withTimeout
   }
 }
