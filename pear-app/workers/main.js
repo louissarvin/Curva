@@ -668,6 +668,7 @@ function ensureCommentator() {
     announcer: streamingAnnouncer,
     announcerLocale: announcerDefaultLocale,
     voiceClone: voiceCloneHandle,
+    rag: (typeof ragInstance !== 'undefined' && ragInstance) ? ragInstance : null,
     getMatchTimeMs: () => {
       try {
         const st = room?.playhead?.state?.() || {}
