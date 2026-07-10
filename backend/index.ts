@@ -42,11 +42,13 @@ import { pricingRoutes } from './src/routes/pricingRoutes.ts';
 import { mcpRoutes, initMcpRegistries } from './src/routes/mcpRoutes.ts';
 import { predictionRoutes } from './src/routes/predictionRoutes.ts';
 import { x402Routes } from './src/routes/x402Routes.ts';
+import { vipRoutes } from './src/routes/vipRoutes.ts';
 import { attendanceRoutes } from './src/routes/attendanceRoutes.ts';
 import {
   MCP_ENABLED,
   CURVA_PREDICTIONS_ENABLED,
   CURVA_X402_ENABLED,
+  ENABLE_VIP_RESERVATIONS,
   CURVA_ATTENDANCE_ENABLED,
   RELAY_DEMO_ENABLED,
   ENABLE_BACKEND_METRICS,
@@ -353,6 +355,16 @@ await fastify.register(predictionRoutes, { prefix: '/predictions' });
 await fastify.register(x402Routes, { prefix: '/x402' });
 if (CURVA_X402_ENABLED) {
   console.log('[Boot] x402 paid-resource gateway enabled at GET /x402/*');
+}
+// Semifinal Wave: VIP room slug reservations. Second x402 endpoint (rides on
+// the same F11 facilitator). Mounted ONLY when ENABLE_VIP_RESERVATIONS=true so
+// that a fresh deploy without the flag returns 404 (hide-existence per
+// ADR-010) rather than 503 — matches the demo-seed and MCP patterns.
+if (ENABLE_VIP_RESERVATIONS) {
+  await fastify.register(vipRoutes, { prefix: '/vip' });
+  console.log(
+    '[Boot] VIP reservation gateway enabled at POST /vip/reserve, GET /vip/status/:slug'
+  );
 }
 // Wave 14: Attendance Ticket Tools. Feature-flag gated (CURVA_ATTENDANCE_ENABLED,
 // default false). When disabled the route returns 503 FEATURE_DISABLED so the

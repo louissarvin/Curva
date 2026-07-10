@@ -406,6 +406,36 @@ model PredictionPool {
   @@map("prediction_pools")
 }
 
+// =============================================================================
+// SECTION H: Semifinal — VIP Room Slug Reservations (x402)
+// =============================================================================
+//
+// One row per settled x402 payment that reserves a VIP room slug. The slug is
+// stored WITHOUT the `vip-` prefix; the API layer prefixes it on the way out.
+// txHash is the on-chain settle receipt returned by the F11 facilitator; both
+// slug and txHash are unique so a replay of the same authorization cannot
+// double-reserve, and re-broadcasts of the same tx hash resolve to the same
+// row. The reservation is a customer-facing settled payment, so we persist to
+// Postgres (survives restarts) rather than an in-memory map.
+model VipReservation {
+  id            String   @id @default(cuid())
+  // Normalized slug, WITHOUT the `vip-` prefix. Matches ^[a-z0-9-]{3,32}$.
+  slug          String   @unique
+  // Lowercase 0x... signer of the EIP-3009 authorization that funded the
+  // reservation. Non-null because a settled payment always has a signer.
+  ownerAddress  String   @map("owner_address")
+  // On-chain tx hash returned by submitEip3009Relay. Unique so a repeated
+  // relay of the same signed authorization is idempotent.
+  txHash        String   @unique @map("tx_hash")
+  reservedAt    DateTime @default(now()) @map("reserved_at")
+
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt      @map("updated_at")
+
+  @@index([ownerAddress])
+  @@map("vip_reservations")
+}
+
 model Prediction {
   id                 String   @id @default(cuid())
   poolId             String   @map("pool_id")

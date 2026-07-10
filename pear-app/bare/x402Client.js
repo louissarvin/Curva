@@ -264,9 +264,218 @@ async function safeJson(resp) {
   }
 }
 
+// ===========================================================================
+// Semifinal Wave - VIP room slug reservation client bridge.
+//
+// Docs-verification memo (2026-07-10):
+//   - https://x402.org (canonical spec v1 — POST + 402 flow works the same as
+//     GET; the challenge body shape and X-Payment retry header are unchanged)
+//   - https://docs.wdk.tether.io/ai/x402/ (WDK EIP-3009 exact scheme)
+//   - Wire path matches backend/src/routes/vipRoutes.ts (`POST /vip/reserve`,
+//     `GET /vip/status/:slug`).
+//
+// Both helpers accept a { baseUrl, wallet, fetch } dependency bag so callers
+// can inject the pear-app's already-configured wallet + backendUrl without
+// this module having to know anything about them. Never throws — all errors
+// surface as { ok:false, code, message } so callers can render user-facing
+// text without unwrapping exceptions.
+// ===========================================================================
+
+const VIP_SLUG_RE = /^[a-z0-9-]{3,32}$/
+
+function normalizeVipSlug(raw) {
+  const trimmed = String(raw || '').trim().toLowerCase()
+  return trimmed.startsWith('vip-') ? trimmed.slice(4) : trimmed
+}
+
+function trimTrailingSlash(s) {
+  return String(s || '').replace(/\/$/, '')
+}
+
+/**
+ * POST /vip/reserve — full x402 handshake.
+ *
+ * @param {object} opts
+ * @param {string} opts.baseUrl        backend base URL, e.g. http://localhost:3700
+ * @param {string} opts.slug           bare slug (no `vip-` prefix); server normalizes
+ * @param {object} opts.wallet         object with .signEip3009({...}) returning
+ *                                     { v, r, s, from, nonce, validAfter, validBefore }
+ * @param {function} [opts.fetch]      fetch impl (defaults to global)
+ * @param {number}   [opts.timeoutMs]  per-request timeout (default 15s)
+ * @returns {Promise<{ok:true, reservation:object} | {ok:false, code:string, message:string, extra?:object}>}
+ */
+async function reserveVipSlug(opts = {}) {
+  if (!opts || typeof opts !== 'object') return { ok: false, code: 'BAD_ARGS', message: 'opts required' }
+  const baseUrl = trimTrailingSlash(opts.baseUrl)
+  if (!baseUrl) return { ok: false, code: 'BAD_ARGS', message: 'baseUrl required' }
+  const slug = normalizeVipSlug(opts.slug)
+  if (!VIP_SLUG_RE.test(slug)) {
+    return { ok: false, code: 'BAD_SLUG', message: 'slug must match ^[a-z0-9-]{3,32}$' }
+  }
+  if (!opts.wallet || typeof opts.wallet.signEip3009 !== 'function') {
+    return { ok: false, code: 'WALLET_UNAVAILABLE', message: 'wallet.signEip3009 is required' }
+  }
+  const fetchImpl = opts.fetch || (typeof fetch === 'function' ? fetch : null)
+  if (!fetchImpl) return { ok: false, code: 'FETCH_UNAVAILABLE', message: 'fetch impl required' }
+  const timeoutMs = Number.isFinite(opts.timeoutMs) ? opts.timeoutMs : DEFAULT_TIMEOUT_MS
+
+  const url = baseUrl + '/vip/reserve'
+  const jsonBody = JSON.stringify({ slug })
+
+  async function postWithTimeout(headers) {
+    if (typeof AbortController !== 'function') {
+      return fetchImpl(url, { method: 'POST', headers, body: jsonBody })
+    }
+    const controller = new AbortController()
+    const t = setTimeout(() => { try { controller.abort() } catch (_) { /* noop */ } }, timeoutMs)
+    try {
+      return await fetchImpl(url, { method: 'POST', headers, body: jsonBody, signal: controller.signal })
+    } finally {
+      clearTimeout(t)
+    }
+  }
+
+  // First hop: no X-Payment.
+  let first
+  try {
+    first = await postWithTimeout({ 'Accept': 'application/json', 'Content-Type': 'application/json' })
+  } catch (err) {
+    return { ok: false, code: 'NETWORK_ERROR', message: err && err.message ? err.message : String(err) }
+  }
+  const firstBody = await safeJson(first)
+
+  // Path A: 200 (unusual for reserve but tolerated) OR 409 SLUG_ALREADY_RESERVED.
+  if (first.status === 200 && firstBody && firstBody.success && firstBody.data && firstBody.data.reservation) {
+    return { ok: true, reservation: firstBody.data.reservation }
+  }
+  if (first.status === 409 && firstBody && firstBody.error && firstBody.error.code === 'SLUG_ALREADY_RESERVED') {
+    return {
+      ok: false,
+      code: 'SLUG_ALREADY_RESERVED',
+      message: firstBody.error.message || 'slug already reserved',
+      extra: { reservation: (firstBody.data && firstBody.data.reservation) || null }
+    }
+  }
+  // Path B: 402 challenge.
+  if (first.status !== 402) {
+    const code = firstBody && firstBody.error && firstBody.error.code
+      ? firstBody.error.code
+      : ('HTTP_' + first.status)
+    const msg = firstBody && firstBody.error && firstBody.error.message
+      ? firstBody.error.message
+      : ('reserve failed with status ' + first.status)
+    return { ok: false, code, message: msg }
+  }
+
+  // Parse challenge from body + X-Payment-Required header.
+  let headerObj = null
+  try {
+    const raw = first.headers.get ? first.headers.get('x-payment-required') : first.headers['x-payment-required']
+    if (raw) headerObj = JSON.parse(raw)
+  } catch (_) { /* ignore */ }
+  const challenge = parseX402Challenge(firstBody, headerObj)
+  if (!challenge) {
+    return { ok: false, code: 'BAD_CHALLENGE', message: 'server 402 did not include a valid challenge' }
+  }
+
+  // Sign.
+  let sig
+  try {
+    sig = await opts.wallet.signEip3009({
+      chainId: challenge.chainId,
+      tokenAddress: challenge.asset,
+      to: challenge.payTo,
+      value: challenge.maxAmountRequired,
+      nonce: challenge.nonce,
+      validAfter: challenge.validAfter,
+      validBefore: challenge.validBefore
+    })
+  } catch (err) {
+    return { ok: false, code: 'WALLET_SIGN_FAILED', message: err && err.message ? err.message : String(err) }
+  }
+  if (!sig || typeof sig.v !== 'number' || typeof sig.r !== 'string' || typeof sig.s !== 'string' || typeof sig.from !== 'string') {
+    return { ok: false, code: 'WALLET_SIGN_FAILED', message: 'wallet returned malformed signature' }
+  }
+
+  // Retry with X-Payment.
+  const paymentHeader = buildPaymentHeader(challenge, sig)
+  let second
+  try {
+    second = await postWithTimeout({
+      'Accept': 'application/json',
+      'Content-Type': 'application/json',
+      'X-Payment': paymentHeader
+    })
+  } catch (err) {
+    return { ok: false, code: 'NETWORK_ERROR', message: err && err.message ? err.message : String(err) }
+  }
+  const secondBody = await safeJson(second)
+  if (second.status === 200 && secondBody && secondBody.success && secondBody.data && secondBody.data.reservation) {
+    return { ok: true, reservation: secondBody.data.reservation }
+  }
+  const code = secondBody && secondBody.error && secondBody.error.code
+    ? secondBody.error.code
+    : ('HTTP_' + second.status)
+  const msg = secondBody && secondBody.error && secondBody.error.message
+    ? secondBody.error.message
+    : ('reserve retry failed with status ' + second.status)
+  return { ok: false, code, message: msg, extra: { status: second.status } }
+}
+
+/**
+ * GET /vip/status/:slug — no auth, public typeahead.
+ *
+ * @param {string} slug — bare slug (or with vip- prefix; server normalizes)
+ * @param {object} opts
+ * @param {string} opts.baseUrl
+ * @param {function} [opts.fetch]
+ * @param {number}   [opts.timeoutMs]
+ * @returns {Promise<{reserved:boolean, ownerAddress?:string, reservedAt?:string, txHash?:string, vipSlug:string, slug:string} | {ok:false, code:string, message:string}>}
+ */
+async function checkVipStatus(slug, opts = {}) {
+  const baseUrl = trimTrailingSlash(opts.baseUrl)
+  if (!baseUrl) return { ok: false, code: 'BAD_ARGS', message: 'baseUrl required' }
+  const normalized = normalizeVipSlug(slug)
+  if (!VIP_SLUG_RE.test(normalized)) {
+    return { ok: false, code: 'BAD_SLUG', message: 'slug must match ^[a-z0-9-]{3,32}$' }
+  }
+  const fetchImpl = opts.fetch || (typeof fetch === 'function' ? fetch : null)
+  if (!fetchImpl) return { ok: false, code: 'FETCH_UNAVAILABLE', message: 'fetch impl required' }
+  const timeoutMs = Number.isFinite(opts.timeoutMs) ? opts.timeoutMs : DEFAULT_TIMEOUT_MS
+
+  const url = baseUrl + '/vip/status/' + encodeURIComponent(normalized)
+  let resp
+  try {
+    if (typeof AbortController === 'function') {
+      const controller = new AbortController()
+      const t = setTimeout(() => { try { controller.abort() } catch (_) { /* noop */ } }, timeoutMs)
+      try {
+        resp = await fetchImpl(url, { method: 'GET', headers: { 'Accept': 'application/json' }, signal: controller.signal })
+      } finally {
+        clearTimeout(t)
+      }
+    } else {
+      resp = await fetchImpl(url, { method: 'GET', headers: { 'Accept': 'application/json' } })
+    }
+  } catch (err) {
+    return { ok: false, code: 'NETWORK_ERROR', message: err && err.message ? err.message : String(err) }
+  }
+  const body = await safeJson(resp)
+  if (resp.status !== 200 || !body || !body.success || !body.data) {
+    const code = body && body.error && body.error.code ? body.error.code : ('HTTP_' + resp.status)
+    const msg = body && body.error && body.error.message ? body.error.message : ('status query failed with ' + resp.status)
+    return { ok: false, code, message: msg }
+  }
+  return body.data
+}
+
 module.exports = {
   createX402Client,
   X402Error,
   parseX402Challenge,
-  buildPaymentHeader
+  buildPaymentHeader,
+  reserveVipSlug,
+  checkVipStatus,
+  normalizeVipSlug,
+  VIP_SLUG_RE
 }

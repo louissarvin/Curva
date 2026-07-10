@@ -536,6 +536,39 @@ export const CURVA_X402_RATE_LIMIT_WINDOW: string =
   process.env.CURVA_X402_RATE_LIMIT_WINDOW || '1 minute';
 
 // =============================================================================
+// Semifinal Wave: VIP room slug reservations (x402)
+// =============================================================================
+//
+// Second x402-paywalled endpoint. Reuses the F11 facilitator + Wave 13B x402
+// helpers to price a VIP room slug. When ENABLE_VIP_RESERVATIONS=false the
+// route is not mounted (hide-existence per ADR-010 / ADR-007). When ON, the
+// x402 challenge asks for VIP_RESERVATION_AMOUNT_ATOMIC base units (default
+// 5 USDT = 5_000_000 atomic units) paid to the sponsor address.
+//
+// Docs verified:
+//   - https://x402.org (spec v1, retrieved 2026-07-10)
+//   - https://docs.wdk.tether.io/ai/x402/ (WDK path, retrieved 2026-07-10)
+//   - https://eips.ethereum.org/EIPS/eip-3009 (settlement primitive)
+export const ENABLE_VIP_RESERVATIONS: boolean =
+  (process.env.ENABLE_VIP_RESERVATIONS || 'false').toLowerCase() === 'true';
+// Base-units amount. USDT is 6 decimals so 5_000_000 == 5 USDT. Kept low so a
+// demo peer can afford to reserve a slug live on stage without a wallet top-up.
+export const VIP_RESERVATION_AMOUNT_ATOMIC: string =
+  process.env.VIP_RESERVATION_AMOUNT_ATOMIC || '5000000';
+// Per-IP rate limit. Reservation attempts issue a fresh challenge each time
+// so a naive scraper can spam nonces without paying; cap keeps memory bounded.
+export const VIP_RATE_LIMIT_MAX: number =
+  Number(process.env.VIP_RATE_LIMIT_MAX) || 20;
+export const VIP_RATE_LIMIT_WINDOW: string =
+  process.env.VIP_RATE_LIMIT_WINDOW || '1 minute';
+// Public status endpoint has its own bucket because it is cheap and legit
+// clients call it during the "is this slug taken?" typeahead flow.
+export const VIP_STATUS_RATE_LIMIT_MAX: number =
+  Number(process.env.VIP_STATUS_RATE_LIMIT_MAX) || 60;
+export const VIP_STATUS_RATE_LIMIT_WINDOW: string =
+  process.env.VIP_STATUS_RATE_LIMIT_WINDOW || '1 minute';
+
+// =============================================================================
 // Wave 14: Attendance Ticket Tools
 // =============================================================================
 //
