@@ -560,6 +560,78 @@ export const CURVA_ATTENDANCE_RATE_LIMIT_MAX: number =
 export const CURVA_ATTENDANCE_RATE_LIMIT_WINDOW: string =
   process.env.CURVA_ATTENDANCE_RATE_LIMIT_WINDOW || '1 minute';
 
+// =============================================================================
+// Wave 3 observability (F3)
+// =============================================================================
+
+// F3: Prometheus exporter for the backend companion. Default OFF because
+// exposing /metrics is a hardening decision: an operator who wants scraping
+// flips this to true AND ensures the reverse proxy is IP-allowlisted per
+// OWASP Logging Cheat Sheet ("expose telemetry only to trusted collectors").
+export const ENABLE_BACKEND_METRICS: boolean =
+  String(process.env.ENABLE_BACKEND_METRICS || '').toLowerCase() === 'true';
+
+// Rate limit for the /metrics endpoint. Low ceiling — a scrape every 15s is
+// enough for any dashboard; higher than that is either a misconfigured Prom
+// collector or an abuse pattern.
+export const METRICS_RATE_LIMIT_MAX: number =
+  Number(process.env.METRICS_RATE_LIMIT_MAX) || 30;
+export const METRICS_RATE_LIMIT_WINDOW: string =
+  process.env.METRICS_RATE_LIMIT_WINDOW || '1 minute';
+
+// =============================================================================
+// Wave 3 delegated QVAC provider (F2)
+// =============================================================================
+
+// F2: Backend runs `sdk.startQVACProvider({firewall})` and advertises its
+// pubkey so peers can offload STT/Bergamot compute. Default OFF because the
+// provider socket is a public attack surface AND @qvac/sdk must be installed
+// on the backend host (it is not a hard dep — the wiring degrades to a 501
+// response when the SDK is missing).
+export const ENABLE_QVAC_PROVIDER: boolean =
+  String(process.env.ENABLE_QVAC_PROVIDER || '').toLowerCase() === 'true';
+
+// Firewall allow-list. Comma-separated hex public keys. When empty the
+// provider refuses ALL peers (deny-by-default) — an operator who wants
+// unrestricted access must explicitly set QVAC_FIREWALL_MODE=allow-all AND
+// accept the audit-flag consequences.
+export const QVAC_ALLOWED_PUBKEYS: string[] = (
+  process.env.QVAC_ALLOWED_PUBKEYS || ''
+)
+  .split(',')
+  .map((s) => s.trim().toLowerCase())
+  .filter(Boolean);
+export const QVAC_FIREWALL_MODE: 'allow' | 'allow-all' =
+  String(process.env.QVAC_FIREWALL_MODE || '').toLowerCase() === 'allow-all'
+    ? 'allow-all'
+    : 'allow';
+
+// Which models the provider loads at boot. Comma-separated ids that must
+// exist in src/data/qvac-models.json — validated in delegatedProvider.ts at
+// startup. Default: bergamot pairs only (small, safe demo footprint).
+export const QVAC_PROVIDER_MODELS: string[] = (
+  process.env.QVAC_PROVIDER_MODELS ||
+  'bergamot-id-en,bergamot-en-id,bergamot-es-en'
+)
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+// =============================================================================
+// Wave 3 shared RAG (F4)
+// =============================================================================
+
+// F4: Enable shared WC26-fixtures RAG service. Default ON because the corpus
+// is static JSON — no external dependency, no compute cost at rest, and it
+// backs the /rag/search endpoint that judges call.
+export const ENABLE_SHARED_RAG: boolean =
+  String(process.env.ENABLE_SHARED_RAG || 'true').toLowerCase() === 'true';
+
+export const RAG_RATE_LIMIT_MAX: number =
+  Number(process.env.RAG_RATE_LIMIT_MAX) || 60;
+export const RAG_RATE_LIMIT_WINDOW: string =
+  process.env.RAG_RATE_LIMIT_WINDOW || '1 minute';
+
 export default {
   APP_PORT,
   NODE_ENV,

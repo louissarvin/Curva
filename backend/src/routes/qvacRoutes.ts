@@ -43,6 +43,10 @@ import {
   parseExpectedDigestHex,
   readyMirroredFile,
 } from '../lib/qvac/mirror.ts';
+import {
+  getDelegatedProvider,
+  getDelegatedProviderStateSnapshot,
+} from '../lib/qvac/delegatedProvider.ts';
 
 // -----------------------------------------------------------------------------
 // Helpers
@@ -416,6 +420,51 @@ export const qvacRoutes: FastifyPluginCallback = (
   //
   // No auth. Cache-safe. Rate-limited per-IP.
   // ---------------------------------------------------------------------------
+  // ---------------------------------------------------------------------------
+  // GET /qvac/provider (F2 Wave 3)
+  //
+  // Report the current state of the backend's delegated QVAC provider:
+  //   { status: 'disabled'|'unavailable'|'starting'|'running'|'failed',
+  //     publicKey: <hex>|null, firewall: {...}, models: [...] }
+  //
+  // On first call (when ENABLE_QVAC_PROVIDER=true) this lazily boots the
+  // provider. Subsequent calls are O(1). Rate-limited so the boot race
+  // cannot be triggered repeatedly by an attacker probing the endpoint.
+  //
+  // Public — the provider pubkey MUST be discoverable so peers can wire
+  // `qvacDelegated: {publicKey}` in their registry.
+  // ---------------------------------------------------------------------------
+  app.get(
+    '/provider',
+    {
+      config: {
+        rateLimit: {
+          max: MODEL_REGISTRY_RATE_LIMIT_MAX,
+          timeWindow: MODEL_REGISTRY_RATE_LIMIT_WINDOW,
+        },
+      },
+    },
+    async (_request: FastifyRequest, reply: FastifyReply) => {
+      try {
+        // Query cheap snapshot first so we do not race the lazy start on the
+        // read path if it is already resolved.
+        const cheap = getDelegatedProviderStateSnapshot();
+        const report = cheap.status === 'disabled' || cheap.status === 'running' || cheap.status === 'failed' || cheap.status === 'unavailable'
+          ? cheap
+          : await getDelegatedProvider();
+        // Never cache — the report can transition starting -> running.
+        reply.header('Cache-Control', 'no-store');
+        return reply.code(200).send({
+          success: true,
+          error: null,
+          data: report,
+        });
+      } catch (err) {
+        return handleServerError(reply, err as Error);
+      }
+    }
+  );
+
   app.get(
     '/explainer',
     {

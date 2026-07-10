@@ -43,7 +43,19 @@ import { mcpRoutes, initMcpRegistries } from './src/routes/mcpRoutes.ts';
 import { predictionRoutes } from './src/routes/predictionRoutes.ts';
 import { x402Routes } from './src/routes/x402Routes.ts';
 import { attendanceRoutes } from './src/routes/attendanceRoutes.ts';
-import { MCP_ENABLED, CURVA_PREDICTIONS_ENABLED, CURVA_X402_ENABLED, CURVA_ATTENDANCE_ENABLED, RELAY_DEMO_ENABLED } from './src/config/main-config.ts';
+import {
+  MCP_ENABLED,
+  CURVA_PREDICTIONS_ENABLED,
+  CURVA_X402_ENABLED,
+  CURVA_ATTENDANCE_ENABLED,
+  RELAY_DEMO_ENABLED,
+  ENABLE_BACKEND_METRICS,
+  METRICS_RATE_LIMIT_MAX,
+  METRICS_RATE_LIMIT_WINDOW,
+  ENABLE_SHARED_RAG,
+} from './src/config/main-config.ts';
+import { ragRoutes } from './src/routes/ragRoutes.ts';
+import { scrapeMetrics } from './src/lib/observability.ts';
 import { getToolCount, getResourceCount } from './src/lib/mcp/server.ts';
 
 // F10: multi-chain awareness — boot log shows which chains are enabled so
@@ -207,8 +219,49 @@ await fastify.register(roomRoutes, { prefix: '/rooms' });
 await fastify.register(tipRoutes, { prefix: '/tips' });
 await fastify.register(relayRoutes, { prefix: '/relay' });
 await fastify.register(healthRoutes, { prefix: '/health' });
-// /metrics/live shares the same plugin (it just exposes `/live`)
-await fastify.register(healthRoutes, { prefix: '/metrics' });
+// NOTE: Legacy `/metrics/live` K8s probe alias removed in wave 3 because
+// the new Prometheus exporter below owns the `/metrics` path. K8s liveness
+// probes should target `/health/live` (same handler, same shape).
+
+// F3 Prometheus exporter. Public GET /metrics returning the text-format
+// registry. Feature-flag gated: when ENABLE_BACKEND_METRICS=false the
+// endpoint returns 404 so its existence stays hidden (ADR-010 hide-existence
+// posture). Rate-limited per-IP so a broken Prom collector cannot DoS us.
+//
+// Docs: https://prometheus.io/docs/instrumenting/exposition_formats/
+// Docs: https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html
+//       (recommends restricting telemetry endpoints to trusted collectors)
+fastify.get(
+  '/metrics',
+  {
+    config: {
+      rateLimit: {
+        max: METRICS_RATE_LIMIT_MAX,
+        timeWindow: METRICS_RATE_LIMIT_WINDOW,
+      },
+    },
+  },
+  async (_request: FastifyRequest, reply: FastifyReply) => {
+    if (!ENABLE_BACKEND_METRICS) {
+      // Hide-existence: return the default Fastify 404 shape by throwing an
+      // error the framework converts to 404. reply.callNotFound() is the
+      // Fastify 5 idiom.
+      reply.callNotFound();
+      return reply;
+    }
+    const scrape = await scrapeMetrics();
+    if (!scrape) {
+      reply.callNotFound();
+      return reply;
+    }
+    reply.header('Content-Type', scrape.contentType);
+    reply.header('Cache-Control', 'no-store');
+    return reply.status(200).send(scrape.body);
+  }
+);
+if (ENABLE_BACKEND_METRICS) {
+  console.log('[Boot] Backend Prometheus exporter enabled at GET /metrics');
+}
 
 // Section 19 (Phase 2) routes
 await fastify.register(activityRoutes, { prefix: '/activity' });
@@ -269,6 +322,14 @@ await fastify.register(pearsRoutes, { prefix: '/pears' });
 // Wave 7 Zone C: Fiat pricing (USDT -> IDR/EUR/GBP/BRL/MXN/JPY/USD).
 // Public. 60/min/IP rate limit. Bitfinex (peg) + Frankfurter (ECB refs).
 await fastify.register(pricingRoutes, { prefix: '/pricing' });
+// Wave 3 F4: shared WC26 fixtures RAG service. Public. Rate-limited.
+// Backed by src/data/world-cup-2026.json — real FIFA 2026 draw data seeded
+// into the corpus at boot. When ENABLE_SHARED_RAG=false the route plugin
+// returns 503 FEATURE_DISABLED on every endpoint.
+await fastify.register(ragRoutes, { prefix: '/rag' });
+if (ENABLE_SHARED_RAG) {
+  console.log('[Boot] Shared RAG enabled at POST /rag/search, GET /rag/status');
+}
 // Wave 10: Match Prediction Pool. Feature-flag gated (CURVA_PREDICTIONS_ENABLED).
 // When disabled, every route in the plugin returns 503 FEATURE_DISABLED, so
 // the existing test suite is unaffected even before running `bun run db:push`

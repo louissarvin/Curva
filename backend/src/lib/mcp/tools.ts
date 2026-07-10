@@ -46,6 +46,12 @@ import {
   type McpTool,
   type McpToolResult,
 } from './server.ts';
+import {
+  getDisciplineRecord,
+  getFixturesOnDate,
+  getMatchSummary,
+} from '../qvac/sharedRag.ts';
+import { recordMcpToolCall } from '../observability.ts';
 
 // -----------------------------------------------------------------------------
 // Shared helpers
@@ -841,6 +847,134 @@ const prepareTipTool: McpTool = {
 };
 
 // -----------------------------------------------------------------------------
+// Wave 3 F4 tools — backed by the shared RAG corpus (world-cup-2026.json).
+//
+// These are server-privileged in the sense that a peer running the pear app
+// does not have to hold the full corpus locally to answer these questions.
+// The backend-side lookup uses ONLY data seeded from
+// backend/src/data/world-cup-2026.json — no upstream API calls, no
+// database, no invented facts. That makes them safe to expose over MCP.
+// -----------------------------------------------------------------------------
+
+const scoreGetLiveTool: McpTool = {
+  name: 'score.getLive',
+  title: 'Get static WC26 match summary',
+  description:
+    'Return the static WC26 fixture summary for a match (kickoff, teams, stage, status). Backed by the shared RAG corpus (world-cup-2026.json). Does not include live minute-by-minute score — use get_match_live for that.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      matchId: {
+        type: 'string',
+        description: 'Match externalId (numeric) or the RAG doc id "match:<n>"',
+      },
+    },
+    required: ['matchId'],
+    additionalProperties: false,
+  },
+  async handler(args) {
+    const id = args.matchId;
+    if (typeof id !== 'string' || !id) {
+      recordMcpToolCall('score.getLive', 'error');
+      return asError('matchId required');
+    }
+    if (id.length > 64) {
+      recordMcpToolCall('score.getLive', 'error');
+      return asError('matchId too long');
+    }
+    // Accept "12345" or "match:12345".
+    const lookupKey = /^\d+$/.test(id) ? Number(id) : id;
+    try {
+      const summary = getMatchSummary(lookupKey);
+      if (!summary) {
+        recordMcpToolCall('score.getLive', 'error');
+        return asError('Match not found in WC26 corpus');
+      }
+      recordMcpToolCall('score.getLive', 'ok');
+      return asText(summary);
+    } catch (err) {
+      recordMcpToolCall('score.getLive', 'error');
+      return asError((err as Error)?.message || 'lookup failed');
+    }
+  },
+};
+
+const refDisciplineTool: McpTool = {
+  name: 'ref.discipline',
+  title: 'Get discipline record for a team in a match',
+  description:
+    'Return the yellow/red card + suspension record for a team in a match. Currently reports {available:false} because discipline data is not seeded in the WC26 corpus — the response includes a reason field so callers can fall back to the live feed.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      team: {
+        type: 'string',
+        description: '3-letter FIFA team code (e.g. USA, MEX, BRA)',
+      },
+      matchId: {
+        type: 'string',
+        description: 'Match externalId (numeric) or RAG doc id',
+      },
+    },
+    required: ['team', 'matchId'],
+    additionalProperties: false,
+  },
+  async handler(args) {
+    const team = args.team;
+    const matchId = args.matchId;
+    if (typeof team !== 'string' || !/^[A-Z]{2,3}$/.test(team)) {
+      recordMcpToolCall('ref.discipline', 'error');
+      return asError('team must be a 2-3 letter uppercase code');
+    }
+    if (typeof matchId !== 'string' || !matchId || matchId.length > 64) {
+      recordMcpToolCall('ref.discipline', 'error');
+      return asError('matchId required');
+    }
+    try {
+      const record = getDisciplineRecord(team, matchId);
+      recordMcpToolCall('ref.discipline', 'ok');
+      return asText(record);
+    } catch (err) {
+      recordMcpToolCall('ref.discipline', 'error');
+      return asError((err as Error)?.message || 'lookup failed');
+    }
+  },
+};
+
+const stadiumGetFixturesTool: McpTool = {
+  name: 'stadium.getFixtures',
+  title: 'Get WC26 fixtures on a date',
+  description:
+    'Return all WC26 matches with a kickoff on the given UTC date (YYYY-MM-DD). Backed by the shared RAG corpus (world-cup-2026.json).',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      date: {
+        type: 'string',
+        description: 'UTC date, YYYY-MM-DD (e.g. 2026-06-11)',
+      },
+    },
+    required: ['date'],
+    additionalProperties: false,
+  },
+  async handler(args) {
+    const date = args.date;
+    if (typeof date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      recordMcpToolCall('stadium.getFixtures', 'error');
+      return asError('date must be YYYY-MM-DD');
+    }
+    try {
+      const fixtures = getFixturesOnDate(date);
+      recordMcpToolCall('stadium.getFixtures', 'ok');
+      return asText({ date, count: fixtures.length, fixtures });
+    } catch (err) {
+      recordMcpToolCall('stadium.getFixtures', 'error');
+      return asError((err as Error)?.message || 'lookup failed');
+    }
+  },
+};
+
+// -----------------------------------------------------------------------------
 // Registration
 // -----------------------------------------------------------------------------
 
@@ -861,6 +995,10 @@ export const registerAllTools = (): void => {
   if (MCP_TOOL_PREPARE_TIP_ENABLED) {
     registerTool(prepareTipTool);
   }
+  // Wave 3 F4 additions.
+  registerTool(scoreGetLiveTool);
+  registerTool(refDisciplineTool);
+  registerTool(stadiumGetFixturesTool);
 };
 
 // Test-only exports for direct unit testing without touching registry.
@@ -875,6 +1013,9 @@ export const __toolsForTest = {
   listQvacModelsTool,
   getStatusTool,
   prepareTipTool,
+  scoreGetLiveTool,
+  refDisciplineTool,
+  stadiumGetFixturesTool,
 };
 
 // Re-export McpContext for test files convenience.
