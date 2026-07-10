@@ -10,6 +10,7 @@ const os = require('os')
 const path = require('path')
 const PearRuntime = require('pear-runtime')
 const FramedStream = require('framed-stream')
+const { createNotifier } = require('./notifications.js')
 
 // ---------------------------------------------------------------------------
 // F1: live match score in the dock badge.
@@ -625,6 +626,92 @@ function isAllowedExternal(url) {
   } catch { return false }
 }
 
+// -- F8: native desktop notifications --------------------------------------
+//
+// Docs (fetched 2026-07-10):
+//   https://www.electronjs.org/docs/latest/api/notification
+//   https://www.electronjs.org/docs/latest/api/browser-window
+//
+// The notifier is a module-level singleton initialized on app.whenReady() so
+// Notification.isSupported() reads a live app state. The renderer calls
+// `notify:show` via preload; the main process forwards to notifier.notify()
+// which handles focus-check + rate-limit + click routing.
+
+let notifier = null
+
+function anyWindowFocused () {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (win.isDestroyed()) continue
+    try { if (win.isFocused && win.isFocused()) return true } catch { /* noop */ }
+  }
+  return false
+}
+
+function focusWindowForRoom (roomSlug) {
+  const windows = BrowserWindow.getAllWindows()
+  if (windows.length === 0) return
+  // Prefer a window that is not destroyed; raise the first available one.
+  for (const win of windows) {
+    if (win.isDestroyed()) continue
+    try {
+      if (win.isMinimized && win.isMinimized()) win.restore()
+      win.show()
+      win.focus()
+      // Notify the renderer so it can navigate to the room. Guard with a
+      // string check to avoid pushing {slug:null} into the renderer's route
+      // logic which would look like a no-op or a bug.
+      if (typeof roomSlug === 'string' && roomSlug.length > 0) {
+        try { win.webContents.send('curva:notification:focus-room', { slug: roomSlug }) } catch { /* noop */ }
+      }
+      break
+    } catch (err) {
+      console.warn('[Curva] focusWindowForRoom threw:', err && err.message)
+    }
+  }
+}
+
+function ensureNotifier () {
+  if (notifier) return notifier
+  notifier = createNotifier({
+    focusWindow: focusWindowForRoom,
+    isWindowFocused: anyWindowFocused,
+    log: (level, msg, extra) => console.log(JSON.stringify({
+      level, component: 'notifier', msg, ...(extra || {})
+    }))
+  })
+  return notifier
+}
+
+// Renderer -> main. The renderer bridge (curva.notifications.show) validates
+// the payload shape first; we re-validate here as defense in depth (a
+// compromised preload could forward a malformed shape).
+ipcMain.handle('notify:show', (_evt, payload) => {
+  if (!payload || typeof payload !== 'object') {
+    return { ok: false, code: 'BAD_PAYLOAD' }
+  }
+  const n = ensureNotifier()
+  return n.notify({
+    kind: payload.kind,
+    roomSlug: payload.roomSlug,
+    title: payload.title,
+    body: payload.body,
+    silent: !!payload.silent,
+    urgency: typeof payload.urgency === 'string' ? payload.urgency : undefined
+  })
+})
+
+ipcMain.handle('notify:status', () => {
+  const n = ensureNotifier()
+  return n.status()
+})
+
+app.on('will-quit', () => {
+  if (notifier) {
+    try { notifier.close() } catch { /* noop */ }
+    notifier = null
+  }
+})
+
 ipcMain.handle('curva:open-external', async (_evt, url) => {
   if (typeof url !== 'string' || !isAllowedExternal(url)) {
     console.warn('[Curva] openExternal rejected:', url)
@@ -709,6 +796,11 @@ if (!lock) {
   })
 
   app.whenReady().then(() => {
+    // F8: initialize notifier lazily so Notification.isSupported() reads live
+    // app state. Safe to call before window creation.
+    try { ensureNotifier() } catch (err) {
+      console.warn('[Curva] notifier init failed:', err && err.message)
+    }
     if (demoCount) {
       bootstrapDemoMode().catch((err) => {
         console.error('[Curva] failed to bootstrap demo mode:', err)
