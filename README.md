@@ -1,8 +1,20 @@
 <div align="center">
 
-# Curva
+<img src="web/src/logo.svg" alt="Curva" width="200" />
 
 **P2P watch-party for the World Cup, powered by the Tether developer stack.**
+
+<br />
+
+![Pears](https://img.shields.io/badge/Pears-Holepunch-000000?style=flat-square)
+![WDK](https://img.shields.io/badge/WDK-1.0.0--beta.12-00A88E?style=flat-square)
+![QVAC](https://img.shields.io/badge/QVAC-0.14-7B3FE4?style=flat-square)
+![Autobase](https://img.shields.io/badge/autobase-Pattern%20B-2A6DF4?style=flat-square)
+![ADRs](https://img.shields.io/badge/ADRs-10-1F6FEB?style=flat-square)
+![Tests](https://img.shields.io/badge/tests-73%20files-EE6A55?style=flat-square)
+![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)
+
+<br />
 
 Curva is a fully peer-to-peer World Cup 2026 watch-party desktop app. Autobase-linearised playheads, multi-writer chat, on-device commentary and translation, gasless USDT tips. No streaming platform. No chat server. No cloud translator. No custody service.
 
@@ -10,9 +22,33 @@ For football fans separated by continents who still want to react to the same go
 
 Built for the **Tether Developers Cup 2026** by **Team Indonesia**. Track: **Pears** (primary) with working **WDK** and **QVAC** cameos.
 
-**Reviewers start here:** three sections below directly answer the judges' code-review brief. [Code review guide](#code-review-guide) is a grep-friendly file:line index. [Tether stack accountability](#tether-stack-accountability) covers every Pears / QVAC / WDK piece with the "why chose / how wired / trade-off accepted" triple. [Commit-pinned permalinks](#commit-pinned-permalinks) links directly to every high-value code block. Companion reads for scoped depth: [`pear-app/README.md`](pear-app/README.md) (client-side permalinks + stack), [`backend/README.md`](backend/README.md) (companion-side permalinks + stack), [`docs/adr/README.md`](docs/adr/README.md) (ten ADRs).
+<br />
+
+**Reviewers start here.** Three sections in this README directly answer the semifinal code-review brief:
+
+- **[Code review guide](#code-review-guide)** — grep-friendly file:line index, 5-minute walkthrough, what each test proves, honest not-built list
+- **[Tether stack accountability](#tether-stack-accountability)** — every Pears / QVAC / WDK package with the "why chose / how wired / trade-off accepted" triple
+- **[Commit-pinned permalinks](#commit-pinned-permalinks)** — 24 permalinks locked to a specific commit hash so line numbers never drift
+
+Scoped depth per subproject: [`pear-app/README.md`](pear-app/README.md) (client-side permalinks + stack), [`backend/README.md`](backend/README.md) (companion-side permalinks + stack), [`docs/adr/README.md`](docs/adr/README.md) (ten ADRs).
 
 </div>
+
+---
+
+## Why this project exists
+
+FIFA sells the tournament, not the watch-party. Two friends on opposite continents can watch the same match, but every layer around it belongs to somebody else. The stream is on a platform, the chat is on a server, the tip goes through a payments processor, the AI translation is a cloud round-trip. If any of those go dark, the watch-party stops.
+
+Curva rebuilds that watch-party on the Tether stack because Tether ships the primitives that keep it decentralised without giving up product quality:
+
+- **Pears** gives us a peer-to-peer distribution and data plane. The stream is local. The chat is an Autobase. The clips live in Hyperdrives. There is no central server that can revoke access mid-match.
+- **WDK** gives us gasless settlement. A viewer tips the host in USDT with one click, without holding ETH, without going through Stripe. The wire is EIP-3009 signed off-chain, submitted by a sponsor facilitator.
+- **QVAC** gives us on-device AI. Bergamot translates chat between Torino and Jakarta with zero cloud round-trips. Qwen3 narrates the match in the room's language. Whisper turns a mic into chat. All models cache once, work offline forever.
+
+The three stacks reinforce each other. Pears carries the trust (every action is a signed log any peer can audit). WDK carries the settlement (a tip is the payoff for a good reaction). QVAC carries the voice (commentator, STT, TTS, translation make a two-peer room feel like a full stadium).
+
+**Every stack piece is exercised in the same 90-second demo** — a real Autobase chat sync, a real Sepolia gasless USDT tx, and real on-device Qwen3 commentary in one continuous take.
 
 ---
 
