@@ -26,17 +26,47 @@ Built for the **Tether Developers Cup 2026** by **Team Indonesia**. Track: **Pea
 
 ---
 
-## Why this project exists
+## The problem, the solution, the stack
 
-FIFA sells the tournament, not the watch-party. Two friends on opposite continents can watch the same match, but every layer around it belongs to somebody else. The stream is on a platform, the chat is on a server, the tip goes through a payments processor, the AI translation is a cloud round-trip. If any of those go dark, the watch-party stops.
+### The problem
 
-Curva rebuilds that watch-party on the Tether stack because Tether ships the primitives that keep it decentralised without giving up product quality:
+FIFA sells the tournament, not the watch-party. Two friends on opposite continents can watch the same match, but every layer around it belongs to somebody else:
+
+- **The stream** is on a platform that can geo-block or take it down mid-match
+- **The chat** is on a server that a moderator can lock, an admin can read, and a rate limit can throttle
+- **The tip** goes through a payments processor that charges 3 percent, requires a bank account, and needs an ID check
+- **The translation** is a cloud round-trip that logs every message and stops when the API key rotates
+
+If any of those go dark, the watch-party stops. If the tournament ends, the platform pivots and every group chat evaporates. The football is decentralised (a match between two national teams) but every layer around it is centralised.
+
+### The solution
+
+Curva rebuilds the watch-party as a peer-to-peer desktop app. Every layer that today lives on somebody else's servers is put back on the peer:
+
+- **The stream** is a local file. What syncs between friends is the playhead, not the bytes.
+- **The chat** is an Autobase-linearised multi-writer log. There is no server that can be shut down.
+- **The tip** is a signed EIP-3009 authorization. The peer never touches ETH, and no processor sits between two friends.
+- **The translation** runs on-device via Bergamot. Zero cloud round-trips. Works offline once the model is cached.
+
+Two friends open Curva on different continents, join the same room slug, and watch the match together. If the Companion backend goes dark, the room still works. If FIFA changes its distribution plans, the app still runs. If the sponsor treasury dries up, tips queue. Nothing about the watch-party depends on Curva staying online.
+
+### Why the Tether stack
+
+Curva did not need a research project to choose the P2P primitives. Tether already ships the three layers:
 
 - **Pears** gives us a peer-to-peer distribution and data plane. The stream is local. The chat is an Autobase. The clips live in Hyperdrives. There is no central server that can revoke access mid-match.
 - **WDK** gives us gasless settlement. A viewer tips the host in USDT with one click, without holding ETH, without going through Stripe. The wire is EIP-3009 signed off-chain, submitted by a sponsor facilitator.
 - **QVAC** gives us on-device AI. Bergamot translates chat between Torino and Jakarta with zero cloud round-trips. Qwen3 narrates the match in the room's language. Whisper turns a mic into chat. All models cache once, work offline forever.
 
-The three stacks reinforce each other. Pears carries the trust (every action is a signed log any peer can audit). WDK carries the settlement (a tip is the payoff for a good reaction). QVAC carries the voice (commentator, STT, TTS, translation make a two-peer room feel like a full stadium).
+### How the three tracks reinforce each other
+
+The Tether stack is not three separate features glued together. Each layer answers a question the other two cannot:
+
+- **Pears carries the trust.** The chat message, the playhead update, the tip authorization all flow through Autobase-linearised logs that any peer can audit.
+- **WDK carries the settlement.** Tips are the payoff for a well-timed reaction. Zero ETH friction makes the click possible for a normal fan.
+- **QVAC carries the voice.** Commentator, STT and TTS make a two-peer room feel like a full stadium; translation makes distance stop mattering.
+
+**Every stack piece is exercised in the same 90-second demo** — a real Autobase chat sync, a real Sepolia gasless USDT tx, and real on-device Qwen3 commentary in one continuous take.
 
 ---
 

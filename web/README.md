@@ -312,3 +312,50 @@ Client vars must be prefixed with `VITE_`. Empty strings are treated as `undefin
 Built on the Kwek Labs Web Starter.
 
 </div>
+
+---
+
+## Code review permalinks (web scope)
+
+Direct response to the judges' semifinal brief. The web site does not wire the Tether SDKs directly (that lives in [`../pear-app/`](../pear-app/) and [`../backend/`](../backend/)) but it is the surface a judge lands on before opening any code. Every URL below is pinned to commit `517cff080a013ec94dece86c02a35821cab7e726` on `github.com/louissarvin/Curva` so line numbers never drift. Root README's [Tether stack integration in detail](../README.md#tether-stack-integration-in-detail) has the full "why chose / how wired / trade-off accepted" triple per package.
+
+### Site routes — what each page explains
+
+1. **Landing page** (product tagline, one-line pitch, primary CTA to the Pear DHT release): [`src/routes/index.tsx`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/web/src/routes/index.tsx).
+2. **Architecture** (mermaid diagrams for room join, tip flow, Bare worker; explains the three-surface story): [`src/routes/architecture.tsx`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/web/src/routes/architecture.tsx).
+3. **Features** (13 Pears building blocks + WDK components + QVAC pipelines): [`src/routes/features.tsx`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/web/src/routes/features.tsx).
+4. **Demo** (staged screenshots + the 90-second script narration): [`src/routes/demo.tsx`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/web/src/routes/demo.tsx).
+5. **Docs** (mini docs hub linking into ADRs, IPC surface, spec files): [`src/routes/docs.tsx`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/web/src/routes/docs.tsx).
+6. **Submission** (the same content the DoraHacks form takes): [`src/routes/submission.tsx`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/web/src/routes/submission.tsx).
+7. **Root layout + providers + meta tags**: [`src/routes/__root.tsx`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/web/src/routes/__root.tsx).
+
+### Design system + polish
+
+8. **Global styles** (Tailwind 4 `@import "tailwindcss"`, custom scrollbar, dark theme): [`src/styles.css`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/web/src/styles.css).
+9. **Scroll-triggered animations** (GSAP-powered `AnimateComponent` used across every page): [`src/components/elements/`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/web/src/components/elements/).
+10. **Providers** (HeroUI theme, Lenis smooth-scroll, TanStack Query client): [`src/providers/`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/web/src/providers/).
+11. **Vite + Nitro config** (TanStack Start SSR + Vercel deployment): [`vite.config.ts`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/web/vite.config.ts).
+
+### Where in the pear-app / backend the site references
+
+The site's job is to explain the code in the neighbouring subprojects. Every claim on the site lands on a specific block in the actual codebase:
+
+- Landing page's "13 Pears primitives" claim → root README's [Pears table](../README.md#pears-primary-track-13-building-blocks) plus every row's embedded permalink.
+- Architecture page's Bare-worker + Autobase story → [`pear-app/bare/room.js#L698-L961`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/room.js#L698-L961) (Pattern B addWriter) and [`pear-app/bare/chat.js#L234-L318`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/chat.js#L234-L318) (apply purity).
+- Features page's "gasless USDT tip" screenshot → [`pear-app/bare/wallet/eip3009.js`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/wallet/eip3009.js) + [`backend/src/routes/facilitatorRoutes.ts`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/backend/src/routes/facilitatorRoutes.ts).
+- Demo page's "voice-controlled coach" step → [`pear-app/bare/voiceCoach.js#L205-L235`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/voiceCoach.js#L205-L235) (5-cap orchestration factory).
+- Submission page's "on-device translation" bullet → [`pear-app/bare/translate.js`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/bare/translate.js).
+
+## Tether stack usage (web scope)
+
+The web site does not import `@tetherto/wdk`, `@qvac/sdk`, or `hyperswarm`. Those live in [`pear-app/`](../pear-app/) (client) and [`backend/`](../backend/) (companion). What the web project owns is the **public-facing explanation** of every Tether-stack piece Curva ships. The site is the marketing surface; the code lives in the two subfolders.
+
+| Stack piece | Web page that explains it | Deep-dive lands in |
+|---|---|---|
+| **Pears** (13 primitives) | [`src/routes/features.tsx`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/web/src/routes/features.tsx) + [`src/routes/architecture.tsx`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/web/src/routes/architecture.tsx) | [Root README Pears table](../README.md#pears-primary-track-13-building-blocks) |
+| **WDK** (EIP-3009 + smart-account fallback) | [`src/routes/features.tsx`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/web/src/routes/features.tsx) + [`src/routes/demo.tsx`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/web/src/routes/demo.tsx) | [Root README WDK table](../README.md#wdk-cameo-gasless-usdt-tips) |
+| **QVAC** (5 baseline + orchestration flows) | [`src/routes/features.tsx`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/web/src/routes/features.tsx) | [Root README QVAC table](../README.md#qvac-cameo-on-device-ai) |
+| **Pear DHT release** (`pear://hcg8oft…`) | [`src/routes/index.tsx`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/web/src/routes/index.tsx) (primary CTA) | [`pear-app/pear.json`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/pear-app/pear.json) |
+| **ADRs (10 total)** | [`src/routes/docs.tsx`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/web/src/routes/docs.tsx) | [`docs/adr/`](https://github.com/louissarvin/Curva/blob/517cff080a013ec94dece86c02a35821cab7e726/docs/adr/) |
+
+**Trade-off we accepted for the web scope**: we did NOT wire live data from the Companion backend into the site (no `TanStack Query` calls hitting `/pears/status`, `/qvac/models`, or `/wdk/relay/*`). Every number the site shows is a screenshot or a copy-paste at build time. The reason: the Companion runs on a laptop under our desk during the cup submission window. If we bind the site to a live endpoint that then goes offline, judges see a broken page and read that as broken product. Static values inside the routes stay correct even when the laptop is off. Post-cup we would wire live data via TanStack Query with a stale-while-revalidate cache.
