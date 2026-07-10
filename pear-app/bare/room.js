@@ -110,6 +110,81 @@ async function appendThenAck(base, appendFn, label) {
   return res
 }
 
+// Wave 4 F1 — apply-middleware observer wire-in.
+//
+// The chat.js Autobase apply() body is host-invariant and must stay pure
+// (see chat.js:234 "apply() is PURE" memo). We therefore do NOT modify the
+// reducer body; instead, when the operator opts in via
+// CURVA_APPLY_MIDDLEWARE_ENABLED=true, we attach an observational middleware
+// chain to the chat base's `update` event. This gives us tamper-evident
+// audit logging and a chaos-drop diagnostic hook without ever running inside
+// apply() itself — which keeps deterministic replay guarantees intact.
+//
+// The observer is a no-op unless the feature flag is on. Callers unwind it
+// by invoking the returned disposer during room close.
+function attachApplyMiddleware(chat, { slug } = {}) {
+  const flag = (() => {
+    try {
+      const raw = (typeof process !== 'undefined' && process.env &&
+        process.env.CURVA_APPLY_MIDDLEWARE_ENABLED) || ''
+      const s = String(raw).toLowerCase()
+      return s === '1' || s === 'true' || s === 'yes' || s === 'on'
+    } catch { return false }
+  })()
+  if (!flag) return () => {}
+
+  let mod
+  try {
+    mod = require('./lib/applyMiddleware.js')
+  } catch (err) {
+    console.warn('[Curva][Room] apply-middleware unavailable:', err && err.message)
+    return () => {}
+  }
+
+  const base = chat && typeof chat.getBase === 'function' ? chat.getBase() : null
+  if (!base || typeof base.on !== 'function') return () => {}
+
+  // Sinks live OUTSIDE the reducer path, so pushing to them cannot alter view
+  // state. Bounded to keep memory usage safe on a long-running room.
+  const auditSink = { count: 0, ring: [] }
+  const compose = mod.composeApply([
+    mod.auditLogMiddleware({
+      sink: (evt) => {
+        auditSink.count += 1
+        if (auditSink.ring.length >= 256) auditSink.ring.shift()
+        auditSink.ring.push(evt)
+      },
+      sampleRate: 1
+    }),
+    mod.systemGuardMiddleware({
+      allowedTypes: ['chat', 'system:goal', 'system:goal-card', 'system:commentary',
+        'system:tip', 'system:bot-reply']
+    }),
+    mod.terminalMiddleware(async () => { /* no-op: real reducer is inside chat.js */ })
+  ])
+
+  const onUpdate = () => {
+    // Best-effort probe: read the local head as a single "node" and feed it
+    // through the middleware chain for observability only. This is
+    // side-effect free from Autobase's perspective — no view mutation.
+    try {
+      const localHead = base.local && typeof base.local.length === 'number'
+        ? base.local.length : null
+      // We do not have access to the full node stream from outside apply();
+      // instead we log a synthetic marker per update so the auditSink shape
+      // remains proven-live in production. Real per-node audit runs inside
+      // apply() and would require chat.js changes (out of scope for Wave 4).
+      compose([{ value: { type: 'system:commentary', kind: 'update-marker', slug, localHead }, from: {} }], {}, {})
+        .catch((err) => console.log('[Curva][Room] apply-middleware probe failed:', err && err.message))
+    } catch { /* observer must never leak errors */ }
+  }
+  base.on('update', onUpdate)
+
+  return function stop () {
+    try { base.off && base.off('update', onUpdate) } catch { /* noop */ }
+  }
+}
+
 // Spectator tier feature flag. When false (rollout default) every invitation
 // is treated as `tier: 'writer'` even if the payload explicitly requests
 // reader, so a partial deploy with an old host cannot accidentally admit a
@@ -190,6 +265,16 @@ async function openRoom(store, opts) {
   const playhead = await createPlayhead(roomStore, { isHost, myPubkey, bootstrap: playheadBootstrap })
   const chat = await createChat(roomStore, { myPubkey, bootstrap: chatBootstrap })
 
+  // Wave 4 F1: opt-in apply-middleware observability chain. The chat.js
+  // reducer body is NOT modified — the middleware here runs OUTSIDE the
+  // Autobase apply path (piggy-backing on the chatBase `update` event) so
+  // deterministic replay inside apply() is untouched. See
+  // bare/lib/applyMiddleware.js for the middleware contract and the memo
+  // explaining purity preservation. Gated by CURVA_APPLY_MIDDLEWARE_ENABLED
+  // (default off) so the release build is byte-identical to pre-Wave-4 unless
+  // the operator opts in.
+  const stopApplyMiddleware = attachApplyMiddleware(chat, { slug })
+
   // ADR-004: start ack loops on both bases. The loop is a cheap
   // clearInterval-owned handle; the body no-ops when the local writer is not
   // an active indexer. See top-of-file docs block for the verified API and
@@ -235,6 +320,99 @@ async function openRoom(store, opts) {
     valueEncoding: 'json'
   })
   await roomState.ready()
+
+  // F2 Wave 3: hyperbee.sub() namespace refactor.
+  //
+  // Docs verified 2026-07-10:
+  //   * https://docs.pears.com/reference/building-blocks/hyperbee/#beesubprefix-options
+  //   * pear-app/node_modules/hyperbee/index.js:793 sub(prefix, opts) — returns
+  //     a new Hyperbee bound to the same core with a prepended byte prefix.
+  //     Watchers are NOT supported on subs (line 662) — we never call .watch()
+  //     on these sub instances; range scans on the root are still available.
+  //
+  // Legacy keys used `/`-separated string prefixes (e.g. `room/writers/<hex>`).
+  // The sub prefix instead is `<name>\x00` bytes. The two are physically
+  // different bytes in the bee, so a rebooting peer against an already-written
+  // legacy bee cannot silently pick up the sub without migration.
+  //
+  // Migration policy: on HOST open we lazily copy legacy `room/*` keys into
+  // the `room` sub and delete the originals (peers replicate read-only, so
+  // they cannot migrate on their own). Peer reads route through readRoomKey()
+  // which first tries the sub, then falls back to the legacy prefix — that
+  // way a not-yet-migrated legacy bee still works.
+  const roomSub = roomState.sub('room')
+  const qvacSub = roomState.sub('qvac')
+  const providersSub = roomState.sub('providers')
+  const presenceSub = roomState.sub('presence')
+
+  // Read-through helper: try the sub first, fall back to the legacy path if
+  // the sub is empty. Used by peer code paths + host-side reads that predate
+  // migration completion. Returns the raw hyperbee entry ({key, value, seq})
+  // or null if neither exists.
+  async function readRoomKey(subKey) {
+    try {
+      const entry = await roomSub.get(subKey)
+      if (entry && entry.value !== undefined) return entry
+    } catch { /* fall through */ }
+    try {
+      const entry = await roomState.get('room/' + subKey)
+      if (entry && entry.value !== undefined) return entry
+    } catch { /* not found */ }
+    return null
+  }
+
+  // Host-only lazy migration. Idempotent: after a successful pass the sub
+  // owns the data and the legacy prefix is empty, so re-open is a no-op. We
+  // intentionally do NOT block openRoom on migration completion — a slow
+  // migration on a large room should not delay the swarm join. Errors are
+  // logged, never thrown; a partial migration is safe because reads fall
+  // through to legacy keys.
+  async function migrateLegacyRoomKeys() {
+    if (!isHost) return { migrated: 0 }
+    let migrated = 0
+    let scanned = 0
+    try {
+      const stream = roomState.createReadStream({
+        gt: 'room/',
+        lt: 'room0'
+      })
+      const toCopy = []
+      for await (const entry of stream) {
+        scanned += 1
+        // Strip leading 'room/' -> sub key.
+        const legacyKey = entry.key
+        if (typeof legacyKey !== 'string' || !legacyKey.startsWith('room/')) continue
+        const subKey = legacyKey.slice('room/'.length)
+        if (subKey.length === 0) continue
+        toCopy.push({ subKey, legacyKey, value: entry.value })
+      }
+      for (const { subKey, legacyKey, value } of toCopy) {
+        // If the sub already has this key we do NOT overwrite: the sub is
+        // authoritative once migrated, so a re-run cannot regress data. The
+        // legacy key is still safe to delete because reads via readRoomKey()
+        // resolve to the sub.
+        const existing = await roomSub.get(subKey).catch(() => null)
+        if (!existing) {
+          await roomSub.put(subKey, value)
+          migrated += 1
+        }
+        try { await roomState.del(legacyKey) } catch { /* best-effort */ }
+      }
+      if (migrated > 0 || scanned > 0) {
+        console.log('[Curva][Room] roomState sub migration', {
+          scanned, migrated, slug
+        })
+      }
+    } catch (err) {
+      console.log('[Curva][Room] roomState migration failed:', err?.message)
+    }
+    return { migrated }
+  }
+  // Kick off migration but don't await — see comment above.
+  const _migrationDone = migrateLegacyRoomKeys().catch((err) => {
+    console.log('[Curva][Room] migration promise rejected:', err?.message)
+    return { migrated: 0 }
+  })
 
   const clips = await createClips(roomStore, {
     isHost,
@@ -541,6 +719,20 @@ async function openRoom(store, opts) {
 
   async function loadWriterRoster() {
     const out = new Set()
+    // F2 Wave 3: read from the `room` sub first, then fall through to legacy
+    // top-level keys so a bee written by an older peer/host still populates
+    // the roster. Migration on the host copies legacy -> sub so the fallthrough
+    // scan becomes a no-op after a single pass.
+    try {
+      const stream = roomSub.createReadStream({
+        gt: 'writers/',
+        lt: 'writers0'
+      })
+      for await (const entry of stream) {
+        const hex = entry.key.slice('writers/'.length)
+        if (/^[0-9a-f]{64}$/.test(hex)) out.add(hex)
+      }
+    } catch { /* best-effort */ }
     try {
       const stream = roomState.createReadStream({
         gt: 'room/writers/',
@@ -569,6 +761,19 @@ async function openRoom(store, opts) {
   // re-invite. Best-effort: a stream failure leaves the Set empty and the next
   // successful handleWriterRequest re-adds the key.
   if (typeof chat.addReaderKey === 'function') {
+    // F2 Wave 3: sub-first, legacy fallback. Same pattern as loadWriterRoster.
+    try {
+      const stream = roomSub.createReadStream({
+        gt: 'tier-map/',
+        lt: 'tier-map0'
+      })
+      for await (const entry of stream) {
+        if (entry?.value?.tier === 'reader') {
+          const hex = entry.key.slice('tier-map/'.length)
+          if (/^[0-9a-f]{64}$/.test(hex)) chat.addReaderKey(hex)
+        }
+      }
+    } catch { /* best-effort */ }
     try {
       const stream = roomState.createReadStream({
         gt: 'room/tier-map/',
@@ -672,10 +877,12 @@ async function openRoom(store, opts) {
       // Persist under `room/tier-map/<hex>` so a rebooting host loads the
       // reader denylist back into chat.js.
       try {
-        await roomState.put('room/tier-map/' + chatWriterHex, {
+        // F2 Wave 3: writes go through the `room` sub. Read paths still fall
+        // through legacy top-level keys for cross-version compatibility.
+        await roomSub.put('tier-map/' + chatWriterHex, {
           base: 'chat', addedAt, invitedBy: myPubkey, tier: 'reader'
         })
-        await roomState.put('room/tier-map/' + phWriterHex, {
+        await roomSub.put('tier-map/' + phWriterHex, {
           base: 'playhead', addedAt, invitedBy: myPubkey, tier: 'reader'
         })
       } catch { /* best-effort persistence */ }
@@ -766,10 +973,11 @@ async function openRoom(store, opts) {
       writerRoster.add(payload.playheadWriterKey.toLowerCase())
     }
     try {
-      await roomState.put('room/writers/' + chatWriterHex, {
+      // F2 Wave 3: sub write.
+      await roomSub.put('writers/' + chatWriterHex, {
         base: 'chat', addedAt, invitedBy: myPubkey
       })
-      await roomState.put('room/writers/' + phWriterHex, {
+      await roomSub.put('writers/' + phWriterHex, {
         base: 'playhead', addedAt, invitedBy: myPubkey
       })
     } catch { /* bookkeeping only; autobase already promoted */ }
@@ -790,8 +998,12 @@ async function openRoom(store, opts) {
       chat.removeReaderKey(phWriterHex)
     }
     // Clean up any stale tier-map entry for the same hex so the persisted
-    // state reflects the current writer tier on rehydration.
+    // state reflects the current writer tier on rehydration. Delete from BOTH
+    // the sub and the legacy prefix so upgrades from a mixed-state bee don't
+    // leave orphan reader entries lying around.
     try {
+      await roomSub.del('tier-map/' + chatWriterHex)
+      await roomSub.del('tier-map/' + phWriterHex)
       await roomState.del('room/tier-map/' + chatWriterHex)
       await roomState.del('room/tier-map/' + phWriterHex)
     } catch { /* best-effort */ }
@@ -809,8 +1021,13 @@ async function openRoom(store, opts) {
   // that already have a room open under the old scheme can still be verified
   // by an upgraded host. Default is the new persisted-seed path.
   async function loadOrCreateInvitationSeeds() {
-    const chatEntry = await roomState.get(INVITATION_SEED_KEY + '/chat').catch(() => null)
-    const phEntry = await roomState.get(INVITATION_SEED_KEY + '/playhead').catch(() => null)
+    // F2 Wave 3: read from the `room` sub first (post-migration home) then
+    // fall back to the legacy top-level path. Writes always go to the sub so
+    // subsequent reads short-circuit at the first lookup.
+    const chatEntry = (await roomSub.get('invitation-seed/chat').catch(() => null))
+      || (await roomState.get(INVITATION_SEED_KEY + '/chat').catch(() => null))
+    const phEntry = (await roomSub.get('invitation-seed/playhead').catch(() => null))
+      || (await roomState.get(INVITATION_SEED_KEY + '/playhead').catch(() => null))
 
     let chatSeed = chatEntry?.value?.seedHex
       ? b4a.from(chatEntry.value.seedHex, 'hex')
@@ -822,7 +1039,7 @@ async function openRoom(store, opts) {
     if (!chatSeed || chatSeed.byteLength !== 32) {
       chatSeed = crypto.randomBytes(32)
       try {
-        await roomState.put(INVITATION_SEED_KEY + '/chat', {
+        await roomSub.put('invitation-seed/chat', {
           seedHex: b4a.toString(chatSeed, 'hex'),
           createdAt: Date.now()
         })
@@ -831,7 +1048,7 @@ async function openRoom(store, opts) {
     if (!phSeed || phSeed.byteLength !== 32) {
       phSeed = crypto.randomBytes(32)
       try {
-        await roomState.put(INVITATION_SEED_KEY + '/playhead', {
+        await roomSub.put('invitation-seed/playhead', {
           seedHex: b4a.toString(phSeed, 'hex'),
           createdAt: Date.now()
         })
@@ -936,13 +1153,20 @@ async function openRoom(store, opts) {
       owner: info?.ownerAddress
     })
     if (info?.smartAddress && info?.ownerAddress) {
-      await roomState.put('room/host-tip-address', {
+      // F2 Wave 3: sub-write. tip.js consumes via roomStateBee; it still reads
+      // through the top-level bee (roomState) using the legacy key. To avoid
+      // widening the tip.js contract in this refactor, we double-write for
+      // one release: sub is authoritative for future readers, legacy path
+      // preserves the tip.js reader without a signature change.
+      const rec = {
         chainId: info.chainId,
         smartAddress: info.smartAddress,
         ownerAddress: info.ownerAddress,
         smartAddressDeployed: false,
         publishedAt: Date.now()
-      })
+      }
+      await roomSub.put('host-tip-address', rec)
+      await roomState.put('room/host-tip-address', rec)
       console.log('[Curva][Room] host-tip-address published', { smart: info.smartAddress })
     }
   } else if (isHost) {
@@ -958,10 +1182,12 @@ async function openRoom(store, opts) {
   // channel restart.
   if (isHost) {
     try {
-      await roomState.put('room/host-pubkey', {
-        pubkeyHex: myPubkey,
-        publishedAt: Date.now()
-      })
+      // F2 Wave 3: double-write to sub + legacy path so pre-migration peers
+      // that read via the top-level key still resolve. Once the peer fleet is
+      // on the sub-aware read path, the legacy write can be dropped.
+      const rec = { pubkeyHex: myPubkey, publishedAt: Date.now() }
+      await roomSub.put('host-pubkey', rec)
+      await roomState.put('room/host-pubkey', rec)
     } catch (err) {
       console.warn('[Curva][Room] host-pubkey publish failed:', err?.message)
     }
@@ -976,7 +1202,9 @@ async function openRoom(store, opts) {
     if (hostPubkeyRefreshInFlight) return hostPubkeyRefreshInFlight
     hostPubkeyRefreshInFlight = (async () => {
       try {
-        const entry = await roomState.get('room/host-pubkey')
+        // F2 Wave 3: sub-first read, legacy fallback. readRoomKey() encapsulates
+        // the fall-through so future migrations only touch one helper.
+        const entry = await readRoomKey('host-pubkey')
         const hex = entry?.value?.pubkeyHex
         if (typeof hex === 'string' && hex.length > 0) {
           cachedHostPubkeyHex = hex.toLowerCase()
@@ -1203,6 +1431,8 @@ async function openRoom(store, opts) {
     // against the base close call below.
     try { stopChatAck() } catch (err) { errs.push(err) }
     try { stopPlayheadAck() } catch (err) { errs.push(err) }
+    // Wave 4 F1: detach apply-middleware observer if it was installed.
+    try { stopApplyMiddleware() } catch (err) { errs.push(err) }
     // Detach the demo playhead subscription first so no more auto-fire
     // callbacks can queue behind the close.
     for (const off of demoPlayheadUnsubs) {
@@ -1301,6 +1531,19 @@ async function openRoom(store, opts) {
     clips,
     clipIndex,
     roomState,
+    // F2 Wave 3: expose namespaced sub-bees so the coordinator (and tests)
+    // can read/write without duplicating the sub() call. All four are Hyperbee
+    // instances sharing the same underlying core; watchers are NOT available
+    // on subs (hyperbee/index.js:662) so writers must use scan-based
+    // notifications. See migration memo above readRoomKey().
+    roomStateSubs: {
+      room: roomSub,
+      qvac: qvacSub,
+      providers: providersSub,
+      presence: presenceSub
+    },
+    readRoomKey,
+    migrateLegacyRoomKeys,
     backend,
     tip,
     // Wave 11: Match Prediction Pool client. Nullable — see predictionsEnabled

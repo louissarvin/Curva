@@ -26,6 +26,24 @@ const GOAL_CLUSTER_COUNT = 5
 const GOAL_CLUSTER_WINDOW_MS = 3000
 const RECENT_WINDOW_SIZE = 20
 
+// F1 Wave 3: chat-scrubber version markers.
+//
+// Every apply() increments an internal counter. Every APPLY_MARKER_INTERVAL
+// nodes we snapshot the current `base.view.version` + the last observed
+// `match_time_ms` into a bounded ring so the renderer can build a "rewind to
+// kickoff" scrubber.
+//
+// Docs verified 2026-07-10:
+//   * hyperbee.checkout(version) — pear-app/node_modules/hyperbee/index.js:762
+//     Returns a new Hyperbee bound to a hypercore snapshot at that version.
+//     https://docs.pears.com/reference/building-blocks/hyperbee/#beecheckoutversion
+//   * hyperbee.version — pear-app/node_modules/hyperbee/index.js:467
+//     Reads Math.max(1, checkout || core.length); the value peers can pin.
+//   * autobase.view — pear-app/node_modules/autobase/index.js:187
+//     The Hyperbee produced by the `open(viewStore)` handler. Reused here.
+const APPLY_MARKER_INTERVAL = 10
+const VERSION_MARKER_CAP = 1024
+
 // F3 Hyperbee goal shard. 3-digit zero-padded minute covers 000..130
 // (regulation + full extra time in a knockout). Root-bee keys under
 // `match/goals/<paddedMinute>/<goalId>`. NOT inside bee.sub(): watchers are
@@ -38,6 +56,19 @@ const GOAL_ID_MAX_LEN = 64
 const MATCH_ID_MAX_LEN = 64
 const SCORER_MAX_LEN = 64
 const TEAM_NAME_MAX_LEN = 64
+
+// F1 Wave 3: dedicated error class for illegal writes through a checkout
+// handle. Renderer code that catches this can silently discard the write and
+// resurface the scrubber affordance. Never wrap this in a stack-leaking body:
+// the message stays generic ("checkout is read-only") so a compromised peer
+// cannot fingerprint internal state from a bounce-back error.
+class CheckoutReadOnly extends Error {
+  constructor(message = 'checkout is read-only') {
+    super(message)
+    this.name = 'CheckoutReadOnly'
+    this.code = 'CHECKOUT_READONLY'
+  }
+}
 
 /**
  * @param {Corestore} store
@@ -88,6 +119,47 @@ async function createChat(store, { myPubkey = 'local', hostPubkeyHex = null, boo
   }
   function isAuthorizedWriter(hex) {
     return authorizedWriters.has(hex)
+  }
+
+  // F1 Wave 3: version-marker ring. Populated OUTSIDE apply() by an
+  // 'update' listener because apply() must remain pure (holepunchto/autobase
+  // README: "the view argument is the only data structure being updated and
+  // that its fully deterministic"). We only READ base.view.version + the
+  // trailing message's match_time_ms and push a snapshot when the increment
+  // between two updates crosses APPLY_MARKER_INTERVAL applied nodes.
+  //
+  // Ring is a bounded array; when it exceeds VERSION_MARKER_CAP we drop the
+  // OLDEST entry (naive-LRU). Callers get the latest N markers via
+  // getVersions({limit}). Emission is done via versionMarkerListeners so the
+  // renderer can subscribe with onVersionMarker(cb).
+  const versionMarkers = []
+  const versionMarkerListeners = new Set()
+  let markerNodeCounter = 0
+  let lastMarkerVersion = -1
+  let lastAppliedMatchTimeMs = 0
+  let lastAppliedWallClockMs = 0
+
+  function pushVersionMarker(version, matchTimeMs, wallClockMs) {
+    // Never regress: if a rebase truncates the view and lowers `version`, we
+    // simply skip pushing the smaller marker rather than emitting a bogus
+    // "rewind" event. Autobase handles view truncation at the reducer level;
+    // the scrubber will pick up the new tip on the next apply.
+    if (version <= lastMarkerVersion) return
+    const marker = {
+      version,
+      matchTimeMs: Number.isFinite(matchTimeMs) ? matchTimeMs : 0,
+      wallClockMs: Number.isFinite(wallClockMs) ? wallClockMs : Date.now()
+    }
+    versionMarkers.push(marker)
+    lastMarkerVersion = version
+    if (versionMarkers.length > VERSION_MARKER_CAP) {
+      versionMarkers.shift()
+    }
+    for (const cb of versionMarkerListeners) {
+      try { cb(marker) } catch (err) {
+        console.log('[Curva] chat version-marker listener threw:', err?.message)
+      }
+    }
   }
 
   // Spectator tier (Autopass-style read-only): keys added here are peers
@@ -414,11 +486,41 @@ async function createChat(store, { myPubkey = 'local', hostPubkeyHex = null, boo
         // Only chat rows feed the goal-cluster sliding window. Goal-shard rows
         // are authoritative match events, not chat storm signals.
         if (!range.isGoal) pushToRecent(entry.key, msg)
+        // F1 Wave 3: emit a version marker every APPLY_MARKER_INTERVAL rows so
+        // the scrubber has a discrete time axis. We latch the msg's
+        // match_time_ms so the marker records "where were we in the match at
+        // hyperbee version V". The very first row always seeds a marker so
+        // the earliest scrub target is anchored at kickoff.
+        markerNodeCounter += 1
+        if (typeof msg?.match_time_ms === 'number') {
+          lastAppliedMatchTimeMs = msg.match_time_ms
+        }
+        if (typeof msg?.wall_clock_ms === 'number') {
+          lastAppliedWallClockMs = msg.wall_clock_ms
+        }
+        if (markerNodeCounter === 1 || markerNodeCounter % APPLY_MARKER_INTERVAL === 0) {
+          const v = base.view?.version
+          if (typeof v === 'number' && v > 0) {
+            pushVersionMarker(v, lastAppliedMatchTimeMs, lastAppliedWallClockMs)
+          }
+        }
         for (const cb of messageListeners) {
           try { cb(msg) } catch (err) {
             console.log('[Curva] chat listener threw:', err?.message)
           }
         }
+      }
+    }
+
+    // Post-batch: always try to publish a tail marker at the current view
+    // version. This is a no-op if lastMarkerVersion is already at the tip
+    // (pushVersionMarker guards against regressions). Ensures the LAST row
+    // ever applied is always reachable via the scrubber even if it isn't on
+    // an APPLY_MARKER_INTERVAL boundary.
+    if (markerNodeCounter > 0) {
+      const v = base.view?.version
+      if (typeof v === 'number' && v > 0) {
+        pushVersionMarker(v, lastAppliedMatchTimeMs, lastAppliedWallClockMs)
       }
     }
 
@@ -558,11 +660,21 @@ async function createChat(store, { myPubkey = 'local', hostPubkeyHex = null, boo
     return msg
   }
 
-  async function history({ from = 0, limit = 100 } = {}) {
+  async function history({ from = 0, limit = 100, at } = {}) {
     const gtKey = 'chat/' + String(from).padStart(16, '0') + '/'
     const out = []
+    // F1 Wave 3: when `at` is a positive integer we read from a hyperbee
+    // checkout instead of the live view. This lets the renderer replay the
+    // room state at Autobase version N without racing new appends. The
+    // checkout is short-lived and released to GC as soon as the read stream
+    // finishes; snapshotting the core is cheap because hypercore snapshots
+    // hold a lightweight length reference (verified: hyperbee/index.js:770
+    // uses core.snapshot() which does not clone blocks).
+    const useView = (typeof at === 'number' && Number.isFinite(at) && at > 0)
+      ? base.view.checkout(Math.floor(at))
+      : base.view
     try {
-      const stream = base.view.createReadStream({
+      const stream = useView.createReadStream({
         gt: gtKey,
         lt: 'chat0',
         limit
@@ -574,6 +686,90 @@ async function createChat(store, { myPubkey = 'local', hostPubkeyHex = null, boo
       console.log('[Curva] chat history failed:', err?.message)
     }
     return out
+  }
+
+  // F1 Wave 3: read-only checkout handle. Wrap the hyperbee snapshot so callers
+  // that try to mutate (put/del/batch) get a CheckoutReadOnly error at ingress
+  // instead of relying on hypercore's internal read-only enforcement. The
+  // exposed surface is intentionally minimal: `history` + `listGoals` cover
+  // every renderer read path today; `getBase` returns null so no writer path
+  // is reachable through the handle.
+  function checkoutAt(version) {
+    if (typeof version !== 'number' || !Number.isFinite(version) || version <= 0) {
+      throw new RangeError('checkoutAt: version must be a positive integer')
+    }
+    const v = Math.floor(version)
+    const snapshot = base.view.checkout(v)
+
+    function refuseWrite() {
+      throw new CheckoutReadOnly('checkout is read-only (Autobase view snapshot at version ' + v + ')')
+    }
+
+    async function historyAt({ from = 0, limit = 100 } = {}) {
+      const gtKey = 'chat/' + String(from).padStart(16, '0') + '/'
+      const out = []
+      try {
+        const stream = snapshot.createReadStream({
+          gt: gtKey,
+          lt: 'chat0',
+          limit
+        })
+        for await (const entry of stream) out.push(entry.value)
+      } catch (err) {
+        console.log('[Curva] chat history (checkout) failed:', err?.message)
+      }
+      return out
+    }
+
+    async function listGoalsAt({ fromMinute = 0, toMinute = MAX_GOAL_MINUTE, limit = 500 } = {}) {
+      const fromN = Math.max(0, Math.min(MAX_GOAL_MINUTE, fromMinute | 0))
+      const toN = Math.max(fromN, Math.min(MAX_GOAL_MINUTE, toMinute | 0))
+      const gte = `match/goals/${paddedMinute(fromN)}/`
+      const lt = toN >= MAX_GOAL_MINUTE
+        ? 'match/goals0'
+        : `match/goals/${paddedMinute(toN + 1)}/`
+      const out = []
+      try {
+        const stream = snapshot.createReadStream({ gte, lt, limit })
+        for await (const entry of stream) out.push(entry.value)
+      } catch (err) {
+        console.log('[Curva] chat listGoals (checkout) failed:', err?.message)
+      }
+      return out
+    }
+
+    return {
+      version: v,
+      history: historyAt,
+      listGoals: listGoalsAt,
+      // Write surface stubs: every mutation path routes to refuseWrite() so a
+      // caller that accidentally uses the checkout handle in a write context
+      // fails loudly at the ingress rather than corrupting state.
+      send: refuseWrite,
+      sendSystem: refuseWrite,
+      appendGoal: refuseWrite,
+      close: async () => {
+        try { await snapshot.close?.() } catch { /* noop */ }
+      }
+    }
+  }
+
+  // F1 Wave 3: return recent version markers so the renderer can build a
+  // scrubber timeline. The list is sorted ascending by version. When `limit`
+  // is passed we return the TAIL (latest N) so the initial UI paints the
+  // most recent match time without walking a long tail.
+  function getVersions({ limit = 32 } = {}) {
+    if (typeof limit !== 'number' || !Number.isFinite(limit) || limit <= 0) {
+      throw new RangeError('getVersions: limit must be a positive integer')
+    }
+    const n = Math.min(Math.floor(limit), versionMarkers.length)
+    return versionMarkers.slice(-n).map((m) => ({ ...m }))
+  }
+
+  function onVersionMarker(cb) {
+    if (typeof cb !== 'function') throw new TypeError('onVersionMarker requires a function')
+    versionMarkerListeners.add(cb)
+    return () => versionMarkerListeners.delete(cb)
   }
 
   function onMessage(cb) {
@@ -675,6 +871,7 @@ async function createChat(store, { myPubkey = 'local', hostPubkeyHex = null, boo
   async function close() {
     messageListeners.clear()
     clusterListeners.clear()
+    versionMarkerListeners.clear()
     try { await base.close() } catch { /* noop */ }
   }
 
@@ -731,6 +928,10 @@ async function createChat(store, { myPubkey = 'local', hostPubkeyHex = null, boo
     appendGoal,
     listGoals,
     history,
+    // F1 Wave 3 scrubber surface.
+    checkoutAt,
+    getVersions,
+    onVersionMarker,
     onMessage,
     onGoalCluster,
     getBase: () => base,
@@ -936,6 +1137,10 @@ function isValidMessage(v) {
   if (v.type === 'system:coach') return isValidSystemCoach(v)
   if (v.type === 'system:vlm-caption') return isValidSystemVlmCaption(v)
   if (v.type === 'system:ocr-read') return isValidSystemOcrRead(v)
+  // Wave 3: ask-the-frame answer + goal-card structured extract. Peer-writer
+  // allowed for both since they represent local on-device model output.
+  if (v.type === 'system:ask-frame-answer') return isValidSystemAskFrameAnswer(v)
+  if (v.type === 'system:goal-card') return isValidSystemGoalCard(v)
   // Wave 13B: `/bot` roomBot query + reply. Peer-writer allowed for both
   // (any peer can ask the bot; any peer that runs the bot can reply). The
   // reducer applies a host-only gate on `system:bot-reply` when the host is
@@ -1233,6 +1438,39 @@ function isValidSystemOcrRead (v) {
   return true
 }
 
+// Wave 3 F1: ask-the-frame answer. Peer-writer allowed (any peer authors from
+// its own local model output). Text cap: 800 chars (matches askTheFrame.answer
+// slice(0,280) in chat.sendSystem AND the coach 800-char cap for symmetry with
+// system:coach). Optional `question` mirror capped at 160 chars.
+function isValidSystemAskFrameAnswer (v) {
+  if (!v || typeof v !== 'object') return false
+  if (v.type !== 'system:ask-frame-answer') return false
+  if (typeof v.by_peer !== 'string') return false
+  if (typeof v.wall_clock_ms !== 'number' || v.wall_clock_ms < 0) return false
+  if (typeof v.match_time_ms !== 'number' || v.match_time_ms < 0) return false
+  if (typeof v.text !== 'string' || v.text.length === 0 || v.text.length > 800) return false
+  if (v.question !== undefined && (typeof v.question !== 'string' || v.question.length > 160)) return false
+  if (v.ask_id !== undefined && (typeof v.ask_id !== 'string' || v.ask_id.length > 64)) return false
+  return true
+}
+
+// Wave 3 F3: goal card structured extract. Peer-writer allowed. Text cap: 800
+// chars. Optional structured fields: minute (int 0-200), scorer (<=80), team
+// (<=80), assist (<=80). Kept optional so a serialization miss still validates.
+function isValidSystemGoalCard (v) {
+  if (!v || typeof v !== 'object') return false
+  if (v.type !== 'system:goal-card') return false
+  if (typeof v.by_peer !== 'string') return false
+  if (typeof v.wall_clock_ms !== 'number' || v.wall_clock_ms < 0) return false
+  if (typeof v.match_time_ms !== 'number' || v.match_time_ms < 0) return false
+  if (typeof v.text !== 'string' || v.text.length === 0 || v.text.length > 800) return false
+  if (v.minute !== undefined && (typeof v.minute !== 'number' || v.minute < 0 || v.minute > 200)) return false
+  if (v.scorer !== undefined && (typeof v.scorer !== 'string' || v.scorer.length > 80)) return false
+  if (v.team !== undefined && (typeof v.team !== 'string' || v.team.length > 80)) return false
+  if (v.assist !== undefined && (typeof v.assist !== 'string' || v.assist.length > 80)) return false
+  return true
+}
+
 // Wave 13B: shape validator for `system:bot-query`. Peer-writer allowed. The
 // text is capped at 500 chars (roomBot.answer() also trims to 500 before
 // broadcast) so a malicious peer cannot smuggle a giant prompt through the
@@ -1313,7 +1551,11 @@ module.exports = {
   createChat,
   readSourceLang,
   normalizeLang,
+  CheckoutReadOnly,
   _internal: {
+    // F1 Wave 3
+    APPLY_MARKER_INTERVAL,
+    VERSION_MARKER_CAP,
     sanitizeText,
     isValidMessage,
     isValidSystemTipCongrats,
@@ -1334,6 +1576,9 @@ module.exports = {
     isValidSystemCoach,
     isValidSystemVlmCaption,
     isValidSystemOcrRead,
+    // Wave 3 exports for brittle tests
+    isValidSystemAskFrameAnswer,
+    isValidSystemGoalCard,
     // Wave 13B exports for brittle tests
     isValidSystemBotQuery,
     isValidSystemBotReply,

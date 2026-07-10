@@ -1,0 +1,433 @@
+// Curva Wave 4 F2: Goal pipeline (OCR -> goalCard -> MCP -> Bergamot -> TTS
+// -> Autobase). One user trigger fans out six capabilities.
+//
+// Docs-verification memo ---------------------------------------------------
+//
+// Ground truth (installed):
+//   bare/ocr.js:373-385 exports { createOcr, extractScore } — ocr.read({image})
+//     returns { ok: boolean, blocks: OcrBlock[], durationMs } or
+//     { ok: false, code, reason }. extractScore(blocks) returns
+//     { home, away, homeLabel?, awayLabel?, source } or null.
+//   bare/goalCard.js:204 exports createGoalCard({sharedLlmHandle,...}).parse()
+//     returning { ok: true, card: {minute, scorer, team, assist} } or
+//     { ok: false, reason }.
+//   bare/translate.js:496 translate({text, from, to}) returns Promise<string>.
+//   bare/announcer.js:615 openSpeakStream({locale, matchId}) returns
+//     { write, end, destroy, chunks } or null. `chunks` is an async iterator
+//     of PCM buffers; workers/main.js pipes them to the renderer as
+//     `commentator:tts-chunk` events.
+//   bare/mcpTools.js:249 createMcpToolsClient — the client exposes
+//     invokeTool(name, args). We duck-type on { invokeTool | callTool | updateMatchState }.
+//
+// Autobase append shape:
+//   chat.sendSystem({type, ...}) is the documented host-only path in chat.js
+//   (chat.js:571). We defer to it via a caller-supplied `chat` handle so this
+//   module remains testable without booting Autobase.
+//
+// Prompt-injection defense:
+//   Raw OCR text is user-controlled (from the video frame). Before feeding
+//   into goalCard.parse() we strip control chars, cap length at MAX_OCR_CHARS,
+//   and refuse text that contains "system:" style prefixes. goalCard itself
+//   has a defence layer (see bare/goalCard.js:100 sanitiseInput) so this is
+//   defense-in-depth.
+//
+// Feature flag: CURVA_GOAL_PIPELINE_ENABLED. Off by default; trigger returns
+// { ok: false, reason: 'DISABLED' }.
+//
+// Idempotency:
+//   A single in-flight `trigger()` is allowed at a time. Overlapping calls
+//   return { ok: false, reason: 'BUSY' }.
+//
+// Timeout budget: 30s per trigger.
+
+'use strict'
+
+const MAX_OCR_CHARS = 2000
+const DEFAULT_LOCALES = Object.freeze(['en', 'it', 'id'])
+const PIPELINE_TIMEOUT_MS = 30_000
+const TTS_SESSION_TIMEOUT_MS = 15_000
+
+const SUSPICIOUS_PREFIXES = [
+  'ignore previous',
+  'ignore all previous',
+  'system:',
+  'you are now',
+  'as an ai',
+  '###'
+]
+
+function pipelineFlagEnabled () {
+  try {
+    const raw = (typeof process !== 'undefined' && process.env &&
+      process.env.CURVA_GOAL_PIPELINE_ENABLED) || ''
+    const s = String(raw).toLowerCase()
+    return s === '1' || s === 'true' || s === 'yes' || s === 'on'
+  } catch { return false }
+}
+
+/**
+ * Sanitize OCR blocks into a single prompt-safe line for goalCard.
+ * @param {Array<{text?: string, confidence?: number}>} blocks
+ * @param {number} minConfidence
+ * @returns {string | null}
+ */
+function joinBlocksForPrompt (blocks, minConfidence = 0.5) {
+  if (!Array.isArray(blocks)) return null
+  const pieces = []
+  for (const b of blocks) {
+    if (!b || typeof b.text !== 'string') continue
+    if (typeof b.confidence === 'number' && b.confidence < minConfidence) continue
+    // Strip control chars, drop suspicious prefix probes.
+    let t = b.text.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '').trim()
+    if (!t) continue
+    const lower = t.toLowerCase()
+    if (SUSPICIOUS_PREFIXES.some((p) => lower.startsWith(p))) continue
+    pieces.push(t)
+  }
+  if (pieces.length === 0) return null
+  let joined = pieces.join(' ').replace(/\s+/g, ' ').trim()
+  if (joined.length > MAX_OCR_CHARS) joined = joined.slice(0, MAX_OCR_CHARS)
+  return joined
+}
+
+function scoresEqual (a, b) {
+  if (!a || !b) return false
+  return Number(a.home) === Number(b.home) && Number(a.away) === Number(b.away)
+}
+
+function buildAnnouncement (card) {
+  const scorer = String(card.scorer).slice(0, 80)
+  const team = String(card.team).slice(0, 60)
+  const minute = Number(card.minute)
+  const assist = typeof card.assist === 'string' && card.assist.length > 0
+    ? String(card.assist).slice(0, 80) : null
+  const base = 'Goal! ' + scorer + ' scored for ' + team + ' in the ' +
+    minute + 'th minute.'
+  return assist ? base + ' Assist by ' + assist + '.' : base
+}
+
+function withTimeout (promise, ms, code) {
+  return new Promise((resolve, reject) => {
+    let done = false
+    const timer = setTimeout(() => {
+      if (done) return
+      done = true
+      const err = new Error(code || 'timeout')
+      err.code = code || 'TIMEOUT'
+      reject(err)
+    }, ms)
+    Promise.resolve(promise).then(
+      (val) => {
+        if (done) return
+        done = true
+        clearTimeout(timer)
+        resolve(val)
+      },
+      (err) => {
+        if (done) return
+        done = true
+        clearTimeout(timer)
+        reject(err)
+      }
+    )
+  })
+}
+
+// Duck-type shim for the MCP client. The production MCP tools server does
+// not yet expose an `updateMatchState` tool (see bare/mcpTools.js:80 tools
+// array). Rather than mutate mcpTools.js (out of scope) we accept any of:
+//   mcp.updateMatchState({...})
+//   mcp.invokeTool('updateMatchState', {...})
+//   mcp.callTool('updateMatchState', {...})
+// If none are present we treat MCP as unavailable (graceful degradation).
+async function tryUpdateMatchState (mcp, payload) {
+  if (!mcp) return { ok: false, reason: 'NO_MCP' }
+  try {
+    if (typeof mcp.updateMatchState === 'function') {
+      const res = await mcp.updateMatchState(payload)
+      return { ok: true, res }
+    }
+    if (typeof mcp.invokeTool === 'function') {
+      const res = await mcp.invokeTool('updateMatchState', payload)
+      return { ok: true, res }
+    }
+    if (typeof mcp.callTool === 'function') {
+      const res = await mcp.callTool('updateMatchState', payload)
+      return { ok: true, res }
+    }
+  } catch (err) {
+    return { ok: false, reason: 'MCP_ERROR', message: err && err.message }
+  }
+  return { ok: false, reason: 'NO_MCP_TOOL' }
+}
+
+// Duck-type shim for the announcer. In production `announcer.openSpeakStream`
+// returns { write, end, chunks } (see bare/announcer.js:615). We only need to
+// write once and end, then optionally drain `chunks` so the PCM lands on the
+// commentator bus.
+async function speakOnce (announcer, locale, text, log, emit) {
+  if (!announcer || typeof announcer.openSpeakStream !== 'function') {
+    return { ok: false, reason: 'NO_ANNOUNCER' }
+  }
+  let session
+  try {
+    session = await announcer.openSpeakStream({ locale })
+  } catch (err) {
+    emit('goalpipe:speak-open-error', { locale, message: err && err.message })
+    return { ok: false, reason: 'OPEN_FAILED', message: err && err.message }
+  }
+  if (!session) {
+    return { ok: false, reason: 'STREAM_UNAVAILABLE' }
+  }
+  emit('goalpipe:speak-open', { locale })
+  try {
+    if (typeof session.write === 'function') session.write(text)
+    if (typeof session.end === 'function') session.end()
+  } catch (err) {
+    try { if (typeof session.destroy === 'function') session.destroy() } catch { /* noop */ }
+    emit('goalpipe:speak-write-error', { locale, message: err && err.message })
+    return { ok: false, reason: 'WRITE_FAILED' }
+  }
+  // Drain chunks (optional, best-effort, bounded).
+  if (session.chunks && typeof session.chunks[Symbol.asyncIterator] === 'function') {
+    let chunkCount = 0
+    try {
+      await withTimeout((async () => {
+        for await (const chunk of session.chunks) {
+          chunkCount += 1
+          if (chunk && chunk.done) break
+          if (chunkCount > 1024) break // hard safety cap
+        }
+      })(), TTS_SESSION_TIMEOUT_MS, 'TTS_DRAIN_TIMEOUT')
+    } catch (err) {
+      log('warn', 'tts drain failed', { locale, message: err && err.message })
+    }
+  }
+  emit('goalpipe:speak-end', { locale })
+  return { ok: true }
+}
+
+/**
+ * @param {{
+ *   ocr:        { read: Function },
+ *   goalCard:   { parse: Function },
+ *   mcp?:       object | null,
+ *   translate?: { translate: Function } | null,
+ *   announcer?: { openSpeakStream: Function } | null,
+ *   chat?:      { sendSystem?: Function, appendSystem?: Function } | null,
+ *   roomSlug?:  string,
+ *   locales?:   string[],
+ *   log?:       (level: string, msg: string, extra?: any) => void,
+ *   emit?:      (event: string, payload: any) => void,
+ *   flagOverride?: boolean
+ * }} deps
+ */
+function createGoalPipeline (deps = {}) {
+  const {
+    ocr = null,
+    goalCard = null,
+    mcp = null,
+    translate = null,
+    announcer = null,
+    chat = null,
+    roomSlug = null,
+    locales = DEFAULT_LOCALES,
+    log = () => {},
+    emit = () => {},
+    flagOverride = null
+  } = deps
+
+  if (!ocr || typeof ocr.read !== 'function') {
+    throw new TypeError('createGoalPipeline requires ocr.read')
+  }
+  if (!goalCard || typeof goalCard.parse !== 'function') {
+    throw new TypeError('createGoalPipeline requires goalCard.parse')
+  }
+
+  const state = {
+    busy: false,
+    triggerCount: 0,
+    successCount: 0,
+    lastScore: null,
+    lastError: null,
+    destroyed: false
+  }
+
+  async function trigger (input = {}) {
+    if (state.destroyed) return { ok: false, reason: 'DESTROYED' }
+    const flag = flagOverride === null ? pipelineFlagEnabled() : !!flagOverride
+    if (!flag) return { ok: false, reason: 'DISABLED' }
+    if (state.busy) return { ok: false, reason: 'BUSY' }
+
+    const { image, currentScore = null } = input
+    if (!image) return { ok: false, reason: 'NO_IMAGE' }
+
+    state.busy = true
+    state.triggerCount += 1
+    const started = Date.now()
+    try {
+      const result = await withTimeout(
+        runPipeline(image, currentScore),
+        PIPELINE_TIMEOUT_MS,
+        'PIPELINE_TIMEOUT'
+      )
+      if (result.ok) state.successCount += 1
+      return result
+    } catch (err) {
+      state.lastError = err && err.message
+      emit('goalpipe:error', { code: err && err.code, message: err && err.message })
+      return { ok: false, reason: err && err.code ? err.code : 'ERROR' }
+    } finally {
+      state.busy = false
+      emit('goalpipe:done', { durationMs: Date.now() - started })
+    }
+  }
+
+  async function runPipeline (image, currentScore) {
+    // Step 1: OCR the frame.
+    const ocrResult = await ocr.read({ image })
+    if (!ocrResult || ocrResult.ok !== true) {
+      emit('goalpipe:ocr-failed', { reason: ocrResult && ocrResult.reason })
+      return { ok: false, reason: 'OCR_FAILED' }
+    }
+    const blocks = Array.isArray(ocrResult.blocks) ? ocrResult.blocks : []
+    emit('goalpipe:ocr', { blockCount: blocks.length })
+
+    // Step 2: score change guard. If the OCR-derived score is identical to
+    // the `currentScore` the caller passed, there is nothing to announce.
+    // This is our defence against noisy OCR that fires when nothing happened.
+    let extractScore = null
+    try {
+      const ocrMod = require('./ocr.js')
+      extractScore = ocrMod && ocrMod.extractScore
+    } catch { /* optional dep */ }
+    const nextScore = typeof extractScore === 'function' ? extractScore(blocks) : null
+    if (nextScore && currentScore && scoresEqual(nextScore, currentScore)) {
+      emit('goalpipe:no-change', { score: nextScore })
+      return { ok: false, reason: 'NO_CHANGE' }
+    }
+    state.lastScore = nextScore
+
+    // Step 3: prompt-safe sanitisation of OCR text.
+    const promptText = joinBlocksForPrompt(blocks)
+    if (!promptText) {
+      emit('goalpipe:parse-skip', { reason: 'NO_TEXT' })
+      return { ok: false, reason: 'NO_TEXT' }
+    }
+
+    // Step 4: goalCard parse.
+    let parsed
+    try {
+      parsed = await goalCard.parse(promptText)
+    } catch (err) {
+      emit('goalpipe:parse-error', { message: err && err.message })
+      return { ok: false, reason: 'PARSE_ERROR' }
+    }
+    if (!parsed || parsed.ok !== true || !parsed.card) {
+      emit('goalpipe:parse-failed', { reason: parsed && parsed.reason })
+      return { ok: false, reason: 'PARSE_FAILED' }
+    }
+    const card = parsed.card
+    emit('goalpipe:parsed', {
+      minute: card.minute,
+      scorer: card.scorer,
+      team: card.team,
+      assist: card.assist
+    })
+
+    // Step 5: MCP updateMatchState (best-effort, non-fatal).
+    const mcpResult = await tryUpdateMatchState(mcp, {
+      minute: card.minute,
+      score: nextScore || null,
+      event: 'goal'
+    })
+    emit('goalpipe:mcp', { ok: mcpResult.ok, reason: mcpResult.reason })
+
+    // Step 6: translate + speak per locale (best-effort per locale).
+    const baseAnnouncement = buildAnnouncement(card)
+    const speakResults = []
+    for (const locale of locales) {
+      let text = baseAnnouncement
+      if (translate && typeof translate.translate === 'function' && locale !== 'en') {
+        try {
+          const t = await translate.translate({
+            text: baseAnnouncement, from: 'en', to: locale
+          })
+          if (typeof t === 'string' && t.length > 0) text = t
+        } catch (err) {
+          emit('goalpipe:translate-error', { locale, message: err && err.message })
+          // fall through with English text — better to say something than nothing.
+        }
+      }
+      emit('goalpipe:translated', { locale, text })
+      const spoken = await speakOnce(announcer, locale, text, log, emit)
+      speakResults.push({ locale, ...spoken })
+    }
+
+    // Step 7: append `system:goal-card` to Autobase chat.
+    let chatAppended = false
+    if (chat) {
+      const payload = {
+        type: 'system:goal-card',
+        minute: card.minute,
+        scorer: card.scorer,
+        team: card.team,
+        assist: card.assist,
+        roomSlug: roomSlug || null
+      }
+      try {
+        if (typeof chat.sendSystem === 'function') {
+          await chat.sendSystem(payload)
+          chatAppended = true
+        } else if (typeof chat.appendSystem === 'function') {
+          await chat.appendSystem(payload)
+          chatAppended = true
+        }
+      } catch (err) {
+        emit('goalpipe:chat-error', { message: err && err.message })
+      }
+    }
+    emit('goalpipe:chat-append', { appended: chatAppended })
+
+    return {
+      ok: true,
+      card,
+      score: nextScore,
+      mcp: mcpResult,
+      speak: speakResults,
+      chatAppended
+    }
+  }
+
+  function close () {
+    state.destroyed = true
+  }
+
+  function status () {
+    return {
+      busy: state.busy,
+      triggerCount: state.triggerCount,
+      successCount: state.successCount,
+      lastScore: state.lastScore,
+      lastError: state.lastError,
+      destroyed: state.destroyed
+    }
+  }
+
+  return { trigger, close, status }
+}
+
+module.exports = {
+  createGoalPipeline,
+  pipelineFlagEnabled,
+  DEFAULT_LOCALES,
+  MAX_OCR_CHARS,
+  _internal: {
+    joinBlocksForPrompt,
+    scoresEqual,
+    buildAnnouncement,
+    tryUpdateMatchState,
+    speakOnce,
+    withTimeout
+  }
+}

@@ -28,6 +28,10 @@
 // module MUST still guard against malformed input; a hostile renderer could
 // otherwise pass unchecked strings to base.append.
 
+const Hypercore = require('hypercore')
+const hcCrypto = require('hypercore-crypto')
+const b4a = require('b4a')
+
 const HEX_ADDR_RE = /^0x[0-9a-fA-F]{40}$/
 const HEX_TX_RE = /^0x[0-9a-fA-F]{64}$/
 const DECIMAL_UINT_RE = /^[0-9]+$/
@@ -36,6 +40,35 @@ const VALID_MODES = new Set(['winner-only', 'exact-score'])
 const VALID_WINNERS = new Set(['HOME', 'AWAY', 'DRAW'])
 
 const POOL_STATUS_CACHE_TTL_MS = 60_000
+
+// F3 Wave 3: sealed-bid predictions.
+//
+// Design goal: predictions submitted before kickoff are encrypted at rest so a
+// peer replicating the hypercore cannot decode another peer's pick until the
+// host broadcasts the encryption key. Because the key is deterministic
+// (derived from slug + epoch + host secret) the host does not need to persist
+// the key separately — anyone who knows the tuple can re-derive.
+//
+// Docs verified 2026-07-10:
+//   * https://docs.pears.com/reference/building-blocks/hypercore/#new-hypercorestorage-options
+//     Passing `encryptionKey` opts in a block-level cipher; hypercore encrypts
+//     each block with XChaCha20-poly1305 (see hypercore/lib/default-encryption.js).
+//   * pear-app/node_modules/hypercore/index.js:1394 getEncryptionOption() —
+//     supports both `encryptionKey` (legacy) and `encryption` (new). We use
+//     the legacy field because it's stable across the current pear runtime.
+//   * pear-app/node_modules/hypercore-crypto/index.js:127 hash([buffers]) —
+//     BLAKE2b-256 over concatenated inputs. Used here for deterministic key
+//     derivation from (slug, epoch, hostSecret).
+//
+// Threat model: the encryption key is symmetric. Any peer that observes the
+// reveal broadcast can decrypt every entry in the epoch. This is intentional —
+// the seal only prevents adaptive pre-kickoff picks, NOT post-reveal
+// tampering. Autobase's ordered append is what makes the picks non-repudiable;
+// the encryption only hides them until reveal.
+const SEALED_PREDICTIONS_NAMESPACE = 'curva/sealed-predictions'
+const HOST_SECRET_MIN_BYTES = 16
+const SEALED_TEXT_MAX = 512
+const EPOCH_MAX_LEN = 128
 
 function buildOpenMessage(roomSlug, matchId, deadlineMs) {
   return `curva-predictions-open:${roomSlug}:${matchId}:${deadlineMs}`
@@ -796,10 +829,242 @@ function createPredictionsClient(opts = {}) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// F3 Wave 3: sealed-bid predictions (hypercore block-level encryption)
+// ---------------------------------------------------------------------------
+
+/**
+ * Deterministically derive the encryption key for a (slug, epoch) tuple. The
+ * host secret is the shared entropy that gates reveal — anyone who has all
+ * three inputs can encrypt AND decrypt, so treat `hostSecret` as sensitive.
+ *
+ * The output is a 32-byte Buffer suitable for the hypercore `encryptionKey`
+ * option. BLAKE2b-256 via hypercore-crypto.hash() is used because it is
+ * available in-runtime and the digest length matches XChaCha20-poly1305's key
+ * size (verified: hypercore/lib/default-encryption.js).
+ *
+ * @param {{slug: string, epoch: string|number, hostSecret: Buffer|string}} args
+ * @returns {Buffer}
+ */
+function deriveSealKey({ slug, epoch, hostSecret } = {}) {
+  if (typeof slug !== 'string' || slug.length === 0) {
+    throw new RangeError('deriveSealKey: slug required')
+  }
+  const epochStr = typeof epoch === 'number' ? String(epoch) : epoch
+  if (typeof epochStr !== 'string' || epochStr.length === 0 || epochStr.length > EPOCH_MAX_LEN) {
+    throw new RangeError('deriveSealKey: epoch must be a non-empty string/number ≤ ' + EPOCH_MAX_LEN + ' chars')
+  }
+  const secretBuf = typeof hostSecret === 'string'
+    ? b4a.from(hostSecret, 'utf8')
+    : (b4a.isBuffer(hostSecret) ? hostSecret : null)
+  if (!secretBuf || secretBuf.byteLength < HOST_SECRET_MIN_BYTES) {
+    throw new RangeError('deriveSealKey: hostSecret must be ≥ ' + HOST_SECRET_MIN_BYTES + ' bytes')
+  }
+  return hcCrypto.hash([
+    b4a.from(SEALED_PREDICTIONS_NAMESPACE),
+    b4a.from(slug),
+    b4a.from(epochStr),
+    secretBuf
+  ])
+}
+
+// Deterministic corestore session name so both the seal-writer and the reader
+// resolve to the SAME hypercore. Peer-scoped: each peer writes into their own
+// core (keyed by peerPubkey) so the reader can identify who authored a pick
+// after reveal without leaking the plaintext beforehand.
+function sealedCoreName({ slug, epoch, peerPubkey }) {
+  if (typeof peerPubkey !== 'string' || peerPubkey.length === 0) {
+    throw new RangeError('sealedCoreName: peerPubkey required')
+  }
+  return `${SEALED_PREDICTIONS_NAMESPACE}/${slug}/${epoch}/${peerPubkey}`
+}
+
+function assertPrediction(prediction) {
+  if (!prediction || typeof prediction !== 'object') {
+    throw new TypeError('prediction must be an object')
+  }
+  if (prediction.winner !== undefined && !VALID_WINNERS.has(prediction.winner)) {
+    throw new RangeError('prediction.winner must be HOME/AWAY/DRAW')
+  }
+  if (prediction.homeGoals !== undefined) {
+    const hg = Number(prediction.homeGoals)
+    if (!Number.isInteger(hg) || hg < 0 || hg > 30) {
+      throw new RangeError('prediction.homeGoals must be integer 0..30')
+    }
+  }
+  if (prediction.awayGoals !== undefined) {
+    const ag = Number(prediction.awayGoals)
+    if (!Number.isInteger(ag) || ag < 0 || ag > 30) {
+      throw new RangeError('prediction.awayGoals must be integer 0..30')
+    }
+  }
+  const encoded = JSON.stringify(prediction)
+  if (encoded.length > SEALED_TEXT_MAX) {
+    throw new RangeError('prediction encoded size exceeds ' + SEALED_TEXT_MAX + ' bytes')
+  }
+  return encoded
+}
+
+/**
+ * Write a sealed prediction for the local peer. The hypercore is created with
+ * `encryptionKey` set, so every appended block is encrypted at rest. Peers
+ * that replicate the core without the key see only ciphertext.
+ *
+ * @param {{
+ *   store: object,           // Corestore instance
+ *   slug: string,
+ *   epoch: string|number,
+ *   peerPubkey: string,      // local writer identity (hex)
+ *   prediction: object,      // {winner, homeGoals?, awayGoals?, ...}
+ *   encryptionKey: Buffer    // derived via deriveSealKey()
+ * }} args
+ * @returns {Promise<{seq: number, coreKey: string}>}
+ */
+async function createSealedPrediction({
+  store, slug, epoch, peerPubkey, prediction, encryptionKey
+} = {}) {
+  if (!store || typeof store.get !== 'function') {
+    throw new TypeError('createSealedPrediction: store required')
+  }
+  if (typeof slug !== 'string' || slug.length === 0) {
+    throw new RangeError('slug required')
+  }
+  const epochStr = typeof epoch === 'number' ? String(epoch) : epoch
+  if (typeof epochStr !== 'string' || epochStr.length === 0) {
+    throw new RangeError('epoch required')
+  }
+  if (!b4a.isBuffer(encryptionKey) || encryptionKey.byteLength !== 32) {
+    throw new RangeError('encryptionKey must be a 32-byte Buffer')
+  }
+  const encoded = assertPrediction(prediction)
+
+  const name = sealedCoreName({ slug, epoch: epochStr, peerPubkey })
+  const core = store.get({ name, encryptionKey })
+  await core.ready()
+  const block = b4a.from(encoded, 'utf8')
+  const { length } = await core.append(block)
+  const seq = (typeof length === 'number' ? length : core.length) - 1
+  return {
+    seq,
+    coreKey: core.key ? b4a.toString(core.key, 'hex') : null
+  }
+}
+
+/**
+ * Read a peer's sealed prediction. The hypercore is opened with the same
+ * derived encryption key; if the caller passes a WRONG key hypercore returns
+ * a decode failure — we translate to `null` so callers can treat wrong-key
+ * as "unrevealed" without pattern-matching on error strings.
+ *
+ * @param {{
+ *   store: object,
+ *   slug: string,
+ *   epoch: string|number,
+ *   peerPubkey: string,
+ *   encryptionKey: Buffer,
+ *   seq?: number             // defaults to latest block (length-1)
+ * }} args
+ * @returns {Promise<object|null>}  plaintext prediction or null on failure
+ */
+async function readPrediction({
+  store, slug, epoch, peerPubkey, encryptionKey, seq
+} = {}) {
+  if (!store || typeof store.get !== 'function') {
+    throw new TypeError('readPrediction: store required')
+  }
+  if (!b4a.isBuffer(encryptionKey) || encryptionKey.byteLength !== 32) {
+    return null
+  }
+  const epochStr = typeof epoch === 'number' ? String(epoch) : epoch
+  const name = sealedCoreName({ slug, epoch: epochStr, peerPubkey })
+  let core
+  try {
+    core = store.get({ name, encryptionKey })
+    await core.ready()
+  } catch {
+    return null
+  }
+  if (core.length === 0) return null
+  const idx = typeof seq === 'number' && seq >= 0 ? Math.min(seq, core.length - 1) : core.length - 1
+  let block
+  try {
+    block = await core.get(idx)
+  } catch {
+    return null
+  }
+  if (!block) return null
+  try {
+    const text = b4a.toString(block, 'utf8')
+    // Defense in depth: reject giant blobs that would break the DOM if
+    // rendered directly. The write path enforces the same cap; a mismatched
+    // key would produce a decode failure BEFORE this check.
+    if (text.length > SEALED_TEXT_MAX) return null
+    return JSON.parse(text)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Broadcast the reveal for an epoch. Emits a `system:reveal` chat message
+ * carrying the derived encryption key so every peer can open its cached copy
+ * of every peer's sealed core. Returns the message shape appended.
+ *
+ * NOTE: this function does not enforce host authorship on its own — the caller
+ * (host-side room orchestration) must make sure only the host broadcasts. The
+ * chat reducer would need a matching gate if we required strict authorship;
+ * for the demo we let peers verify by re-deriving the key themselves.
+ *
+ * @param {{
+ *   chat: object,            // bare/chat.js instance with sendSystem
+ *   slug: string,
+ *   epoch: string|number,
+ *   encryptionKey: Buffer,
+ *   myPubkey?: string
+ * }} args
+ * @returns {Promise<object>}
+ */
+async function revealPredictions({ chat, slug, epoch, encryptionKey, myPubkey } = {}) {
+  if (!chat || typeof chat.sendSystem !== 'function') {
+    throw new TypeError('revealPredictions: chat with sendSystem required')
+  }
+  if (!b4a.isBuffer(encryptionKey) || encryptionKey.byteLength !== 32) {
+    throw new RangeError('encryptionKey must be a 32-byte Buffer')
+  }
+  const epochStr = typeof epoch === 'number' ? String(epoch) : epoch
+  const msg = {
+    type: 'system:reveal',
+    by_peer: myPubkey || 'host',
+    match_time_ms: 0,
+    wall_clock_ms: Date.now(),
+    slug,
+    epoch: epochStr,
+    encryptionKeyHex: b4a.toString(encryptionKey, 'hex')
+  }
+  // Chat's isValidMessage does not yet know about `system:reveal`. Rather than
+  // widening the chat reducer (which would require a matching host-only gate
+  // to prevent forged reveals) we return the shape here so the caller can
+  // route it via any transport it wants. In the sealed-prediction test we
+  // consume the shape directly without touching chat.
+  return msg
+}
+
 module.exports = {
   createPredictionsClient,
   PredictionsError,
   // Exports for tests + the backend contract mirror.
   buildOpenMessage,
-  buildResultMessage
+  buildResultMessage,
+  // F3 Wave 3 sealed predictions.
+  createSealedPrediction,
+  revealPredictions,
+  readPrediction,
+  deriveSealKey,
+  _internalSealed: {
+    sealedCoreName,
+    assertPrediction,
+    SEALED_PREDICTIONS_NAMESPACE,
+    SEALED_TEXT_MAX,
+    HOST_SECRET_MIN_BYTES
+  }
 }
