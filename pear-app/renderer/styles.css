@@ -8007,3 +8007,84 @@ textarea:focus-visible,
   background: rgba(58, 209, 122, 0.06);
 }
 /* ===== END SHIP 3 F7 ===== */
+
+/* ===== F20 SEMANTIC SCRUBBER JUMP ===== */
+/* Small monospace time-code pill appended to a room-search hit row when the
+   underlying message carries a match_time_ms. Visually cues the user that
+   clicking will jump the playhead. */
+.curva-chat__room-search-result-jump-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
+  font-size: 10px;
+  line-height: 14px;
+  color: #b98a2d;
+  background: rgba(185, 138, 45, 0.10);
+  border: 1px solid rgba(185, 138, 45, 0.25);
+  letter-spacing: 0.02em;
+  vertical-align: baseline;
+  user-select: none;
+  pointer-events: none;
+}
+/* ===== END F20 ===== */
+
+/* ===== F21 OCR AUDIT TRAIL ===== */
+/* "Verify" button appended to a goal-card row when a proofBlobKey is present.
+   Minimal styling so it slots into the existing goal-card layout without
+   restyling the pill. */
+.curva-chat__goal-card-verify {
+  display: inline-block;
+  margin-top: 4px;
+  padding: 2px 8px;
+  border: 1px solid rgba(185, 138, 45, 0.4);
+  border-radius: 3px;
+  background: rgba(185, 138, 45, 0.10);
+  color: #b98a2d;
+  font-family: inherit;
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.curva-chat__goal-card-verify:hover {
+  background: rgba(185, 138, 45, 0.20);
+}
+.curva-verify-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.75);
+  cursor: zoom-out;
+}
+.curva-verify-lightbox__inner {
+  max-width: 90vw;
+  max-height: 90vh;
+  padding: 12px;
+  background: #1a1a1a;
+  border: 1px solid #333;
+  border-radius: 6px;
+  color: #d0d0d0;
+  cursor: default;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: center;
+}
+.curva-verify-lightbox__img {
+  max-width: 100%;
+  max-height: 70vh;
+  object-fit: contain;
+  border-radius: 3px;
+}
+.curva-verify-lightbox__meta {
+  font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
+  font-size: 11px;
+  color: #b98a2d;
+  letter-spacing: 0.03em;
+}
+/* ===== END F21 ===== */

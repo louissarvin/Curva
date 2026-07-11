@@ -46,6 +46,20 @@ const MAX_OCR_CHARS = 2000
 const DEFAULT_LOCALES = Object.freeze(['en', 'it', 'id'])
 const PIPELINE_TIMEOUT_MS = 30_000
 const TTS_SESSION_TIMEOUT_MS = 15_000
+// F21 OCR audit trail: cap the wait on clips.addClip so a stuck Hyperblob
+// write cannot block goal-card announcement. Keep the failure quiet — proof
+// is best-effort provenance, not a correctness signal.
+const PROOF_SAVE_TIMEOUT_MS = 2_000
+const PROOF_BLOB_KIND = 'goal-proof'
+
+function proofFlagEnabled () {
+  try {
+    const raw = (typeof process !== 'undefined' && process.env &&
+      process.env.CURVA_GOAL_PROOF_ENABLED) || ''
+    const s = String(raw).toLowerCase()
+    return s === '1' || s === 'true' || s === 'yes' || s === 'on'
+  } catch { return false }
+}
 
 const SUSPICIOUS_PREFIXES = [
   'ignore previous',
@@ -282,6 +296,58 @@ async function speakOnce (announcer, locale, text, log, emit) {
  * }} deps
  * @returns {{ trigger: Function, close: Function, status: Function }}
  */
+// F21 OCR audit trail: save the source frame to Hyperblob as a `goal-proof`
+// clip so the goal-card carries a verifiable provenance handle other peers can
+// pull. This is best-effort — a failure returns null and the pipeline emits a
+// `goalpipe:proof-failed` event but still ships the goal-card without a
+// proofBlobKey. Never rethrows.
+async function saveGoalProof (clips, imageBytes, matchTimeMs, emit, log) {
+  if (!clips || typeof clips.addClip !== 'function') {
+    emit('goalpipe:proof-failed', { reason: 'NO_CLIPS_HANDLE' })
+    return null
+  }
+  const bytes = imageBytes
+  const size = (bytes && typeof bytes.length === 'number') ? bytes.length : 0
+  const mt = Number.isFinite(matchTimeMs) && matchTimeMs >= 0 ? Math.floor(matchTimeMs) : 0
+  try {
+    const stored = await withTimeout(
+      Promise.resolve(clips.addClip({
+        buffer: bytes,
+        match_time_ms: mt,
+        caption: PROOF_BLOB_KIND
+      })),
+      PROOF_SAVE_TIMEOUT_MS,
+      'PROOF_TIMEOUT'
+    )
+    if (!stored) {
+      emit('goalpipe:proof-failed', { reason: 'EMPTY_RESULT' })
+      return null
+    }
+    // clips.addClip returns { clipId, driveKey, path, ts, match_time_ms, by_peer, caption? }.
+    // We synthesize a compact blob key that carries enough state for a peer to
+    // resolve the clip via curva.clips.getClip: driveKey/path is sufficient.
+    // The key format is `<driveKey>:<path>` — both fields already validated by
+    // clips.addClip. Cap total length inside 16..256 char validator bounds.
+    let blobKey = null
+    if (typeof stored.driveKey === 'string' && typeof stored.path === 'string'
+        && stored.driveKey.length >= 8 && stored.path.length >= 1) {
+      blobKey = stored.driveKey + ':' + stored.path
+      if (blobKey.length < 16 || blobKey.length > 256) blobKey = null
+    }
+    if (!blobKey) {
+      emit('goalpipe:proof-failed', { reason: 'INVALID_KEY_SHAPE' })
+      return null
+    }
+    emit('goalpipe:proof-saved', { blobKey, sizeBytes: size })
+    return blobKey
+  } catch (err) {
+    const code = err && err.code ? err.code : 'ERROR'
+    log('warn', 'goalPipeline: proof save failed', { code, message: err && err.message })
+    emit('goalpipe:proof-failed', { reason: code, message: err && err.message })
+    return null
+  }
+}
+
 function createGoalPipeline (deps = {}) {
   const {
     ocr = null,
@@ -294,12 +360,20 @@ function createGoalPipeline (deps = {}) {
     // of announcer.openSpeakStream. Any failure falls back to announcer so
     // the pipeline never crashes on TTS routing.
     voiceClone = null,
+    // F21 OCR audit trail: optional clips handle (from bare/clips.js) used to
+    // publish the source frame as a `goal-proof` Hyperblob before the
+    // system:goal-card is appended. Missing handle => proof step is skipped
+    // silently. See saveGoalProof for the failure model.
+    clips = null,
     chat = null,
     roomSlug = null,
     locales = DEFAULT_LOCALES,
     log = () => {},
     emit = () => {},
     flagOverride = null,
+    // F21 feature flag override for tests; production defers to the env flag
+    // CURVA_GOAL_PROOF_ENABLED which is OFF by default.
+    proofFlagOverride = null,
     // Wave-final QVAC polish (F1): injected `deleteCache` fn. goalPipeline
     // itself does not call completion() directly (goalCard owns that seam),
     // but close() still clears the room-scoped kvCache for the goal-pipeline
@@ -435,6 +509,22 @@ function createGoalPipeline (deps = {}) {
       speakResults.push({ locale, ...spoken })
     }
 
+    // Step 6.5: F21 OCR audit trail. When the proof feature flag is on AND a
+    // clips handle is available, publish the source frame to Hyperblob so the
+    // goal-card carries a verifiable provenance handle. Best-effort — a
+    // failure returns null and the pipeline STILL ships the goal-card without
+    // proofBlobKey. Never blocks the pipeline for more than PROOF_SAVE_TIMEOUT_MS.
+    const proofFlag = proofFlagOverride === null
+      ? proofFlagEnabled()
+      : !!proofFlagOverride
+    let proofBlobKey = null
+    if (proofFlag && clips) {
+      const matchTimeForProof = (nextScore && Number.isFinite(nextScore.matchTimeMs))
+        ? nextScore.matchTimeMs
+        : 0
+      proofBlobKey = await saveGoalProof(clips, image, matchTimeForProof, emit, log)
+    }
+
     // Step 7: append `system:goal-card` to Autobase chat.
     let chatAppended = false
     if (chat) {
@@ -445,6 +535,12 @@ function createGoalPipeline (deps = {}) {
         team: card.team,
         assist: card.assist,
         roomSlug: roomSlug || null
+      }
+      // F21: attach proofBlobKey when saveGoalProof succeeded. Missing key is
+      // valid per the chat.js validator (backward compat).
+      if (typeof proofBlobKey === 'string' && proofBlobKey.length >= 16
+          && proofBlobKey.length <= 256) {
+        payload.proofBlobKey = proofBlobKey
       }
       try {
         if (typeof chat.sendSystem === 'function') {
@@ -466,7 +562,8 @@ function createGoalPipeline (deps = {}) {
       score: nextScore,
       mcp: mcpResult,
       speak: speakResults,
-      chatAppended
+      chatAppended,
+      proofBlobKey
     }
   }
 
@@ -509,6 +606,9 @@ module.exports = {
   DEFAULT_LOCALES,
   MAX_OCR_CHARS,
   VOICE_CLONE_ALLOWED,
+  proofFlagEnabled,
+  PROOF_SAVE_TIMEOUT_MS,
+  PROOF_BLOB_KIND,
   _internal: {
     joinBlocksForPrompt,
     scoresEqual,
@@ -516,6 +616,7 @@ module.exports = {
     tryUpdateMatchState,
     speakOnce,
     routeTts,
-    withTimeout
+    withTimeout,
+    saveGoalProof
   }
 }

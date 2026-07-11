@@ -1483,6 +1483,14 @@ function isValidSystemGoalCard (v) {
   if (v.scorer !== undefined && (typeof v.scorer !== 'string' || v.scorer.length > 80)) return false
   if (v.team !== undefined && (typeof v.team !== 'string' || v.team.length > 80)) return false
   if (v.assist !== undefined && (typeof v.assist !== 'string' || v.assist.length > 80)) return false
+  // F21 OCR audit trail: optional proofBlobKey pointing to a Hyperblob
+  // frame saved by the host's goal pipeline. When present it must be a
+  // string 16..256 chars so a malicious peer cannot smuggle a giant payload
+  // through the autobase. Absent = valid (backward compat).
+  if (v.proofBlobKey !== undefined) {
+    if (typeof v.proofBlobKey !== 'string') return false
+    if (v.proofBlobKey.length < 16 || v.proofBlobKey.length > 256) return false
+  }
   return true
 }
 

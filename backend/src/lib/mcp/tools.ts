@@ -1140,6 +1140,272 @@ const broadcastGetRegionsTool: McpTool = {
 };
 
 // -----------------------------------------------------------------------------
+// F14 EXTRA TOOLS — voice-coach enrichment
+//
+// Four read-only tools, all bounded and demo-safe:
+//   - get_prediction_pool  (Prisma: PredictionPool + Prediction sum)
+//   - get_user_profile     (Prisma: TipEvent + Prediction + Room aggregations)
+//   - get_h2h_history      (Static: world-cup-2026.json, filtered)
+//   - get_tournament_bracket (Static: world-cup-2026.json, knockout stages)
+//
+// Data-source design decisions:
+//   - No world-cup-2022.json file exists, so historical H2H comes ONLY from
+//     the WC26 corpus filtered by team pair. Empty array = "no data seeded".
+//   - Bracket returns the four knockout stages (r16, qf, sf, final) plus
+//     third_place. All matches remain "TBD" until group play resolves — the
+//     seeded fixtures still expose homeTeamCode/awayTeamCode as placeholders.
+// -----------------------------------------------------------------------------
+
+const H2H_ARRAY_CAP = 20;
+const BRACKET_MATCH_CAP = 20;
+
+// Load WC data source once and cache. Fallback to empty structure when missing
+// so tools remain callable (per spec: gracefully degrade, do not throw).
+interface WcMatch {
+  externalId: number;
+  homeTeamCode: string;
+  awayTeamCode: string;
+  kickoffUtc: string;
+  stage: string;
+  status: string;
+  groupLabel?: string | null;
+  venue?: unknown;
+}
+interface WcTeam {
+  code: string;
+  name: string;
+  group?: string;
+}
+interface WcCorpus {
+  meta?: { competition?: string };
+  teams: WcTeam[];
+  matches: WcMatch[];
+}
+let wcCache: WcCorpus | null = null;
+let wcCacheLoaded = false;
+const loadWcCorpus = (): WcCorpus | null => {
+  if (wcCacheLoaded) return wcCache;
+  wcCacheLoaded = true;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const fs = require('node:fs') as typeof import('node:fs');
+    const path = require('node:path') as typeof import('node:path');
+    const p = path.resolve(process.cwd(), 'src/data/world-cup-2026.json');
+    const raw = fs.readFileSync(p, 'utf8');
+    const parsed = JSON.parse(raw) as WcCorpus;
+    if (parsed && Array.isArray(parsed.teams) && Array.isArray(parsed.matches)) {
+      wcCache = parsed;
+    }
+  } catch {
+    wcCache = null;
+  }
+  return wcCache;
+};
+
+const isValidTeamCode = (s: unknown): s is string =>
+  typeof s === 'string' && /^[A-Z]{2,3}$/.test(s);
+
+const getPredictionPoolTool: McpTool = {
+  name: 'get_prediction_pool',
+  title: 'Get open prediction pools for a room',
+  description:
+    'Return the open (status=open) prediction pools for a Curva room slug: poolId, mode, options, deadline, and confirmed staked total. Capped at 20 rows.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      roomSlug: { type: 'string', description: 'Room slug' },
+    },
+    required: ['roomSlug'],
+    additionalProperties: false,
+  },
+  async handler(args) {
+    if (!isValidSlug(args.roomSlug)) return asError('Invalid roomSlug');
+    try {
+      const pools = await prismaQuery.predictionPool.findMany({
+        where: { roomSlug: args.roomSlug, status: 'open' },
+        orderBy: { createdAt: 'desc' },
+        take: H2H_ARRAY_CAP,
+      });
+      return asText({
+        roomSlug: args.roomSlug,
+        count: pools.length,
+        pools: pools.map((p) => ({
+          poolId: p.id,
+          matchId: p.matchId,
+          mode: p.mode,
+          entryStakeAtomic: p.entryStakeAtomic,
+          deadlineMs: p.deadlineMs.toString(),
+          status: p.status,
+          totalStakedAtomic: p.totalStakedAtomic,
+          chainId: p.chainId,
+          options: p.mode === 'winner-only' ? ['HOME', 'AWAY', 'DRAW'] : ['exact-score'],
+        })),
+      });
+    } catch (err) {
+      return asError((err as Error)?.message || 'lookup failed');
+    }
+  },
+};
+
+const getUserProfileTool: McpTool = {
+  name: 'get_user_profile',
+  title: 'Get aggregate user profile',
+  description:
+    'Return aggregate stats for a peer address: totalTipsSent, totalTipsReceived, predictionsWon, predictionsLost, roomsCreated. Zeros returned for unknown addresses.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      ownerAddress: { type: 'string', description: 'Lowercase 0x... EVM address' },
+    },
+    required: ['ownerAddress'],
+    additionalProperties: false,
+  },
+  async handler(args) {
+    if (!isValidEvmAddress(args.ownerAddress)) return asError('Invalid ownerAddress');
+    const addr = args.ownerAddress.toLowerCase();
+    try {
+      const [tipsSent, tipsReceived, predsWon, predsLost, roomsCreated] = await Promise.all([
+        prismaQuery.tipEvent
+          .count({ where: { fromAddress: addr, isDemo: false } })
+          .catch(() => 0),
+        prismaQuery.tipEvent
+          .count({ where: { toAddress: addr, isDemo: false } })
+          .catch(() => 0),
+        prismaQuery.prediction
+          .count({ where: { peerAddress: addr, status: 'won' } })
+          .catch(() => 0),
+        prismaQuery.prediction
+          .count({ where: { peerAddress: addr, status: 'refunded' } })
+          .catch(() => 0),
+        prismaQuery.room
+          .count({ where: { hostOwnerAddress: addr, deletedAt: null, isDemo: false } })
+          .catch(() => 0),
+      ]);
+      return asText({
+        address: shortenAddress(addr),
+        totalTipsSent: tipsSent,
+        totalTipsReceived: tipsReceived,
+        predictionsWon: predsWon,
+        predictionsLost: predsLost,
+        roomsCreated,
+      });
+    } catch (err) {
+      return asError((err as Error)?.message || 'lookup failed');
+    }
+  },
+};
+
+const getH2hHistoryTool: McpTool = {
+  name: 'get_h2h_history',
+  title: 'Get head-to-head history between two teams',
+  description:
+    'Return head-to-head matches between two team codes from the WC26 corpus. Empty array when data source is missing or no matches are seeded. Capped at 20 rows.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      teamA: { type: 'string', description: '2-3 letter FIFA code' },
+      teamB: { type: 'string', description: '2-3 letter FIFA code' },
+      competition: { type: 'string', description: 'Optional filter (unused when only WC26 is available)' },
+    },
+    required: ['teamA', 'teamB'],
+    additionalProperties: false,
+  },
+  async handler(args) {
+    if (!isValidTeamCode(args.teamA)) return asError('Invalid teamA');
+    if (!isValidTeamCode(args.teamB)) return asError('Invalid teamB');
+    const teamA = args.teamA;
+    const teamB = args.teamB;
+    const wc = loadWcCorpus();
+    if (!wc) {
+      return asText({
+        teamA,
+        teamB,
+        competition: 'FIFA World Cup 2026',
+        count: 0,
+        matches: [],
+        note: 'H2H data source unavailable',
+      });
+    }
+    const matches = wc.matches
+      .filter(
+        (m) =>
+          (m.homeTeamCode === teamA && m.awayTeamCode === teamB) ||
+          (m.homeTeamCode === teamB && m.awayTeamCode === teamA),
+      )
+      .slice(0, H2H_ARRAY_CAP)
+      .map((m) => ({
+        externalId: m.externalId,
+        homeTeamCode: m.homeTeamCode,
+        awayTeamCode: m.awayTeamCode,
+        kickoffUtc: m.kickoffUtc,
+        stage: m.stage,
+        status: m.status,
+      }));
+    return asText({
+      teamA,
+      teamB,
+      competition: wc.meta?.competition ?? 'FIFA World Cup 2026',
+      count: matches.length,
+      matches,
+    });
+  },
+};
+
+const getTournamentBracketTool: McpTool = {
+  name: 'get_tournament_bracket',
+  title: 'Get WC26 tournament knockout bracket',
+  description:
+    'Return knockout bracket state (r16, qf, sf, final, third_place) from the WC26 corpus. Empty structure when data source is missing. Read-only static data.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      competition: {
+        type: 'string',
+        description: 'Currently only "wc2026" is supported',
+      },
+    },
+    required: ['competition'],
+    additionalProperties: false,
+  },
+  async handler(args) {
+    if (typeof args.competition !== 'string' || args.competition.length > 32) {
+      return asError('competition must be a string (max 32 chars)');
+    }
+    const wc = loadWcCorpus();
+    if (!wc) {
+      return asText({
+        competition: args.competition,
+        available: false,
+        bracket: { r16: [], qf: [], sf: [], third_place: [], final: [] },
+      });
+    }
+    const stages: Record<string, unknown[]> = {
+      r16: [],
+      qf: [],
+      sf: [],
+      third_place: [],
+      final: [],
+    };
+    for (const m of wc.matches) {
+      if (!(m.stage in stages)) continue;
+      if (stages[m.stage].length >= BRACKET_MATCH_CAP) continue;
+      stages[m.stage].push({
+        externalId: m.externalId,
+        homeTeamCode: m.homeTeamCode,
+        awayTeamCode: m.awayTeamCode,
+        kickoffUtc: m.kickoffUtc,
+        status: m.status,
+      });
+    }
+    return asText({
+      competition: wc.meta?.competition ?? args.competition,
+      available: true,
+      bracket: stages,
+    });
+  },
+};
+
+// -----------------------------------------------------------------------------
 // Registration
 // -----------------------------------------------------------------------------
 
@@ -1169,6 +1435,11 @@ export const registerAllTools = (): void => {
   registerTool(venueGetDetailsTool);
   registerTool(standingsGetTableTool);
   registerTool(broadcastGetRegionsTool);
+  // F14 extras: voice-coach enrichment.
+  registerTool(getPredictionPoolTool);
+  registerTool(getUserProfileTool);
+  registerTool(getH2hHistoryTool);
+  registerTool(getTournamentBracketTool);
 };
 
 // Test-only exports for direct unit testing without touching registry.
@@ -1190,6 +1461,10 @@ export const __toolsForTest = {
   venueGetDetailsTool,
   standingsGetTableTool,
   broadcastGetRegionsTool,
+  getPredictionPoolTool,
+  getUserProfileTool,
+  getH2hHistoryTool,
+  getTournamentBracketTool,
 };
 
 // Re-export McpContext for test files convenience.

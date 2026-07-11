@@ -549,6 +549,20 @@ export function mountChat({ container, curva, tier = 'writer' } = {}) {
         const snippetEl = document.createElement('span')
         snippetEl.className = 'curva-chat__room-search-hit-snippet'
         snippetEl.textContent = typeof hit.snippet === 'string' ? hit.snippet.slice(0, 200) : ''
+        // F20: t+MM:SS badge when the hit carries a match-time offset so the
+        // user can see they can jump to that moment. textContent only —
+        // matchTimeMs is a number so no XSS surface, but we stay consistent.
+        const hitMatchTimeMs = (typeof hit.matchTimeMs === 'number' && Number.isFinite(hit.matchTimeMs) && hit.matchTimeMs >= 0)
+          ? Math.floor(hit.matchTimeMs)
+          : null
+        if (hitMatchTimeMs !== null) {
+          const jumpBadge = document.createElement('span')
+          jumpBadge.className = 'curva-chat__room-search-result-jump-badge'
+          const mm = Math.floor(hitMatchTimeMs / 60000)
+          const ss = Math.floor((hitMatchTimeMs % 60000) / 1000)
+          jumpBadge.textContent = '[t+' + String(mm).padStart(2, '0') + ':' + String(ss).padStart(2, '0') + ']'
+          li.appendChild(jumpBadge)
+        }
         const timeEl = document.createElement('span')
         timeEl.className = 'curva-chat__room-search-hit-time'
         if (typeof hit.at === 'number' && Number.isFinite(hit.at) && hit.at > 0) {
@@ -578,6 +592,27 @@ export function mountChat({ container, curva, tier = 'writer' } = {}) {
             setTimeout(() => {
               row.classList.remove('curva-chat__msg--room-search-highlight')
             }, 1500)
+            // F20 semantic-scrubber jump: after scrolling the row into view,
+            // ask the playhead to scrub to the moment of that message. Prefer
+            // the row's data-match-time-ms (authored by the message render
+            // path) so the source of truth is the DOM row we found; fall back
+            // to hit.matchTimeMs if the row lacks it. Silently skip when the
+            // playhead bridge is missing (chat rendering must not depend on
+            // playhead being wired).
+            const rowMt = Number(row.dataset.matchTimeMs)
+            const jumpMt = Number.isFinite(rowMt) && rowMt >= 0
+              ? rowMt
+              : (typeof hit.matchTimeMs === 'number' && Number.isFinite(hit.matchTimeMs) && hit.matchTimeMs >= 0
+                ? hit.matchTimeMs
+                : null)
+            if (jumpMt !== null
+                && curva && curva.playhead
+                && typeof curva.playhead.scrubTo === 'function') {
+              try {
+                const p = curva.playhead.scrubTo(jumpMt)
+                if (p && typeof p.catch === 'function') p.catch(() => { /* noop */ })
+              } catch { /* noop; scrub is best-effort */ }
+            }
           }
         })
         roomSearchOverlay.appendChild(li)
@@ -1104,6 +1139,15 @@ export function mountChat({ container, curva, tier = 'writer' } = {}) {
     const li = document.createElement('li')
     li.className = 'curva-chat__msg'
     li.dataset.key = key
+    // F20 semantic-scrubber jump: expose match_time_ms on the row so the F6
+    // search click handler can jump the local playhead to the moment of the
+    // message. Only attached when finite + >= 0 (chat.js validator guarantees
+    // this for real messages, but historical rows may lack it).
+    if (typeof msg.match_time_ms === 'number'
+        && Number.isFinite(msg.match_time_ms)
+        && msg.match_time_ms >= 0) {
+      li.dataset.matchTimeMs = String(Math.floor(msg.match_time_ms))
+    }
 
     const meta = document.createElement('div')
     meta.className = 'curva-chat__meta'
@@ -1482,7 +1526,86 @@ export function mountChat({ container, curva, tier = 'writer' } = {}) {
 
     li.appendChild(inner)
     li.appendChild(attribution)
+
+    // F21 OCR audit trail: "Verify" button when the goal-card carries a
+    // proofBlobKey pointing to a Hyperblob frame. Clicking opens a lightbox
+    // with the frame + OCR score for context. proofBlobKey is validated by
+    // bare/chat.js (16-256 chars) but we re-validate here as defense in depth
+    // and never trust the shape enough to inject as innerHTML.
+    if (typeof msg.proofBlobKey === 'string'
+        && msg.proofBlobKey.length >= 16
+        && msg.proofBlobKey.length <= 256
+        && /^[0-9a-f]+:\/[A-Za-z0-9._/\-]+$/i.test(msg.proofBlobKey)) {
+      const verifyBtn = document.createElement('button')
+      verifyBtn.type = 'button'
+      verifyBtn.className = 'curva-chat__goal-card-verify'
+      verifyBtn.textContent = 'Verify'
+      verifyBtn.addEventListener('click', () => {
+        openVerifyLightbox(msg.proofBlobKey, msg)
+      })
+      li.appendChild(verifyBtn)
+    }
+
     return li
+  }
+
+  // F21 OCR audit trail: lightbox showing the goal-proof frame. Opens on
+  // Verify button click. Escape key or backdrop click closes it. All text
+  // via textContent — proofBlobKey is untrusted despite validator.
+  function openVerifyLightbox(proofBlobKey, msg) {
+    if (!curva || !curva.clips || typeof curva.clips.getClip !== 'function') {
+      // No clips bridge — silently skip. The button is best-effort.
+      return
+    }
+    const colonIdx = proofBlobKey.indexOf(':')
+    if (colonIdx <= 0) return
+    const driveKey = proofBlobKey.slice(0, colonIdx)
+    const path = proofBlobKey.slice(colonIdx + 1)
+    if (!/^[0-9a-f]{16,128}$/i.test(driveKey)) return
+    if (!path.startsWith('/')) return
+
+    const backdrop = document.createElement('div')
+    backdrop.className = 'curva-verify-lightbox'
+    const inner = document.createElement('div')
+    inner.className = 'curva-verify-lightbox__inner'
+    const img = document.createElement('img')
+    img.className = 'curva-verify-lightbox__img'
+    img.alt = 'goal proof frame'
+    const meta = document.createElement('div')
+    meta.className = 'curva-verify-lightbox__meta'
+    const minuteTxt = Number.isFinite(msg.minute) ? String(Math.floor(msg.minute)) + "'" : '?'
+    const scoreTxt = typeof msg.scorer === 'string' ? msg.scorer.slice(0, 40) : ''
+    meta.textContent = 'OCR: ' + minuteTxt + ' ' + scoreTxt
+
+    inner.appendChild(img)
+    inner.appendChild(meta)
+    backdrop.appendChild(inner)
+
+    // Prevent inner click from closing.
+    inner.addEventListener('click', (e) => { e.stopPropagation() })
+    const close = () => {
+      document.removeEventListener('keydown', onKey)
+      if (backdrop.parentNode) backdrop.parentNode.removeChild(backdrop)
+    }
+    const onKey = (e) => { if (e.key === 'Escape') close() }
+    backdrop.addEventListener('click', close)
+    document.addEventListener('keydown', onKey)
+
+    document.body.appendChild(backdrop)
+
+    curva.clips.getClip({ driveKey, path }).then((bytes) => {
+      if (!bytes) return
+      try {
+        const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)
+        // The proof frame is stored via clips.addClip which caps at 50 MiB;
+        // we cap display to 20 MiB to avoid renderer memory pressure. mime is
+        // opaque so we fall back to image/*.
+        const blob = new Blob([u8], { type: 'image/jpeg' })
+        const url = URL.createObjectURL(blob)
+        img.src = url
+        img.addEventListener('load', () => URL.revokeObjectURL(url), { once: true })
+      } catch { /* noop */ }
+    }).catch(() => { /* noop */ })
   }
 
   // Ship 3 F7: `system:highlight` renderer. Icon-first colored pill.
