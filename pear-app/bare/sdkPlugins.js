@@ -38,7 +38,7 @@
 
 const PLUGIN_SUBPATHS = Object.freeze([
   { name: 'llamacpp-completion',    subpath: '@qvac/sdk/llamacpp-completion/plugin',    exportKey: 'llmPlugin' },
-  { name: 'llamacpp-embedding',     subpath: '@qvac/sdk/llamacpp-embedding/plugin',     exportKey: 'embedPlugin' },
+  { name: 'llamacpp-embedding',     subpath: '@qvac/sdk/llamacpp-embedding/plugin',     exportKey: 'embeddingsPlugin' },
   { name: 'nmtcpp-translation',     subpath: '@qvac/sdk/nmtcpp-translation/plugin',     exportKey: 'nmtPlugin' },
   { name: 'whispercpp-transcription', subpath: '@qvac/sdk/whispercpp-transcription/plugin', exportKey: 'whisperPlugin' },
   { name: 'parakeet-transcription', subpath: '@qvac/sdk/parakeet-transcription/plugin', exportKey: 'parakeetPlugin' },
