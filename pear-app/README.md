@@ -343,7 +343,7 @@ Runs `scripts/demo-4peer.js`, which spawns four Electron instances with staggere
 
 ### Full feature demo (semifinal max-out)
 
-Boot each peer with EVERY wave 2 to 4 QVAC feature and observability turned on. This is the exact command used for the semifinal recording; every flag exercises a real code path shipped by waves 2, 3, and 4.
+Boot each peer with EVERY wave 2 to 6 QVAC feature and observability turned on. This is the exact command used for the semifinal recording; every flag exercises a real code path shipped by waves 2 through 6 (F1-F22 semifinal cycle).
 
 **Peer A (host).** Fresh storage under `/tmp/curva-peer-a-fresh`, backend at `localhost:3700`:
 
@@ -354,11 +354,14 @@ cd pear-app && \
   CURVA_FORCE_RELAY=1 \
   CURVA_KEET_IDENTITY_ENABLED=true \
   CURVA_MULTIWRITER=true \
+  CURVA_BLIND_PEERING_ENABLED=true \
   \
   CURVA_QVAC_COMMENTATOR_ENABLED=true \
   CURVA_QVAC_STT_ENABLED=true \
   CURVA_QVAC_TTS_ENABLED=true \
+  CURVA_QVAC_TTS_LOCALES=en,it,id,es,fr,de,pt \
   CURVA_QVAC_LLM_TRANSLATE_ENABLED=true \
+  CURVA_QVAC_BOT_ENABLED=true \
   \
   CURVA_PREDICTIONS_ENABLED=true \
   CURVA_ATTENDANCE_ENABLED=true \
@@ -373,10 +376,24 @@ cd pear-app && \
   CURVA_LANGDETECT_ENABLED=true \
   CURVA_SEMSEARCH_ENABLED=true \
   CURVA_GOAL_CARD_ENABLED=true \
+  CURVA_DIARIZE_ENABLED=true \
   \
   CURVA_APPLY_MIDDLEWARE_ENABLED=true \
   CURVA_GOAL_PIPELINE_ENABLED=true \
   CURVA_VLM_PREFILTER_ENABLED=true \
+  \
+  CURVA_VOICE_CLONE_ENABLED=true \
+  CURVA_VOICE_CLONE_GOAL_ENABLED=true \
+  CURVA_COMMENTATOR_VOICE_CLONE_ENABLED=true \
+  CURVA_VOICE_COACH_MEMORY_ENABLED=true \
+  CURVA_VOICE_COACH_CROSS_LINGUAL_ENABLED=true \
+  CURVA_MATCH_RECAP_ENABLED=true \
+  CURVA_ROOM_SEARCH_ENABLED=true \
+  CURVA_AUTO_HIGHLIGHT_ENABLED=true \
+  CURVA_COMMENTATOR_RAG_ENABLED=true \
+  CURVA_COMMENTATOR_MULTI_LOCALE_ENABLED=true \
+  CURVA_QVAC_ASSET_SEED_ENABLED=true \
+  CURVA_GOAL_PROOF_ENABLED=true \
   \
   npx electron-forge start -- --no-updates \
     --storage /tmp/curva-peer-a-fresh \
@@ -384,7 +401,7 @@ cd pear-app && \
     --backend http://localhost:3700
 ```
 
-**Peer B (viewer).** Same flags, different passcode and storage root:
+**Peer B (viewer).** Same flags, different passcode, different storage root, different Prometheus port (both peers bind `127.0.0.1:<port>` so they can't share):
 
 ```sh
 cd pear-app && \
@@ -393,11 +410,14 @@ cd pear-app && \
   CURVA_FORCE_RELAY=1 \
   CURVA_KEET_IDENTITY_ENABLED=true \
   CURVA_MULTIWRITER=true \
+  CURVA_BLIND_PEERING_ENABLED=true \
   \
   CURVA_QVAC_COMMENTATOR_ENABLED=true \
   CURVA_QVAC_STT_ENABLED=true \
   CURVA_QVAC_TTS_ENABLED=true \
+  CURVA_QVAC_TTS_LOCALES=en,it,id,es,fr,de,pt \
   CURVA_QVAC_LLM_TRANSLATE_ENABLED=true \
+  CURVA_QVAC_BOT_ENABLED=true \
   \
   CURVA_PREDICTIONS_ENABLED=true \
   CURVA_ATTENDANCE_ENABLED=true \
@@ -412,10 +432,24 @@ cd pear-app && \
   CURVA_LANGDETECT_ENABLED=true \
   CURVA_SEMSEARCH_ENABLED=true \
   CURVA_GOAL_CARD_ENABLED=true \
+  CURVA_DIARIZE_ENABLED=true \
   \
   CURVA_APPLY_MIDDLEWARE_ENABLED=true \
   CURVA_GOAL_PIPELINE_ENABLED=true \
   CURVA_VLM_PREFILTER_ENABLED=true \
+  \
+  CURVA_VOICE_CLONE_ENABLED=true \
+  CURVA_VOICE_CLONE_GOAL_ENABLED=true \
+  CURVA_COMMENTATOR_VOICE_CLONE_ENABLED=true \
+  CURVA_VOICE_COACH_MEMORY_ENABLED=true \
+  CURVA_VOICE_COACH_CROSS_LINGUAL_ENABLED=true \
+  CURVA_MATCH_RECAP_ENABLED=true \
+  CURVA_ROOM_SEARCH_ENABLED=true \
+  CURVA_AUTO_HIGHLIGHT_ENABLED=true \
+  CURVA_COMMENTATOR_RAG_ENABLED=true \
+  CURVA_COMMENTATOR_MULTI_LOCALE_ENABLED=true \
+  CURVA_QVAC_ASSET_SEED_ENABLED=true \
+  CURVA_GOAL_PROOF_ENABLED=true \
   \
   npx electron-forge start -- --no-updates \
     --storage /tmp/curva-peer-b-fresh \
@@ -423,21 +457,39 @@ cd pear-app && \
     --backend http://localhost:3700
 ```
 
-**Backend companion** (separate terminal, needs the wave 3 observability + shared RAG routes):
+**Backend companion** (separate terminal, needs the wave 3 observability + shared RAG routes + wave 6 x402 VIP schema):
 
 ```sh
 cd backend && \
+  bun run db:push && \
   ENABLE_BACKEND_METRICS=true \
   ENABLE_SHARED_RAG=true \
+  ENABLE_VIP_RESERVATIONS=true \
+  FACILITATOR_ENABLED=true RELAY_SPONSOR_ENABLED=true \
+  CURVA_X402_ENABLED=true \
   bun run dev
 ```
 
-**Left intentionally OFF** (heavy first-run downloads; toggle on when you want to test them explicitly):
+`bun run db:push` is required once on a fresh clone — creates the `vip_reservations` table for F4. Idempotent on repeat runs.
 
-- `CURVA_VOICE_CLONE_ENABLED` — Chatterbox voice clone (~200 MB, EN/IT only)
-- `CURVA_DIARIZE_ENABLED` — Parakeet Sortformer diarization (~150 MB)
-- `CURVA_CHAOS_ENABLED` — deterministic node-drop for divergence testing
-- `ENABLE_QVAC_PROVIDER` — backend as delegated QVAC provider (needs `@qvac/sdk` installed on backend host)
+**First-boot warm cost:** the max-out flag set pulls ~1.9 GB of models one time (cached under `<storageDir>/qvac-models/` with SHA-256 verification):
+
+| Model | Approx. size | Feature that pulls it |
+|---|---|---|
+| Bergamot pairs (en-id, en-it, en-es, en-fr, en-de, en-pt) | ~60 MB each × 6 | translation + F16/F22/F3 |
+| Qwen3 0.6B q4 | ~364 MB | commentator + roomBot + voice coach |
+| Whisper Tiny | ~40 MB | voice coach + F2 |
+| Supertonic multilingual | ~120 MB | announcer + goal pipeline |
+| Chatterbox voice clone | ~200 MB | F1 + F5 |
+| SmolVLM2 500M + mmproj | ~521 MB | ask-the-frame + F7 |
+| MobileNetV3 classify | ~15 MB | pre-filter + F7 |
+| OCR_LATIN CRAFT + recognizer | ~50 MB | goal pipeline |
+| EmbeddingGemma 300M Q4 | ~265 MB | RAG + F6 + F9 |
+| Parakeet Sortformer | ~150 MB | diarization |
+
+Do the warm once before the recording session (open room, wait for all downloads, close). Second boot is fully cached and boots in seconds.
+
+**Everything intentionally ON in the max-out boot:** every F1-F22 flag we shipped this cycle plus every wave 2-4 base flag. If a feature is not lit, its module is not constructed on room open and its UI stays hidden — same fail-closed posture as the rest of the codebase.
 
 **What each flag activates** (from the wave-3 and wave-4 code review round):
 

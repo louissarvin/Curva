@@ -565,41 +565,103 @@ Prerequisites: backend running on `http://localhost:3700` with `ENABLE_SEEDER=tr
 
 Both storage paths below use the `-fresh` suffix so the wallets survive a restart within the same demo session (the same smart addresses stay funded). Delete the folder if you want a clean slate; new wallets get generated and you re-run `bun run fund:peers` (see below).
 
-**Shell 1 — Peer A (host).** `--no-auto-open` keeps the app on the lobby so the host can pick a slug and click Create:
+**Shell 1 — Peer A (host).** `--no-auto-open` keeps the app on the lobby so the host can pick a slug and click Create. Every F1-F22 flag we shipped this semifinal cycle is set explicit so the review boot lights up the full stack:
 
 ```bash
 cd pear-app && \
 DEV_WALLET_PASSCODE=curva-peer-a-pw \
 CURVA_DEMO_MODE=true \
 CURVA_FORCE_RELAY=1 \
+CURVA_KEET_IDENTITY_ENABLED=true \
+CURVA_MULTIWRITER=true \
+CURVA_BLIND_PEERING_ENABLED=true \
+CURVA_APPLY_MIDDLEWARE_ENABLED=true \
+CURVA_OBSERVABILITY_ENABLED=true CURVA_PROMETHEUS_PORT=4343 \
 CURVA_QVAC_COMMENTATOR_ENABLED=true CURVA_QVAC_STT_ENABLED=true CURVA_QVAC_TTS_ENABLED=true \
-CURVA_QVAC_LLM_TRANSLATE_ENABLED=true \
+CURVA_QVAC_TTS_LOCALES=en,it,id,es,fr,de,pt \
+CURVA_QVAC_LLM_TRANSLATE_ENABLED=true CURVA_QVAC_BOT_ENABLED=true \
 CURVA_PREDICTIONS_ENABLED=true CURVA_ATTENDANCE_ENABLED=true \
 CURVA_DELEGATED_INFERENCE_ENABLED=true \
 CURVA_TACTICAL_ENABLED=true CURVA_DEMO_HUD_ENABLED=true \
+CURVA_VOICE_CLONE_ENABLED=true \
+CURVA_GOAL_CARD_ENABLED=true CURVA_GOAL_PIPELINE_ENABLED=true \
+CURVA_LANGDETECT_ENABLED=true CURVA_SEMSEARCH_ENABLED=true \
+CURVA_ASK_FRAME_ENABLED=true CURVA_DIARIZE_ENABLED=true \
+CURVA_VLM_PREFILTER_ENABLED=true \
+CURVA_VOICE_CLONE_GOAL_ENABLED=true \
+CURVA_VOICE_COACH_MEMORY_ENABLED=true \
+CURVA_MATCH_RECAP_ENABLED=true \
+CURVA_COMMENTATOR_VOICE_CLONE_ENABLED=true \
+CURVA_ROOM_SEARCH_ENABLED=true \
+CURVA_AUTO_HIGHLIGHT_ENABLED=true \
+CURVA_COMMENTATOR_RAG_ENABLED=true \
+CURVA_QVAC_ASSET_SEED_ENABLED=true \
+CURVA_COMMENTATOR_MULTI_LOCALE_ENABLED=true \
+CURVA_GOAL_PROOF_ENABLED=true \
+CURVA_VOICE_COACH_CROSS_LINGUAL_ENABLED=true \
 npx electron-forge start -- --no-updates \
   --storage /tmp/curva-peer-a-fresh \
   --no-auto-open \
   --backend http://localhost:3700
 ```
 
-**Shell 2 — Peer B (viewer).** Same launch, same lobby-first behaviour:
+**Shell 2 — Peer B (viewer).** Same launch, same lobby-first behaviour. Same flags — the whole point of the max-out review boot is that both peers see identical capability surface so any feature the reviewer touches works on either side:
 
 ```bash
 cd pear-app && \
 DEV_WALLET_PASSCODE=curva-peer-b-pw \
 CURVA_DEMO_MODE=true \
 CURVA_FORCE_RELAY=1 \
+CURVA_KEET_IDENTITY_ENABLED=true \
+CURVA_MULTIWRITER=true \
+CURVA_BLIND_PEERING_ENABLED=true \
+CURVA_APPLY_MIDDLEWARE_ENABLED=true \
+CURVA_OBSERVABILITY_ENABLED=true CURVA_PROMETHEUS_PORT=4344 \
 CURVA_QVAC_COMMENTATOR_ENABLED=true CURVA_QVAC_STT_ENABLED=true CURVA_QVAC_TTS_ENABLED=true \
-CURVA_QVAC_LLM_TRANSLATE_ENABLED=true \
+CURVA_QVAC_TTS_LOCALES=en,it,id,es,fr,de,pt \
+CURVA_QVAC_LLM_TRANSLATE_ENABLED=true CURVA_QVAC_BOT_ENABLED=true \
 CURVA_PREDICTIONS_ENABLED=true CURVA_ATTENDANCE_ENABLED=true \
 CURVA_DELEGATED_INFERENCE_ENABLED=true \
 CURVA_TACTICAL_ENABLED=true CURVA_DEMO_HUD_ENABLED=true \
+CURVA_VOICE_CLONE_ENABLED=true \
+CURVA_GOAL_CARD_ENABLED=true CURVA_GOAL_PIPELINE_ENABLED=true \
+CURVA_LANGDETECT_ENABLED=true CURVA_SEMSEARCH_ENABLED=true \
+CURVA_ASK_FRAME_ENABLED=true CURVA_DIARIZE_ENABLED=true \
+CURVA_VLM_PREFILTER_ENABLED=true \
+CURVA_VOICE_CLONE_GOAL_ENABLED=true \
+CURVA_VOICE_COACH_MEMORY_ENABLED=true \
+CURVA_MATCH_RECAP_ENABLED=true \
+CURVA_COMMENTATOR_VOICE_CLONE_ENABLED=true \
+CURVA_ROOM_SEARCH_ENABLED=true \
+CURVA_AUTO_HIGHLIGHT_ENABLED=true \
+CURVA_COMMENTATOR_RAG_ENABLED=true \
+CURVA_QVAC_ASSET_SEED_ENABLED=true \
+CURVA_COMMENTATOR_MULTI_LOCALE_ENABLED=true \
+CURVA_GOAL_PROOF_ENABLED=true \
+CURVA_VOICE_COACH_CROSS_LINGUAL_ENABLED=true \
 npx electron-forge start -- --no-updates \
   --storage /tmp/curva-peer-b-fresh \
   --no-auto-open \
   --backend http://localhost:3700
 ```
+
+**Note on `CURVA_PROMETHEUS_PORT`:** each peer needs its own port because both bind to `127.0.0.1`. Peer A on `:4343`, Peer B on `:4344`. Curl either to see the loopback metrics stream (`hypercore_*`, `hyperswarm_*`, `hyperdht_*` gauges plus every trace counter).
+
+**Feature-flag legend (session-shipped):**
+
+| Flag | Feature | Default |
+|---|---|---|
+| `CURVA_VOICE_CLONE_GOAL_ENABLED` | F1 voice-cloned goal pipeline | off |
+| `CURVA_VOICE_COACH_MEMORY_ENABLED` | F2 voice coach 6-turn ring | on |
+| `CURVA_MATCH_RECAP_ENABLED` | F3 match recap 7-cap synthesis | off (heavy) |
+| `CURVA_COMMENTATOR_VOICE_CLONE_ENABLED` | F5 voice-cloned running commentary | off |
+| `CURVA_ROOM_SEARCH_ENABLED` | F6 semantic room chat search | on |
+| `CURVA_AUTO_HIGHLIGHT_ENABLED` | F7 auto-highlight detection (cards/corners/subs) | off (heavy) |
+| `CURVA_COMMENTATOR_RAG_ENABLED` | F9 RAG-augmented commentator (800ms deadline race) | off (heavy) |
+| `CURVA_QVAC_ASSET_SEED_ENABLED` | F13 QVAC asset seed-back mesh | off |
+| `CURVA_COMMENTATOR_MULTI_LOCALE_ENABLED` | F16 per-locale fanout via Bergamot | off (heavy) |
+| `CURVA_GOAL_PROOF_ENABLED` | F21 OCR audit trail via Hyperblob | off |
+| `CURVA_VOICE_COACH_CROSS_LINGUAL_ENABLED` | F22 Bergamot bracket around voice coach | on |
 
 **Log signals that confirm chat sync is wired.** Peer A after Publish to directory:
 
