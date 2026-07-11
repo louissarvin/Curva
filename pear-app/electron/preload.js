@@ -305,6 +305,56 @@ contextBridge.exposeInMainWorld('curva', {
   },
   onClipLink: (cb) => onEvent('clip:link', cb),
 
+  // F21 (OCR audit trail): curva.clips.* sub-namespace with object-arg signatures.
+  // The renderer's F21 Verify button + goal-proof lightbox expect
+  // `curva.clips.getClip({driveKey, path}).then(bytes => ...)`. The historical
+  // top-level `curva.getClip(driveKey, path)` uses positional args and returns
+  // the raw payload envelope. This sub-namespace wraps the same worker IPC
+  // (`clip:get`) via `writeMainAwait` so the promise resolves with the decoded
+  // byte array (Uint8Array) rather than the base64 envelope. Same underlying
+  // security posture (64-hex driveKey guard, /clips/-prefixed path guard).
+  clips: {
+    getClip({ driveKey, path, byPeer } = {}) {
+      if (typeof driveKey !== 'string' || driveKey.length !== 64) {
+        return Promise.reject(new RangeError('driveKey must be 64-char hex'))
+      }
+      if (typeof path !== 'string' || !path.startsWith('/clips/')) {
+        return Promise.reject(new RangeError('path must start with /clips/'))
+      }
+      return writeMainAwait('clip:get', { driveKey, path, byPeer }).then((res) => {
+        if (!res || typeof res.buffer !== 'string') {
+          throw new Error('clip:get returned no buffer')
+        }
+        // Worker encodes bytes as base64; decode back to Uint8Array for the
+        // renderer's Blob/Image consumers. Using Buffer here is safe because
+        // preload runs in a Node context alongside Electron.
+        const bytes = Buffer.from(res.buffer, 'base64')
+        return new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+      })
+    },
+    addClip({ buffer, matchTimeMs = 0, caption } = {}) {
+      const b64 = toBase64(buffer)
+      if (!b64) return Promise.reject(new RangeError('buffer required'))
+      if (typeof matchTimeMs !== 'number' || matchTimeMs < 0) matchTimeMs = 0
+      if (caption !== undefined && typeof caption !== 'string') {
+        return Promise.reject(new TypeError('caption must be a string'))
+      }
+      return writeMainAwait('clip:add', { buffer: b64, matchTimeMs, caption })
+    },
+    listClips({ limit = 200 } = {}) {
+      return writeMainAwait('clip:list', { limit })
+    },
+    getClipLink({ driveKey, blobPath } = {}) {
+      if (typeof driveKey !== 'string' || driveKey.length !== 64) {
+        return Promise.reject(new RangeError('driveKey must be 64-char hex'))
+      }
+      if (typeof blobPath !== 'string' || !blobPath.startsWith('/clips/')) {
+        return Promise.reject(new RangeError('blobPath must start with /clips/'))
+      }
+      return writeMainAwait('clip:link', { driveKey, blobPath })
+    }
+  },
+
   // Backend integration (read-mostly).
   loadMatches(filters) {
     return writeMain('backend:matches', { filters: filters || {} })
