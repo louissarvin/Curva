@@ -513,7 +513,7 @@ log('info', 'predictions feature flag', { enabled: predictionsFlagEnabled })
 // "Enable commentator" toggle in the renderer so the download cost is
 // explicit. See bare/commentator.js for the docs-verification memo, model
 // choice justification, and prompt template.
-const { createCommentator } = require('../bare/commentator.js')
+const { createCommentator, parseCommentatorLocalesEnv } = require('../bare/commentator.js')
 const commentatorFlagEnabled = (() => {
   try {
     const v = (typeof process !== 'undefined' && process.env && process.env.CURVA_QVAC_COMMENTATOR_ENABLED) || ''
@@ -669,6 +669,13 @@ function ensureCommentator() {
     announcerLocale: announcerDefaultLocale,
     voiceClone: voiceCloneHandle,
     rag: (typeof ragInstance !== 'undefined' && ragInstance) ? ragInstance : null,
+    // F16 (Ship 4 semifinal): multi-locale fanout. `translator` is the shared
+    // Bergamot handle; when it lands lazily we still hand a reference so the
+    // commentator can pick it up on the first trigger that fires after
+    // translate:init completes. `locales` comes from CURVA_COMMENTATOR_LOCALES
+    // (comma-separated 2-letter codes); when unset the fanout is a no-op.
+    translate: translator || null,
+    locales: parseCommentatorLocalesEnv() || (announcerLocalesEnv ? announcerLocalesEnv.slice() : null),
     getMatchTimeMs: () => {
       try {
         const st = room?.playhead?.state?.() || {}
@@ -1483,6 +1490,11 @@ async function ensureGoalPipeline () {
         translate: translator || null,
         announcer: announcer || null,
         voiceClone,
+        // F21 OCR audit trail: pass the room's clips handle so the pipeline
+        // can publish the source frame as a `goal-proof` Hyperblob before
+        // sending system:goal-card. Missing handle => proof step is skipped
+        // silently (see saveGoalProof in bare/goalPipeline.js).
+        clips: (room && room.clips) || null,
         chat: room.chat,
         roomSlug: (room && room.slug) || (config.roomSlug || 'default'),
         log: (msg, extra) => log('info', 'goal-pipeline: ' + msg, extra),
@@ -1497,6 +1509,41 @@ async function ensureGoalPipeline () {
   return goalPipelineInflight
 }
 // ===== END WAVE 4 GOAL PIPELINE =====
+
+// ===== F13: QVAC ASSET SEED MESH =====
+// Turn Curva into a peer-to-peer QVAC-asset distribution mesh. Peers seed
+// downloaded model assets back onto the swarm via a per-peer Hyperdrive so
+// other peers can pull from them instead of the origin. Feature flag:
+// CURVA_QVAC_ASSET_SEED_ENABLED (default OFF; heavy).
+// Docs verification: node_modules/@qvac/sdk/dist/client/api/download-asset.d.ts.
+const { createQvacAssetSeed } = require('../bare/qvacAssetSeed.js')
+let qvacAssetSeedInstance = null
+let qvacAssetSeedInflight = null
+async function ensureQvacAssetSeed () {
+  if (qvacAssetSeedInstance) return qvacAssetSeedInstance
+  if (qvacAssetSeedInflight) return qvacAssetSeedInflight
+  qvacAssetSeedInflight = (async () => {
+    let sdk = null
+    try { sdk = await import('@qvac/sdk') } catch { sdk = null }
+    if (!sdk) return null
+    try {
+      qvacAssetSeedInstance = await createQvacAssetSeed({
+        corestore: store,
+        swarm,
+        storageDir: config.dir,
+        sdk,
+        log: (msg, extra) => log('info', 'qvac-asset-seed: ' + msg, extra),
+        emit: (ev, p) => emit(ev, p)
+      })
+    } catch (err) {
+      log('warn', 'qvacAssetSeed construct failed', { message: err && err.message })
+      qvacAssetSeedInstance = null
+    }
+    return qvacAssetSeedInstance
+  })().finally(() => { qvacAssetSeedInflight = null })
+  return qvacAssetSeedInflight
+}
+// ===== END F13 QVAC ASSET SEED MESH =====
 
 // ===== SHIP 3 F7: AUTO HIGHLIGHT DETECTION =====
 // MobileNetV3-Small pre-filter -> SmolVLM2 verify -> Qwen3 summariser ->
@@ -3663,6 +3710,24 @@ async function dispatchCommand(msg) {
           match_time_ms: matchTimeMs,
           rate: typeof rate === 'number' ? rate : undefined,
           is_anchor: isAnchor
+        })
+        emit('ack', { id, cmd })
+        return
+      }
+      case 'playhead:scrub-to': {
+        // F20: single-shot seek shortcut used by the F6 search hit click
+        // handler. Non-host peers still get to scrub their local playhead —
+        // the room.playhead reducer applies the same peer-level rules as
+        // 'playhead:set'. This handler intentionally does NOT accept is_anchor
+        // (that channel is the setPlayhead call).
+        if (!room) throw new RoomNotJoinedError()
+        const matchTimeMs = Number(payload?.matchTimeMs ?? payload?.match_time_ms)
+        if (!Number.isFinite(matchTimeMs) || matchTimeMs < 0) {
+          throw new RangeError('matchTimeMs must be a finite non-negative number')
+        }
+        await room.playhead.setState({
+          type: 'seek',
+          match_time_ms: matchTimeMs
         })
         emit('ack', { id, cmd })
         return
@@ -5861,6 +5926,81 @@ async function dispatchCommand(msg) {
       }
       // ===== END SHIP 3 F7 AUTO-HIGHLIGHT IPC =====
 
+      // ===== F13 QVAC ASSET SEED IPC =====
+      case 'qvac-asset:resolve': {
+        const assetId = typeof payload?.assetId === 'string' ? payload.assetId : ''
+        const seed = await ensureQvacAssetSeed()
+        if (!seed) {
+          emit('ack', { id, cmd, payload: { ok: false, code: 'FEATURE_DISABLED', requestId: id } })
+          return
+        }
+        try {
+          const url = await seed.resolveAsset(assetId)
+          emit('ack', { id, cmd, payload: { ok: true, url, requestId: id } })
+        } catch (err) {
+          emit('ack', {
+            id,
+            cmd,
+            payload: {
+              ok: false,
+              code: err?.code || 'RESOLVE_FAILED',
+              message: err?.message || 'resolve failed',
+              requestId: id
+            }
+          })
+        }
+        return
+      }
+      case 'qvac-asset:download': {
+        const assetId = typeof payload?.assetId === 'string' ? payload.assetId : ''
+        const registryUrl = typeof payload?.registryUrl === 'string' ? payload.registryUrl : ''
+        const seed = await ensureQvacAssetSeed()
+        if (!seed) {
+          emit('ack', { id, cmd, payload: { ok: false, code: 'FEATURE_DISABLED', requestId: id } })
+          return
+        }
+        try {
+          const res = await seed.downloadAndSeed(assetId, registryUrl)
+          emit('ack', { id, cmd, payload: { ok: true, ...res, requestId: id } })
+        } catch (err) {
+          emit('ack', {
+            id,
+            cmd,
+            payload: {
+              ok: false,
+              code: err?.code || 'DOWNLOAD_FAILED',
+              message: err?.message || 'download failed',
+              requestId: id
+            }
+          })
+        }
+        return
+      }
+      case 'qvac-asset:manifest': {
+        const seed = await ensureQvacAssetSeed()
+        if (!seed) {
+          emit('ack', { id, cmd, payload: { ok: false, code: 'FEATURE_DISABLED', requestId: id } })
+          return
+        }
+        try {
+          const manifest = seed.getLocalManifest()
+          emit('ack', { id, cmd, payload: { ok: true, manifest, requestId: id } })
+        } catch (err) {
+          emit('ack', {
+            id,
+            cmd,
+            payload: {
+              ok: false,
+              code: err?.code || 'MANIFEST_FAILED',
+              message: err?.message || 'manifest read failed',
+              requestId: id
+            }
+          })
+        }
+        return
+      }
+      // ===== END F13 QVAC ASSET SEED IPC =====
+
       default:
         log('info', 'ipc unknown cmd (ignored)', { cmd, id })
     }
@@ -5962,6 +6102,10 @@ goodbye(async () => {
   }
   try { if (ocrHandle) await ocrHandle.close() } catch (err) {
     log('warn', 'ocr close failed', { message: err && err.message })
+  }
+  // F13: close qvac-asset-seed drive + leave DHT topics before swarm teardown.
+  try { if (qvacAssetSeedInstance) await qvacAssetSeedInstance.close() } catch (err) {
+    log('warn', 'qvacAssetSeed close failed', { message: err && err.message })
   }
   // Cup Final: observability teardown. Prometheus.stop() closes the HTTP
   // server + clears the global hypertrace trace function.

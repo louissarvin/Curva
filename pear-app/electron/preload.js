@@ -1842,8 +1842,39 @@ contextBridge.exposeInMainWorld('curva', {
     onError:        (cb) => onEvent('highlight:error', cb),
     onResult:       (cb) => onEvent('highlight:result', cb),
     onDone:         (cb) => onEvent('highlight:done', cb)
-  }
+  },
   // ===== END SHIP 3 F7 AUTO HIGHLIGHT =====
+
+  // ===== F13 QVAC ASSET SEED MESH =====
+  // Bridge to bare/qvacAssetSeed.js. Every peer holds a writable Hyperdrive of
+  // QVAC assets they have downloaded and joins a well-known DHT topic per
+  // asset so other peers can discover them. resolveAsset returns a loopback
+  // blob-server URL when we already have the asset, else null (caller falls
+  // back to download). All inputs are re-validated worker-side.
+  qvacAssetSeed: {
+    resolve({ assetId } = {}) {
+      if (typeof assetId !== 'string' || !/^[a-zA-Z0-9-]{1,64}$/.test(assetId)) {
+        throw new RangeError('assetId must match ^[a-zA-Z0-9-]{1,64}$')
+      }
+      return writeMainAwait('qvac-asset:resolve', { assetId })
+    },
+    download({ assetId, registryUrl } = {}) {
+      if (typeof assetId !== 'string' || !/^[a-zA-Z0-9-]{1,64}$/.test(assetId)) {
+        throw new RangeError('assetId must match ^[a-zA-Z0-9-]{1,64}$')
+      }
+      if (typeof registryUrl !== 'string' || registryUrl.length === 0 || registryUrl.length > 2048) {
+        throw new RangeError('registryUrl must be a 1-2048 char string')
+      }
+      return writeMainAwait('qvac-asset:download', { assetId, registryUrl })
+    },
+    manifest() {
+      return writeMainAwait('qvac-asset:manifest', {})
+    },
+    onProgress: (cb) => onEvent('qvac-asset:progress', cb),
+    onSeeded:   (cb) => onEvent('qvac-asset:seeded', cb),
+    onError:    (cb) => onEvent('qvac-asset:error', cb)
+  }
+  // ===== END F13 QVAC ASSET SEED MESH =====
 })
 
 // Allowlist for openExternal. Enforced on BOTH sides — the renderer preload
@@ -1877,6 +1908,20 @@ function isAllowedExternal(url) {
 
 contextBridge.exposeInMainWorld('bridge', {
   // Version and package info (safe: read from package.json, no secrets).
+  // F20 semantic-scrubber jump: minimal playhead namespace exposing
+  // scrubTo(matchTimeMs). Distinct from the top-level setPlayhead() which
+  // takes a full state object; scrubTo is a single-shot seek shortcut used by
+  // the F6 room-search click handler. Both routes end up at the same
+  // 'playhead:set' IPC on the worker so there is no double-plumbing.
+  playhead: {
+    scrubTo(matchTimeMs) {
+      if (typeof matchTimeMs !== 'number' || !Number.isFinite(matchTimeMs) || matchTimeMs < 0) {
+        throw new RangeError('matchTimeMs must be a finite non-negative number')
+      }
+      return writeMain('playhead:scrub-to', { matchTimeMs })
+    }
+  },
+
   pkg() {
     return ipcRenderer.sendSync('pkg')
   },
