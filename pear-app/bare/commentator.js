@@ -215,6 +215,198 @@ function commentatorRagFlagEnabled () {
   } catch { return false }
 }
 
+// -----------------------------------------------------------------------------
+// F16 (Ship 4 semifinal): Multi-locale commentator fanout.
+//
+// Design goal (symmetric to F1 goalPipeline):
+//   Every viewer gets commentary in their preferred language. After the LLM
+//   generates the source-locale reaction, we translate the final sentence
+//   into each additional locale in parallel via Bergamot and route each
+//   translated line through the same TTS gate (voiceClone or announcer).
+//
+// Feature flag: CURVA_COMMENTATOR_MULTI_LOCALE_ENABLED (default OFF because
+//   the fanout adds Bergamot latency + N TTS opens per trigger, which is
+//   heavy on a laptop demo).
+//
+// Timeout budget per locale: 1500 ms for the translate step. Anything slower
+// is dropped (log + continue). TTS is best-effort — we do not race the TTS
+// open against a deadline because the announcer already ships timeouts
+// internally (see bare/announcer.js openSpeakStream).
+//
+// Concurrency: Promise.allSettled so one slow locale never blocks fast ones.
+// A rejection on one locale never affects other locales.
+// -----------------------------------------------------------------------------
+
+const MULTI_LOCALE_TRANSLATE_TIMEOUT_MS = 1500
+
+function commentatorMultiLocaleFlagEnabled () {
+  try {
+    const raw = (typeof process !== 'undefined' && process.env &&
+      process.env.CURVA_COMMENTATOR_MULTI_LOCALE_ENABLED) || ''
+    const s = String(raw).toLowerCase()
+    return s === '1' || s === 'true' || s === 'yes' || s === 'on'
+  } catch { return false }
+}
+
+/**
+ * Parse CURVA_COMMENTATOR_LOCALES env var (comma-separated 2-letter codes)
+ * into a normalised, deduped array. Exported so workers/main.js can pass the
+ * result into ensureCommentator() without duplicating the parser.
+ * @returns {string[]|null} null when unset; an array otherwise (may be empty).
+ */
+function parseCommentatorLocalesEnv () {
+  try {
+    const raw = (typeof process !== 'undefined' && process.env &&
+      process.env.CURVA_COMMENTATOR_LOCALES) || ''
+    if (!raw) return null
+    const seen = new Set()
+    const out = []
+    for (const piece of String(raw).split(',')) {
+      const s = piece.trim().toLowerCase().slice(0, 8)
+      if (s.length === 0) continue
+      if (seen.has(s)) continue
+      seen.add(s)
+      out.push(s)
+    }
+    return out.length > 0 ? out : null
+  } catch { return null }
+}
+
+/**
+ * Race translate.translate() against MULTI_LOCALE_TRANSLATE_TIMEOUT_MS.
+ * Supports two signatures for maximum compatibility with the shared Bergamot
+ * facade:
+ *   - `translate.translate({text, from, to})` (bare/translate.js current)
+ *   - `translate.translate(text, targetLocale)` (documented brief signature)
+ * On timeout, throw, or missing handle we resolve to null so the caller can
+ * skip the locale.
+ *
+ * @returns {Promise<string|null>}
+ */
+async function translateWithTimeout (translate, sentence, sourceLocale, targetLocale, timeoutMs) {
+  if (!translate || typeof translate.translate !== 'function') return null
+  if (typeof sentence !== 'string' || sentence.length === 0) return null
+  let timeoutHandle = null
+  const timeoutPromise = new Promise((resolve) => {
+    timeoutHandle = setTimeout(() => resolve('__timeout__'), Math.max(50, Number(timeoutMs) || 1500))
+  })
+  try {
+    // Support both signatures: try the object shape first (matches bare/translate.js
+    // and matches goalPipeline.js:424). Fall back to the positional shape if the
+    // object call throws synchronously with a shape error.
+    const call = Promise.resolve().then(() => {
+      try {
+        return translate.translate({ text: sentence, from: sourceLocale || 'en', to: targetLocale })
+      } catch {
+        return translate.translate(sentence, targetLocale)
+      }
+    })
+    const raw = await Promise.race([call, timeoutPromise])
+    if (timeoutHandle) { try { clearTimeout(timeoutHandle) } catch { /* noop */ } }
+    if (raw === '__timeout__') return null
+    if (typeof raw === 'string' && raw.length > 0) return raw
+    // Some translate facades return { text, ... }
+    if (raw && typeof raw === 'object' && typeof raw.text === 'string' && raw.text.length > 0) {
+      return raw.text
+    }
+    return null
+  } catch (err) {
+    if (timeoutHandle) { try { clearTimeout(timeoutHandle) } catch { /* noop */ } }
+    return null
+  }
+}
+
+/**
+ * Fanout the (already sanitized) source-locale commentary to every additional
+ * locale in parallel. For each locale:
+ *   1. translate.translate(sentence, locale) with a MULTI_LOCALE_TRANSLATE_TIMEOUT_MS budget
+ *   2. routeTts() (voiceClone if enrolled + Chatterbox-allowed, else announcer)
+ *   3. Write the translated sentence into the session and drain PCM chunks.
+ *   4. Emit `commentator:multi-locale-speak {locale, source, via}` per additional locale.
+ *
+ * Returns the settled results array (mirrors Promise.allSettled shape) so the
+ * caller can log/observe. Never throws.
+ */
+async function runMultiLocaleFanout ({
+  sentence,
+  sourceLocale,
+  additionalLocales,
+  translate,
+  voiceClone,
+  announcer,
+  emit,
+  log
+}) {
+  if (!Array.isArray(additionalLocales) || additionalLocales.length === 0) return []
+  if (typeof sentence !== 'string' || sentence.length === 0) return []
+  const tasks = additionalLocales.map((locale) => (async () => {
+    // 1. Translate.
+    const translated = await translateWithTimeout(
+      translate, sentence, sourceLocale, locale, MULTI_LOCALE_TRANSLATE_TIMEOUT_MS
+    )
+    if (!translated) {
+      emit('commentator:multi-locale-skipped', {
+        locale, source: sourceLocale || null, reason: 'TRANSLATE_TIMEOUT_OR_EMPTY'
+      })
+      return { locale, ok: false, reason: 'TRANSLATE_TIMEOUT_OR_EMPTY' }
+    }
+    // 2. Route TTS.
+    let session = null
+    let via = 'announcer'
+    try {
+      const routed = await routeTts(voiceClone, announcer, locale, log, emit)
+      session = routed && routed.session
+      via = (routed && routed.via) || 'announcer'
+    } catch (err) {
+      log('warn', 'commentator: multi-locale routeTts failed', {
+        locale, message: err && err.message
+      })
+      session = null
+    }
+    // 3. Emit the multi-locale-speak event whether or not the session opened —
+    //    the renderer wants to know we tried a locale even if TTS is unwired.
+    emit('commentator:multi-locale-speak', {
+      locale,
+      source: sourceLocale || null,
+      via,
+      text: translated
+    })
+    // 4. Write + drain.
+    if (session && typeof session.write === 'function') {
+      try {
+        session.write(translated)
+        if (typeof session.end === 'function') session.end()
+      } catch (err) {
+        log('warn', 'commentator: multi-locale session.write failed', {
+          locale, message: err && err.message
+        })
+      }
+      if (session.chunks && typeof session.chunks[Symbol.asyncIterator] === 'function') {
+        try {
+          for await (const chunk of session.chunks) {
+            if (!chunk) continue
+            emit('commentator:tts-chunk', {
+              buffer: chunk.buffer,
+              chunkIndex: chunk.chunkIndex,
+              sentenceChunk: chunk.sentenceChunk || null,
+              via,
+              locale
+            })
+            if (chunk.done) break
+          }
+        } catch (err) {
+          log('warn', 'commentator: multi-locale drain failed', {
+            locale, message: err && err.message
+          })
+        }
+      }
+    }
+    return { locale, ok: !!session, via }
+  })())
+  const settled = await Promise.allSettled(tasks)
+  return settled
+}
+
 /**
  * Sanitise a single retrieved snippet before it hits the prompt.
  * Returns an empty string when the snippet is rejected (see denylist above);
@@ -733,6 +925,16 @@ function createCommentator (opts = {}) {
     // shape) degrade to un-grounded commentary. The commentator NEVER breaks
     // because of RAG. See enrichPromptWithRag() above.
     rag = null,
+    // F16 (Ship 4 semifinal): optional Bergamot facade for multi-locale
+    // commentary fanout. When present AND CURVA_COMMENTATOR_MULTI_LOCALE_ENABLED
+    // resolves truthy AND `locales` includes locales other than
+    // `announcerLocale`, every trigger translates the sanitized reaction into
+    // each additional locale in parallel and routes each through routeTts().
+    // See runMultiLocaleFanout() above.
+    translate = null,
+    // F16: array of viewer locales, e.g. ['en', 'it', 'id']. When absent or
+    // equal to [announcerLocale], the fanout is a no-op (single-locale bypass).
+    locales = null,
     modelSrc = DEFAULT_MODEL_SRC,
     modelSizeMb = DEFAULT_MODEL_SIZE_MB,
     // Room-scoped kvCache key. Reusing the cache across 60 s ticks in the
@@ -1207,6 +1409,42 @@ function createCommentator (opts = {}) {
         return false
       }
 
+      // F16 (Ship 4 semifinal): multi-locale fanout. Runs AFTER the sanitized
+      // source-locale text is finalised so translations always operate on the
+      // same clean sentence peers will see in chat. Never awaits per-locale
+      // sequentially — see runMultiLocaleFanout for Promise.allSettled semantics.
+      // Single-locale rooms (or flag OFF, or no translate handle) skip entirely.
+      const sourceLocale = typeof announcerLocale === 'string' && announcerLocale.length > 0
+        ? announcerLocale
+        : 'en'
+      const configuredLocales = Array.isArray(locales) && locales.length > 0
+        ? locales
+        : [sourceLocale]
+      const additionalLocales = configuredLocales.filter((l) => {
+        return typeof l === 'string' && l.length > 0 && l !== sourceLocale
+      })
+      if (commentatorMultiLocaleFlagEnabled() && translate && additionalLocales.length > 0) {
+        try {
+          await runMultiLocaleFanout({
+            sentence: clean,
+            sourceLocale,
+            additionalLocales,
+            translate,
+            voiceClone,
+            announcer,
+            emit,
+            log
+          })
+        } catch (err) {
+          // runMultiLocaleFanout swallows per-locale rejections via allSettled,
+          // so a throw here would mean a bug in the fanout wrapper itself.
+          // Log + continue so chat.sendSystem still runs.
+          log('warn', 'commentator: multi-locale fanout wrapper threw', {
+            message: err && err.message
+          })
+        }
+      }
+
       const msg = {
         type: 'system:commentary',
         text: clean,
@@ -1614,6 +1852,12 @@ module.exports = {
   RAG_TOP_K,
   SNIPPET_MAX_CHARS,
   SNIPPET_PREFIX_DENYLIST,
+  // F16 (Ship 4 semifinal) exports
+  commentatorMultiLocaleFlagEnabled,
+  parseCommentatorLocalesEnv,
+  runMultiLocaleFanout,
+  translateWithTimeout,
+  MULTI_LOCALE_TRANSLATE_TIMEOUT_MS,
   PROMPT_TEMPLATE,
   TONE_PROMPTS,
   DEFAULT_MODEL_SRC,

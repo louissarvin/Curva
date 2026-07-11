@@ -102,6 +102,72 @@ const TURN_TIMEOUT_MS = 45_000            // hard cap on end-to-end turn
 // TTS mic-gate cooldown per voice-assistant docs.
 const TTS_COOLDOWN_MS = 300
 
+// F22 (Ship 4 semifinal): cross-lingual RAG bracket.
+//
+// When the STT-classified user locale is NOT English AND a Bergamot translate
+// handle is available, we translate:
+//   (a) user_transcript -> en   BEFORE rag.search
+//   (b) llm_answer      -> user_locale   BEFORE TTS
+// Both translations race a 500 ms timeout; on timeout we fall back to the raw
+// text (better to answer imperfectly than to silence the coach). The LLM prompt
+// still receives the ORIGINAL transcript as the user turn — Qwen3 is
+// cross-lingual so it can produce natural target-language output; the back-
+// translation is a safety net to guarantee the TTS locale matches user_locale.
+//
+// Feature flag: CURVA_VOICE_COACH_CROSS_LINGUAL_ENABLED (default ON — this is
+// a quality upgrade with no downside for EN users since the bracket bypasses
+// when detected locale === 'en').
+const CROSS_LINGUAL_TRANSLATE_TIMEOUT_MS = 500
+
+function crossLingualFlagEnabled () {
+  try {
+    const raw = (typeof process !== 'undefined' && process.env &&
+      process.env.CURVA_VOICE_COACH_CROSS_LINGUAL_ENABLED)
+    if (raw === undefined || raw === null || raw === '') return true // default ON
+    const s = String(raw).toLowerCase()
+    return s === '1' || s === 'true' || s === 'yes' || s === 'on'
+  } catch { return true }
+}
+
+/**
+ * Race a translate.translate() call against CROSS_LINGUAL_TRANSLATE_TIMEOUT_MS.
+ * Supports both the object shape ({text, from, to}, matches bare/translate.js
+ * and goalPipeline.js) and the positional shape ((text, targetLocale), matches
+ * the brief). On timeout, throw, or empty result we return the raw text so the
+ * coach never silences on a slow translator.
+ *
+ * @returns {Promise<string>} translated text or the original raw text
+ */
+async function translateOrFallback (translate, raw, sourceLocale, targetLocale, timeoutMs) {
+  if (!translate || typeof translate.translate !== 'function') return raw
+  if (typeof raw !== 'string' || raw.length === 0) return raw
+  const budget = Math.max(50, Number(timeoutMs) || CROSS_LINGUAL_TRANSLATE_TIMEOUT_MS)
+  let timeoutHandle = null
+  const timeoutPromise = new Promise((resolve) => {
+    timeoutHandle = setTimeout(() => resolve('__timeout__'), budget)
+  })
+  try {
+    const call = Promise.resolve().then(() => {
+      try {
+        return translate.translate({ text: raw, from: sourceLocale || 'auto', to: targetLocale })
+      } catch {
+        return translate.translate(raw, targetLocale)
+      }
+    })
+    const result = await Promise.race([call, timeoutPromise])
+    if (timeoutHandle) { try { clearTimeout(timeoutHandle) } catch { /* noop */ } }
+    if (result === '__timeout__') return raw
+    if (typeof result === 'string' && result.length > 0) return result
+    if (result && typeof result === 'object' && typeof result.text === 'string' && result.text.length > 0) {
+      return result.text
+    }
+    return raw
+  } catch {
+    if (timeoutHandle) { try { clearTimeout(timeoutHandle) } catch { /* noop */ } }
+    return raw
+  }
+}
+
 // Ship 3 F2: conversational memory ring. Cap at 6 (three back-and-forth
 // pairs). Beyond that, older turns are dropped so the LLM prompt stays lean
 // and kvCache reuse remains effective. The memory turns are prepended BEFORE
@@ -244,6 +310,17 @@ function createVoiceCoach (opts = {}) {
     sttModelSrc = DEFAULT_STT_MODEL_SRC,
     roomSlug = 'default',
     lang = DEFAULT_LANG,
+    // F22 (Ship 4 semifinal): optional Bergamot translate facade for the
+    // cross-lingual bracket. When present AND the detected user locale is not
+    // English AND CURVA_VOICE_COACH_CROSS_LINGUAL_ENABLED resolves truthy,
+    // we translate the transcript to EN before rag.search AND translate the
+    // LLM answer back to userLocale before TTS. See translateOrFallback above.
+    translate = null,
+    // F22: optional language detector. `detectLocale(text)` returns a 2-letter
+    // ISO code (e.g. 'id', 'en', 'es'). When omitted, we fall back to the
+    // fixed `lang` factory option (pre-F22 behaviour for EN rooms). This is
+    // the injection seam for tests + the eventual QVAC lang-detect wire.
+    detectLocale = null,
     log = () => {},
     emit = () => {},
     now = () => Date.now()
@@ -601,6 +678,43 @@ function createVoiceCoach (opts = {}) {
     const userText = sanitizePrompt(meaningful, 500)
     emit('voice:transcript-final', { text: userText })
 
+    // F22 (Ship 4 semifinal): cross-lingual RAG bracket. Detect the user's
+    // locale from the final transcript; when non-EN AND translate is wired AND
+    // the flag is on, we produce an EN version of the transcript to feed
+    // rag.search. The original transcript is still fed to the LLM (Qwen3 is
+    // cross-lingual, so we let it produce natural target-language output where
+    // it can). The LLM answer is then translated back to userLocale for TTS.
+    // When the detected locale === 'en' the bracket bypasses entirely and the
+    // pipeline is byte-identical to pre-F22.
+    let detectedUserLocale = null
+    try {
+      if (typeof detectLocale === 'function') {
+        const d = detectLocale(userText)
+        if (typeof d === 'string' && d.length > 0) {
+          detectedUserLocale = d.toLowerCase().slice(0, 8)
+        }
+      }
+    } catch (err) {
+      log('warn', 'voiceCoach: detectLocale threw', { message: err && err.message })
+    }
+    if (!detectedUserLocale) detectedUserLocale = (typeof lang === 'string' && lang.length > 0) ? lang : DEFAULT_LANG
+    const crossLingualActive = crossLingualFlagEnabled() &&
+      detectedUserLocale !== 'en' &&
+      !!translate &&
+      typeof translate.translate === 'function'
+    let searchQuery = userText
+    let translatedQueryToEn = null
+    if (crossLingualActive) {
+      const t = await translateOrFallback(translate, userText, detectedUserLocale, 'en', CROSS_LINGUAL_TRANSLATE_TIMEOUT_MS)
+      if (t && t !== userText) {
+        translatedQueryToEn = t
+        searchQuery = t
+      } else {
+        // Timeout or fallback path: keep raw userText as the search query.
+        translatedQueryToEn = null
+      }
+    }
+
     // 1. Append user turn to chat so peers see what was said.
     try {
       await chat.send({ text: userText, match_time_ms: 0, kind: 'voice-in' })
@@ -630,9 +744,9 @@ function createVoiceCoach (opts = {}) {
     ]
     let ragCalledWith = null
     if (ragHandle && typeof ragHandle.search === 'function') {
-      ragCalledWith = userText
+      ragCalledWith = searchQuery
       try {
-        const hits = await ragHandle.search(userText, { topK: 3 })
+        const hits = await ragHandle.search(searchQuery, { topK: 3 })
         if (Array.isArray(hits) && hits.length > 0) {
           // Security audit fix (M4): strip Unicode bidi + zero-width + BOM
           // characters and NFKC-normalize homoglyphs before feeding retrieved
@@ -815,13 +929,36 @@ function createVoiceCoach (opts = {}) {
       emit('voice:error', { code: 'CHAT_SEND_COACH', message: err && err.message })
     }
 
+    // F22: back-translate the LLM answer into the user's locale before TTS.
+    // The LLM was fed the ORIGINAL transcript so it may have replied in EN
+    // (or another language) regardless of the user's tongue. To guarantee the
+    // spoken answer matches the caller's language, translate en -> userLocale.
+    // When the bracket is inactive (EN user OR no translate handle OR flag OFF)
+    // we skip and use the raw answerText as before — zero regression for EN.
+    let spokenText = answerText
+    let translatedAnswerBack = null
+    let ttsLocale = lang
+    if (crossLingualActive) {
+      const back = await translateOrFallback(translate, answerText, 'en', detectedUserLocale, CROSS_LINGUAL_TRANSLATE_TIMEOUT_MS)
+      if (back && back !== answerText) {
+        translatedAnswerBack = back
+        spokenText = back
+      }
+      ttsLocale = detectedUserLocale
+      emit('voice:cross-lingual', {
+        userLocale: detectedUserLocale,
+        translatedQueryToEn,
+        translatedAnswerBack
+      })
+    }
+
     // 5. TTS. Fire-and-forget on the announcer bridge with the mic-gate on.
     //    Docs: https://docs.qvac.tether.io/ai-capabilities/voice-assistant/
     //    (mic-gate + cooldown, fetched 2026-07-10).
     if (announcer && typeof announcer.speak === 'function') {
       state.isSpeaking = true
       try {
-        await announcer.speak({ text: answerText, targetLocale: lang })
+        await announcer.speak({ text: spokenText, targetLocale: ttsLocale })
       } catch (err) {
         log('warn', 'voiceCoach: announcer.speak threw', { message: err && err.message })
         emit('voice:error', { code: 'TTS_FAIL', message: err && err.message })
@@ -923,5 +1060,9 @@ module.exports = {
   // Ship 3 F2 memory constants + flag helper.
   CONVERSATION_HISTORY_MAX,
   CONVERSATION_MSG_MAX_LEN,
-  memoryFlagEnabled
+  memoryFlagEnabled,
+  // F22 (Ship 4 semifinal) cross-lingual exports.
+  crossLingualFlagEnabled,
+  translateOrFallback,
+  CROSS_LINGUAL_TRANSLATE_TIMEOUT_MS
 }
