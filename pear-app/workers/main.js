@@ -1216,13 +1216,30 @@ async function ensureVoiceClone () {
   voiceCloneInflight = (async () => {
     let sdk = null
     try { sdk = await import('@qvac/sdk') } catch { sdk = null }
-    // Hyperblobs is optional: the room may not expose one, in which case
-    // enroll() returns NO_HYPERBLOBS and the caller is informed. We probe
-    // room.clips.hyperblobs first (clips uses one) then fall back to null.
+    // Hyperblobs storage for the reference audio. Historically we probed
+    // room.clips._hyperblobs (private) but clips.js does not expose one at
+    // that key - the field name drifted between waves. Semifinal fix
+    // (2026-07-11): create a dedicated Hyperblobs on the voice-clone
+    // corestore namespace so voice-clone always has somewhere to write the
+    // reference WAV. Falls back to any pre-existing room.clips.hyperblobs
+    // or room.hyperblobs handle when present (older test scaffolding).
     let hyperblobs = null
     try {
-      hyperblobs = (room && room.clips && room.clips._hyperblobs) || null
+      hyperblobs = (room && room.clips && (room.clips.hyperblobs || room.clips._hyperblobs)) ||
+                   (room && room.hyperblobs) ||
+                   null
     } catch { hyperblobs = null }
+    if (!hyperblobs) {
+      try {
+        const Hyperblobs = require('hyperblobs')
+        const voiceCloneNs = store.namespace('curva/voice-clone')
+        hyperblobs = new Hyperblobs(voiceCloneNs.get({ name: 'voice-clone-ref' }))
+        log('info', 'voiceClone: created dedicated Hyperblobs on corestore namespace curva/voice-clone')
+      } catch (err) {
+        log('warn', 'voiceClone: failed to create dedicated Hyperblobs', { message: err && err.message })
+        hyperblobs = null
+      }
+    }
     try {
       voiceCloneInstance = createVoiceClone({
         sdk,
@@ -3487,6 +3504,35 @@ async function closeCurrentRoom() {
     const identity = await getPeerIdentity()
     identityCache = identity
     latencyTracker.setSelf(identity.pubkey)
+    // Semifinal live-boot fix (2026-07-11): register EVERY QVAC SDK plugin
+    // up-front so downstream modules (translate, askTheFrame, ocr, roomSearch,
+    // vlmCaption, rag, etc.) do not hit "No plugins registered in the worker"
+    // on their first SDK call. Idempotent - subsequent module-local
+    // registrations no-op. Best-effort per plugin; a plugin that fails to
+    // import (missing native addon) is logged and skipped.
+    //
+    // BLOCKING before emit('ready'): the SDK plugin registry is a
+    // module-level singleton in @qvac/sdk/dist/server/plugins/registry.js
+    // (line 6: `const plugins = new Map()`). Any SDK verb call goes through
+    // `ensurePluginsRegistered` which reads that same map via getAllPlugins.
+    // If translate.js (or any other module) awaits its lazy `import('@qvac/
+    // sdk')` and calls sdk.loadModel BEFORE our registration finishes,
+    // WORKER_PLUGINS_NOT_REGISTERED fires. So we AWAIT the boot before
+    // announcing readiness. Cost: ~200-800 ms on cold boot depending on how
+    // many plugins resolve their addon on the current arch.
+    // See bare/sdkPlugins.js head memo for docs URL + the exact SDK error.
+    try {
+      const sdkPluginsMod = require('../bare/sdkPlugins.js')
+      const boot = await sdkPluginsMod.boot(log)
+      log('info', 'sdk plugins bootstrapped', {
+        registered: boot.registered,
+        failedCount: boot.failed.length,
+        failedNames: boot.failed.map(f => f.name)
+      })
+    } catch (err) {
+      log('warn', 'sdk plugin bootstrap threw', { message: err && err.message })
+    }
+
     emit('ready', {
       pubkey: identity.pubkey,
       handle: identity.handle,
@@ -3495,28 +3541,6 @@ async function closeCurrentRoom() {
       backendUrl: config.backendUrl
     })
     log('info', 'ready', { pubkey: identity.pubkey, handle: identity.handle })
-
-    // Semifinal live-boot fix (2026-07-11): register EVERY QVAC SDK plugin
-    // up-front so downstream modules (askTheFrame, ocr, roomSearch, vlmCaption,
-    // rag, etc.) do not hit "No plugins registered in the worker" on their
-    // first SDK call. Idempotent — subsequent module-local registrations
-    // no-op. Best-effort per plugin; a plugin that fails to import (e.g.
-    // native addon missing for the current arch) is logged and skipped.
-    // See bare/sdkPlugins.js head memo for docs URL + the exact SDK error
-    // message this closes.
-    ;(async () => {
-      try {
-        const sdkPluginsMod = require('../bare/sdkPlugins.js')
-        const boot = await sdkPluginsMod.boot(log)
-        log('info', 'sdk plugins bootstrapped', {
-          registered: boot.registered,
-          failedCount: boot.failed.length,
-          failedNames: boot.failed.map(f => f.name)
-        })
-      } catch (err) {
-        log('warn', 'sdk plugin bootstrap threw', { message: err && err.message })
-      }
-    })()
 
     // pear.assets branding pack: emit initial branding snapshot. Path is null
     // until the drive lands (async background fetch per Pear docs). The
