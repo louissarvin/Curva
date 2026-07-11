@@ -19,6 +19,64 @@ const RECORD_SECONDS = 15
 const TARGET_SAMPLE_RATE = 16_000
 const SCRIPT_BUFFER_SIZE = 4096
 
+// Encode a Float32Array (range roughly [-1, 1]) as a 16-bit little-endian
+// mono WAV file. Chatterbox voice-clone expects a WAV container, not raw
+// PCM samples. Layout follows the canonical PCM WAV RIFF spec:
+//   [ 0 .. 4]   'RIFF'
+//   [ 4 .. 8]   uint32 LE file size - 8
+//   [ 8 ..12]   'WAVE'
+//   [12 ..16]   'fmt '
+//   [16 ..20]   uint32 LE 16 (fmt chunk size)
+//   [20 ..22]   uint16 LE 1  (PCM format)
+//   [22 ..24]   uint16 LE 1  (num channels = mono)
+//   [24 ..28]   uint32 LE sampleRate
+//   [28 ..32]   uint32 LE byteRate  = sampleRate * numChan * bytesPerSample
+//   [32 ..34]   uint16 LE blockAlign = numChan * bytesPerSample
+//   [34 ..36]   uint16 LE 16 (bits per sample)
+//   [36 ..40]   'data'
+//   [40 ..44]   uint32 LE dataChunkSize
+//   [44 ..  ]   int16 LE samples
+// Docs: https://docs.fileformat.com/audio/wav/ + WAVEFORMATEX/RIFF WAV spec.
+function float32PcmToWav16Bit (float32Samples, sampleRate) {
+  const numChannels = 1
+  const bitsPerSample = 16
+  const bytesPerSample = bitsPerSample / 8
+  const byteRate = sampleRate * numChannels * bytesPerSample
+  const blockAlign = numChannels * bytesPerSample
+  const dataLength = float32Samples.length * bytesPerSample
+  const headerLength = 44
+  const total = headerLength + dataLength
+  const out = new Uint8Array(total)
+  const view = new DataView(out.buffer)
+  // 'RIFF'
+  view.setUint8(0, 0x52); view.setUint8(1, 0x49); view.setUint8(2, 0x46); view.setUint8(3, 0x46)
+  view.setUint32(4, total - 8, true)
+  // 'WAVE'
+  view.setUint8(8, 0x57); view.setUint8(9, 0x41); view.setUint8(10, 0x56); view.setUint8(11, 0x45)
+  // 'fmt '
+  view.setUint8(12, 0x66); view.setUint8(13, 0x6d); view.setUint8(14, 0x74); view.setUint8(15, 0x20)
+  view.setUint32(16, 16, true)                // fmt chunk size
+  view.setUint16(20, 1, true)                 // PCM
+  view.setUint16(22, numChannels, true)
+  view.setUint32(24, sampleRate, true)
+  view.setUint32(28, byteRate, true)
+  view.setUint16(32, blockAlign, true)
+  view.setUint16(34, bitsPerSample, true)
+  // 'data'
+  view.setUint8(36, 0x64); view.setUint8(37, 0x61); view.setUint8(38, 0x74); view.setUint8(39, 0x61)
+  view.setUint32(40, dataLength, true)
+  let offset = headerLength
+  for (let i = 0; i < float32Samples.length; i++) {
+    // Clamp then convert [-1, 1] Float32 -> Int16 range [-32768, 32767]
+    let s = float32Samples[i]
+    if (s > 1) s = 1
+    else if (s < -1) s = -1
+    view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true)
+    offset += 2
+  }
+  return out
+}
+
 export function mountVoiceEnrollmentModal({ container, curva, isHost } = {}) {
   if (!container) throw new TypeError('container required')
   if (!curva) throw new TypeError('curva bridge required')
@@ -377,7 +435,15 @@ export function mountVoiceEnrollmentModal({ container, curva, isHost } = {}) {
       saveBtn.textContent = 'Enrolling...'
       setStatus('')
       try {
-        await curva.voiceClone.enroll(recordedPcm)
+        // Preload boundary at preload.js:1510 rejects Float32Array with
+        // "unsupported pcm type" — it only accepts ArrayBuffer / Uint8Array /
+        // Buffer / string-path. Additionally Chatterbox expects a WAV-encoded
+        // container, not raw PCM samples. Encode the 16 kHz mono Float32 PCM
+        // as a 16-bit little-endian WAV file here, then pass the WAV bytes as
+        // a Uint8Array so preload accepts it and bare/voiceClone.js Hyperblob-
+        // stores a valid WAV that Chatterbox can consume.
+        const wavBytes = float32PcmToWav16Bit(recordedPcm, TARGET_SAMPLE_RATE)
+        await curva.voiceClone.enroll(wavBytes)
         // Success state
         card.textContent = ''
         const successTitle = document.createElement('div')

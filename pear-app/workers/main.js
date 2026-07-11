@@ -3496,6 +3496,28 @@ async function closeCurrentRoom() {
     })
     log('info', 'ready', { pubkey: identity.pubkey, handle: identity.handle })
 
+    // Semifinal live-boot fix (2026-07-11): register EVERY QVAC SDK plugin
+    // up-front so downstream modules (askTheFrame, ocr, roomSearch, vlmCaption,
+    // rag, etc.) do not hit "No plugins registered in the worker" on their
+    // first SDK call. Idempotent — subsequent module-local registrations
+    // no-op. Best-effort per plugin; a plugin that fails to import (e.g.
+    // native addon missing for the current arch) is logged and skipped.
+    // See bare/sdkPlugins.js head memo for docs URL + the exact SDK error
+    // message this closes.
+    ;(async () => {
+      try {
+        const sdkPluginsMod = require('../bare/sdkPlugins.js')
+        const boot = await sdkPluginsMod.boot(log)
+        log('info', 'sdk plugins bootstrapped', {
+          registered: boot.registered,
+          failedCount: boot.failed.length,
+          failedNames: boot.failed.map(f => f.name)
+        })
+      } catch (err) {
+        log('warn', 'sdk plugin bootstrap threw', { message: err && err.message })
+      }
+    })()
+
     // pear.assets branding pack: emit initial branding snapshot. Path is null
     // until the drive lands (async background fetch per Pear docs). The
     // renderer must render a bundled fallback first, then re-render on the
