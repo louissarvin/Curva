@@ -23,6 +23,7 @@ import { teamRoutes } from './src/routes/teamRoutes.ts';
 import { roomRoutes } from './src/routes/roomRoutes.ts';
 import { tipRoutes } from './src/routes/tipRoutes.ts';
 import { relayRoutes } from './src/routes/relayRoutes.ts';
+import { featuresRoutes } from './src/routes/featuresRoutes.ts';
 import { healthRoutes } from './src/routes/healthRoutes.ts';
 import { activityRoutes } from './src/routes/activityRoutes.ts';
 import { leaderboardRoutes } from './src/routes/leaderboardRoutes.ts';
@@ -273,6 +274,8 @@ await fastify.register(activityRoutes, { prefix: '/activity' });
 await fastify.register(leaderboardRoutes, { prefix: '/leaderboard' });
 // statusRoutes declares /status and /status.json itself, no prefix.
 await fastify.register(statusRoutes);
+// Semifinal code-review helper: GET /features returns the full stack matrix.
+await fastify.register(featuresRoutes, { prefix: '/features' });
 await fastify.register(demoRoutes, { prefix: '/demo' });
 await fastify.register(phrasebookRoutes, { prefix: '/phrasebook' });
 // F10 multi-chain registry (no prefix; declares /chains itself).
