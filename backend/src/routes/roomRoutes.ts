@@ -163,9 +163,16 @@ export const roomRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts, d
         // Room table stays intact. This preserves backward compat: existing
         // clients that DO send a matchId continue to work unchanged, and
         // downstream consumers (tips, leaderboard) still see a real matchId.
+        // Semifinal debug (2026-07-11): peer-side wallet init can fail when
+        // the WDK bare-semver polyfill does not rescue a compound npm range
+        // like '^14.21.3 || >=16'. In that state the client publishes with
+        // null addresses. We accept the publish so the room lands in the
+        // directory (Peer B can discover it and P2P chat + QVAC still work);
+        // tipping is gated separately by the presence of a real address so
+        // downstream leaderboard / tip settlement never uses a placeholder.
         const valid = await validateRequiredFields(
           body,
-          ['slug', 'hostHandle', 'hostSmartAddress', 'hostOwnerAddress'],
+          ['slug', 'hostHandle'],
           reply
         );
         if (valid !== true) return;
@@ -177,9 +184,18 @@ export const roomRoutes: FastifyPluginCallback = (app: FastifyInstance, _opts, d
             ? null
             : String(body.matchId);
         const hostHandle = sanitizeHostHandle(String(body.hostHandle));
-        const hostSmartAddressRaw = String(body.hostSmartAddress);
+        // Addresses are optional now (see comment above). Empty / missing
+        // collapses to the zero address so the FK columns stay populated
+        // and downstream code paths that read the address see a stable
+        // sentinel rather than null. Tip settlement rejects the zero
+        // address explicitly (see facilitatorRoutes.ts sponsor guard).
+        const hostSmartAddressRaw = String(
+          body.hostSmartAddress ?? '0x0000000000000000000000000000000000000000'
+        );
         const hostSmartAddress = normalizeAddress(hostSmartAddressRaw);
-        const hostOwnerAddressRaw = String(body.hostOwnerAddress);
+        const hostOwnerAddressRaw = String(
+          body.hostOwnerAddress ?? '0x0000000000000000000000000000000000000000'
+        );
         const hostOwnerAddress = normalizeAddress(hostOwnerAddressRaw);
         const pearLinkRaw = body.pearLink ? String(body.pearLink) : null;
 

@@ -186,9 +186,15 @@ function createRoomSearch (opts = {}) {
       const resolved = (typeof embedModelSrc === 'string' && sdk[embedModelSrc] !== undefined)
         ? sdk[embedModelSrc]
         : embedModelSrc
+      // NOTE (2026-07-11 debug): SDK rejects the pair `{modelSrc: 'llamacpp-
+      // embedding', modelType: 'embedding'}` with:
+      //   modelSrc describes "llamacpp-embedding", but modelType resolves to
+      //   "embedding". Omit modelType to infer it automatically, or pass a
+      //   matching modelType.
+      // Fix: omit modelType and let the SDK infer from modelSrc. Same shape
+      // used by bare/rag.js which loads embeddings the same way.
       const modelId = await sdk.loadModel({
-        modelSrc: resolved,
-        modelType: 'embedding'
+        modelSrc: resolved
       })
       if (typeof modelId !== 'string' || modelId.length === 0) {
         state.lastError = 'LOAD_NO_MODEL_ID'
