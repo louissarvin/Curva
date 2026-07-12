@@ -242,9 +242,48 @@ export function mountFrameAnalyzePanel ({
   btnDescribe.addEventListener('click', () => { runDescribe() })
   btnOcr.addEventListener('click', () => { runRead() })
 
+  // Live progress hookup: on first-load, SmolVLM2 500MB and the OCR pair
+  // (LATIN 15MB + CRAFT 84MB) can take minutes to download. Without progress
+  // feedback the user stares at "Analysing..." for 4 min and reasonably
+  // concludes the app is broken. Subscribe to the QVAC model progress events
+  // and reflect them in the status line.
+  const unsubs = []
+  function subscribeProgress (subscribeFn, label) {
+    if (typeof subscribeFn !== 'function') return
+    try {
+      const off = subscribeFn((ev) => {
+        if (!busy) return
+        const pct = Number(ev?.p ?? ev?.percentage ?? ev?.percent ?? 0)
+        if (pct > 0 && pct <= 100) {
+          status.hidden = false
+          status.textContent = `Loading ${label} model... ${Math.round(pct)}%`
+        }
+      })
+      if (typeof off === 'function') unsubs.push(off)
+    } catch { /* noop */ }
+  }
+  function subscribeLoading (subscribeFn, label) {
+    if (typeof subscribeFn !== 'function') return
+    try {
+      const off = subscribeFn(() => {
+        if (!busy) return
+        status.hidden = false
+        status.textContent = `Loading ${label} model...`
+      })
+      if (typeof off === 'function') unsubs.push(off)
+    } catch { /* noop */ }
+  }
+  if (curva.vlm && curva.vlm.onProgress) subscribeProgress(curva.vlm.onProgress, 'vision')
+  if (curva.vlm && curva.vlm.onLoading)  subscribeLoading (curva.vlm.onLoading,  'vision')
+  if (curva.ocr && curva.ocr.onProgress) subscribeProgress(curva.ocr.onProgress, 'OCR')
+  if (curva.ocr && curva.ocr.onLoading)  subscribeLoading (curva.ocr.onLoading,  'OCR')
+
   updateButtons()
 
   function destroy () {
+    for (const off of unsubs) {
+      try { off() } catch { /* noop */ }
+    }
     container.textContent = ''
   }
 

@@ -675,7 +675,7 @@ export function mountChat({ container, curva, tier = 'writer' } = {}) {
     }
   })
 
-  form.addEventListener('submit', (e) => {
+  form.addEventListener('submit', async (e) => {
     e.preventDefault()
     const text = input.value.slice(0, MAX_CHARS).trim()
     if (text.length === 0) return
@@ -683,18 +683,44 @@ export function mountChat({ container, curva, tier = 'writer' } = {}) {
     charCount.textContent = '0 / ' + MAX_CHARS
     charCount.classList.remove('curva-chat__charcount--over')
     // matchTimeMs is 0 here; VideoPlayer emits its own; the chat send just
-    // records what the sender's local video was at. Renderer app.js can wire
-    // in a real match_time_ms if it wants to (Phase 2 polish).
-    // Phase 3.5: DO NOT tag the message with userLang. userLang is what the
-    // reader wants translations rendered IN, not what the sender is typing.
-    // Passing it as source_lang made every message the user typed after
-    // clicking "READ AS: IT" get labelled `source_lang: 'it'` — Bergamot
-    // then tried IT->x on plain English text and produced garbage
-    // ("what's your name" -> "hello" and similar). Omitting the field
-    // means peers fall back to the 'en' default, which matches the
-    // reality that most demo chat is typed in English. A future write-in
-    // language picker can populate source_lang explicitly.
-    curva.sendChat(text, 0).catch((err) => {
+    // records what the sender's local video was at.
+    //
+    // Auto source-lang detection via QVAC langdetect-text (F6 hookup).
+    // Reasoning: Bergamot NMT only ships direct pairs anchored at English
+    // (en <-> {it,id,es,fr,de,pt}). Direct id<->it needs the pivot
+    // (id -> en -> it) which only fires when `source_lang` is set correctly
+    // on the message. Without detection, every message defaults to
+    // source_lang='en' and Bergamot translates Indonesian text as if it
+    // were English, producing garbage.
+    //
+    // Also try the router first (which surfaces `raw` on BELOW_FLOOR); if the
+    // router returned null but its `raw` classification is one we support,
+    // take the raw hit anyway. tinyld's confidence on short chat text is
+    // frequently 0.3-0.5 even when the language is obvious ("Ciao a tutti"
+    // scores 0.4 for it), so blocking on the 0.6 floor drops good signal.
+    //
+    // Fallbacks:
+    //   - text shorter than 4 chars -> too little signal, skip detection
+    //   - detection throws or times out -> omit source_lang (defaults 'en')
+    //   - detection returns nothing supported -> omit source_lang
+    let detectedLang = null
+    if (text.length >= 4 && curva.langDetect && typeof curva.langDetect.detect === 'function') {
+      try {
+        const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 1200))
+        const detected = await Promise.race([curva.langDetect.detect(text), timeoutPromise])
+        // Router shape: `{ lang, confidence }` (`lang` is null on BELOW_FLOOR
+        // / UNSUPPORTED_LOCALE, but `raw` carries the classified code we can
+        // still use for the demo trio).
+        const primary = typeof detected?.lang === 'string' ? detected.lang : null
+        const fallback = typeof detected?.raw === 'string' ? detected.raw : null
+        const candidate = primary || fallback
+        if (typeof candidate === 'string' && candidate.length >= 2) {
+          const twoLetter = candidate.slice(0, 2).toLowerCase()
+          if (LANG_LABELS[twoLetter]) detectedLang = twoLetter
+        }
+      } catch { /* detection is best-effort; fall back to unset source_lang */ }
+    }
+    curva.sendChat(text, 0, detectedLang || undefined).catch((err) => {
       console.warn('[curva] sendChat failed:', err?.message)
     })
   })
@@ -758,10 +784,17 @@ export function mountChat({ container, curva, tier = 'writer' } = {}) {
       const label = document.createElement('span')
       label.className = 'curva-chat__translation-label-inline'
       const from = LANG_LABELS[entry.sourceLang]?.name || entry.sourceLang
+      const to = LANG_LABELS[userLang]?.name || userLang || ''
       const engineLabel = entry.engine === 'qwen3'
         ? 'Qwen3 0.6B'
         : (entry.engine === 'bergamot' ? 'Bergamot NMT' : 'QVAC')
-      label.textContent = 'translated from ' + from + ' (on-device, ' + engineLabel + ')'
+      // Format: "translated to Italian (from English, on-device, Bergamot NMT)"
+      // User needs to see the TARGET first (matches the READ AS chip they picked)
+      // and the SOURCE second. Fixes the confusing "translated from English"
+      // wording that hid the actual target language.
+      label.textContent = to
+        ? 'translated to ' + to + ' (from ' + from + ', on-device, ' + engineLabel + ')'
+        : 'translated from ' + from + ' (on-device, ' + engineLabel + ')'
       const body = document.createElement('div')
       body.className = 'curva-chat__translation-text'
       body.textContent = entry.translatedText // textContent: XSS-safe
