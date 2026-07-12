@@ -23,7 +23,7 @@ function Divider() {
 const QA = [
   {
     q: 'Q1. Which Tether platform does your project use, and how?',
-    a: 'Curva ships all three pillars live in one three-minute demo, with Pears as the primary track. Pears layer: nine building blocks exercised — Hyperswarm for peer discovery on a sha256 match-room topic with relayThrough NAT fallback, Corestore managing per-room namespaces, Autobase Pattern B multi-writer with signed ed25519 invitations for playhead and chat, pure reducers with deterministic replay tests, Hyperbee views for chat/tip-log/room-state/writer-roster/reactions, per-peer Hyperdrives with findingPeers for clip sharing, 128x72 Hyperblobs thumbnails, hypercore-crypto for topic derivation and writer invitations, pear-runtime-updater for OTA toast and an in-process seeder daemon on drive discovery keys. WDK layer: two working paths — EIP-3009 TransferWithAuthorization signed EOA-side and settled through a backend facilitator (primary, 2-6s to receipt), plus ERC-4337 UserOperation via account.transfer() through Candide bundler + paymaster with onChainIdentifier: "curva" attribution appended per WDK docs. QVAC layer: native @qvac/sdk@0.14.0 with @qvac/translation-nmtcpp addon, modelConfig.pivotModel chained pivot (Italian into Bahasa Indonesia goes IT-EN-ID in one SDK call), 12 EN-hub language pairs staged, SHA-256 model integrity verified on device, zero network calls during translation.',
+    a: 'Curva ships all three pillars live in one three-minute demo, with Pears as the primary track. Pears layer: nine building blocks exercised — Hyperswarm for peer discovery on a sha256 match-room topic with relayThrough NAT fallback, Corestore managing per-room namespaces, Autobase Pattern B multi-writer with signed ed25519 invitations for playhead and chat, pure reducers with deterministic replay tests, Hyperbee views for chat/tip-log/room-state/writer-roster/reactions, per-peer Hyperdrives with findingPeers for clip sharing, 128x72 Hyperblobs thumbnails, hypercore-crypto for topic derivation and writer invitations, pear-runtime-updater for OTA toast and an in-process seeder daemon on drive discovery keys. WDK layer: two working paths — EIP-3009 TransferWithAuthorization signed EOA-side and settled through a backend facilitator (primary, 2-6s to receipt), plus ERC-4337 UserOperation via account.transfer() through Candide bundler + paymaster with onChainIdentifier: "curva" attribution appended per WDK docs. Semifinal ship: a second EIP-3009 route reserves VIP room slugs on-chain via x402, with two Sepolia proofs (kings-lounge and torino-fc) settled through the same facilitator. QVAC layer: native @qvac/sdk@0.14.0 with 9 plugins registered on Bare (llamacpp-completion + llamacpp-embedding + nmtcpp-translation + whispercpp-transcription + parakeet-transcription + tts-ggml + ggml-vla + ggml-ocr + ggml-classification), modelConfig.pivotModel chained pivot (Italian into Bahasa Indonesia goes IT-EN-ID in one SDK call), 12 EN-hub language pairs staged, SHA-256 model integrity verified on device, tinyld heavy language auto-detect on inbound chat, and Chatterbox voice-clone Play Sample across 6 locales after enrollment. Zero network calls during translation.',
   },
   {
     q: 'Q2. One-line problem statement',
@@ -84,6 +84,54 @@ const RUBRIC = [
     evidence:
       'Tip beat as signature creative moment. Three pillars land in one visible sequence. Cryptographic anti-spoofing tested.',
     score: 'Strong',
+  },
+]
+
+const SEMIFINAL_SHIPS = [
+  {
+    pillar: 'WDK',
+    name: 'x402 VIP room slug reservation, end-to-end on-chain',
+    detail:
+      'Peer signs EIP-3009 for 5 USDT off-chain, backend facilitator settles on Sepolia, Prisma persists with @unique slug + @unique txHash. RoomBrowser shows a clickable View on Etherscan link on success. Fast-fails on already-reserved slug before issuing the 402 so no gas is wasted. Second x402 paid-resource route on the same helpers as premium translations.',
+    file: 'backend/src/routes/vipRoutes.ts + pear-app/bare/x402Client.js + pear-app/renderer/components/RoomBrowser.js',
+    proofs: [
+      {
+        label: 'kings-lounge tx',
+        url: 'https://sepolia.etherscan.io/tx/0x309447f5ec6e103a106e15bc313e4e9f9434e29512194df9adab639ccc96f19d',
+      },
+      {
+        label: 'torino-fc tx',
+        url: 'https://sepolia.etherscan.io/tx/0x18af4e318ea55b3796753e4bf729769f6cae27d7f693629d7c6709067a080cae',
+      },
+    ],
+  },
+  {
+    pillar: 'QVAC',
+    name: 'Voice-clone Play Sample across 6 Chatterbox locales',
+    detail:
+      'After enrollment, a chip row lets the user replay the cloned voice in EN, IT, ES, FR, DE, PT via curva.voiceClone.speak(text, locale) with WebAudio playback. Confirms the enrollment landed and previews the voice a peer hears in commentary. Allowlist enforced client-side and worker-side.',
+    file: 'pear-app/renderer/components/VoiceEnrollmentModal.js + pear-app/workers/main.js',
+  },
+  {
+    pillar: 'QVAC',
+    name: 'Heavy language auto-detect on inbound chat',
+    detail:
+      'tinyld heavy detector picks the source language per message before Bergamot fires. Removes the manual locale pick, keeps the pivot chain honest for it -> id via en. Zero network calls.',
+    file: 'pear-app/bare/translate.js + pear-app/bare/llmTranslate.js',
+  },
+  {
+    pillar: 'QVAC',
+    name: '9 QVAC plugins registered on Bare',
+    detail:
+      'llamacpp-completion, llamacpp-embedding, nmtcpp-translation, whispercpp-transcription, parakeet-transcription, tts-ggml, ggml-vla, ggml-ocr, ggml-classification. All registered at Bare boot against @qvac/sdk 0.14.0. HOME env isolation gives each peer its own .qvac model cache.',
+    file: 'pear-app/bare/backend.js + backend/src/lib/qvac/registry.ts',
+  },
+  {
+    pillar: 'Pears',
+    name: 'Auto-fund on demo boot',
+    detail:
+      'demo-boot-peers.sh greps each peer wallet address from the boot log and fires scripts/fund-peers.ts to move 100 USDT per peer from the sponsor. Removes the "peer wallet has 0 USDT" failure mode when running the semifinal script. SKIP_AUTOFUND=1 escape hatch.',
+    file: 'pear-app/scripts/demo-boot-peers.sh + pear-app/scripts/fund-peers.ts',
   },
 ]
 
@@ -236,6 +284,76 @@ function SubmissionPage() {
       </div>
 
       <div className="px-6 md:px-12 py-16 max-w-[1100px] mx-auto">
+        {/* Semifinal update disclosure */}
+        <section aria-label="Semifinal update">
+          <AnimateComponent onScroll entry="fadeInUp">
+            <SectionLabel>New this cycle</SectionLabel>
+            <h2 className="font-display text-3xl font-bold text-[#f5f5f0] mb-4 curva-underline">
+              What we shipped for the semifinal.
+            </h2>
+            <p className="text-[#8a8a8a] text-base max-w-2xl leading-relaxed mb-4">
+              One demo, three pillars, zero servers in the middle.{' '}
+              <span className="text-[#f5f5f0]">Pears</span> carries the room
+              over Hyperswarm + Autobase.{' '}
+              <span className="text-[#f5f5f0]">WDK</span> lands twice on the
+              same EIP-3009 wire — one route settles tips, the other reserves
+              VIP room slugs on-chain.{' '}
+              <span className="text-[#f5f5f0]">QVAC</span> keeps every AI touch
+              on the peer's own laptop across 9 registered plugins.
+            </p>
+            <p className="text-[#8a8a8a] text-base max-w-2xl leading-relaxed mb-8">
+              The Round of 32 submission stayed intact. Every ship below is
+              additive, verified live during the July 12 dry-run, and pinned to
+              the same commit as the DoraHacks form.
+            </p>
+          </AnimateComponent>
+
+          <div className="space-y-4">
+            {SEMIFINAL_SHIPS.map((ship, i) => (
+              <AnimateComponent
+                key={ship.name}
+                onScroll
+                entry="fadeInUp"
+                delay={i * 60}
+              >
+                <div className="p-5 rounded-lg bg-[#141414] border border-[rgba(255,255,255,0.07)]">
+                  <div className="flex items-start justify-between gap-4 mb-2">
+                    <p className="text-[#f5f5f0] font-semibold text-sm">
+                      {ship.name}
+                    </p>
+                    <span className="flex-shrink-0 text-[10px] font-medium px-2 py-0.5 rounded-full bg-[rgba(200,16,46,0.15)] border border-[rgba(200,16,46,0.3)] text-[#c8102e]">
+                      {ship.pillar}
+                    </span>
+                  </div>
+                  <p className="text-xs text-[#8a8a8a] leading-relaxed mb-3">
+                    {ship.detail}
+                  </p>
+                  <p className="font-mono-code text-[9px] text-[rgba(212,175,55,0.6)] leading-snug mb-2">
+                    {ship.file}
+                  </p>
+                  {ship.proofs && (
+                    <div className="flex flex-wrap gap-2 mt-3">
+                      {ship.proofs.map((p) => (
+                        <a
+                          key={p.url}
+                          href={p.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1.5 font-mono-code text-[10px] px-2 py-0.5 rounded bg-[rgba(255,255,255,0.05)] border border-[rgba(255,255,255,0.1)] text-[rgba(212,175,55,0.85)] hover:text-[rgba(212,175,55,1)] hover:border-[rgba(212,175,55,0.3)] transition-colors curva-focus"
+                        >
+                          {p.label}
+                        </a>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </AnimateComponent>
+            ))}
+          </div>
+        </section>
+
+        <Divider />
+
         {/* Pears building-blocks checklist */}
         <section aria-label="Pears track checklist">
           <AnimateComponent onScroll entry="fadeInUp">

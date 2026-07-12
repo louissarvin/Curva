@@ -41,10 +41,11 @@ const PILLARS: Array<PillarCard> = [
     pillar: 'WDK',
     product: 'Wallet Development Kit',
     summary:
-      'Gasless USDT tipping with two working paths: EIP-3009 authorised transfer (2-6s to Sepolia receipt) and ERC-4337 UserOperation via Candide bundler with onChainIdentifier: "curva" attribution. Seed encrypted at rest via wdk-secret-manager.',
+      'Gasless USDT tipping with two working paths: EIP-3009 authorised transfer (2-6s to Sepolia receipt) and ERC-4337 UserOperation via Candide bundler with onChainIdentifier: "curva" attribution. Semifinal ship: a second EIP-3009 route reserves VIP room slugs on-chain via x402, with two Sepolia proofs settled through the same facilitator. Seed encrypted at rest via wdk-secret-manager.',
     evidence: [
       'pear-app/bare/wallet/eip3009.js — EIP-3009 primary path',
       'pear-app/bare/wallet/worklet.js:125 — onChainIdentifier attribution',
+      'backend/src/routes/vipRoutes.ts — x402 VIP slug reservation (semifinal)',
     ],
     docsUrl: 'https://wdk.tether.io',
     docsLabel: 'wdk.tether.io',
@@ -54,10 +55,11 @@ const PILLARS: Array<PillarCard> = [
     pillar: 'QVAC',
     product: 'QVAC Local AI',
     summary:
-      '15 on-device capabilities: Bergamot NMT, Qwen3 LLM (shared handle), Whisper + Silero VAD STT, Supertonic TTS streaming, Chatterbox voice cloning (EN/IT), SmolVLM2 VLM, MobileNetV3 pre-filter, OCR_LATIN, Parakeet CTC fallback STT, EmbeddingGemma RAG, MCP tool calling, delegated inference, sdk.cancel barge-in, @qvac/diagnostics. Three orchestration flows chain 5-6 caps per gesture.',
+      '15 on-device capabilities: Bergamot NMT, Qwen3 LLM (shared handle), Whisper + Silero VAD STT, Supertonic TTS streaming, Chatterbox voice cloning (EN/IT/ES/FR/DE/PT), SmolVLM2 VLM, MobileNetV3 pre-filter, OCR_LATIN, Parakeet CTC fallback STT, EmbeddingGemma RAG, MCP tool calling, delegated inference, sdk.cancel barge-in, @qvac/diagnostics. Semifinal ship: 9 QVAC plugins registered on Bare against @qvac/sdk 0.14.0, tinyld heavy language auto-detect on inbound chat, and voice-clone Play Sample across 6 Chatterbox locales after enrollment. Three orchestration flows chain 5-6 caps per gesture.',
     evidence: [
       'pear-app/bare/translate.js:208-229 — pivotModel wiring',
       'backend/src/routes/qvacRoutes.ts — SHA-256 catalog endpoint',
+      'pear-app/bare/backend.js — 9 QVAC plugins registered (semifinal)',
     ],
     docsUrl: 'https://qvac.tether.io',
     docsLabel: 'qvac.tether.io',
@@ -472,9 +474,19 @@ function Pillars() {
     >
       <AnimateComponent onScroll entry="fadeInUp">
         <SectionLabel>Architecture</SectionLabel>
-        <h2 className="font-display text-3xl md:text-4xl font-bold text-[#f5f5f0] mb-12 curva-underline">
+        <h2 className="font-display text-3xl md:text-4xl font-bold text-[#f5f5f0] mb-4 curva-underline">
           Three pillars, one demo.
         </h2>
+        <p className="text-[#8a8a8a] text-base max-w-2xl leading-relaxed mb-12">
+          One demo, three pillars, zero servers in the middle.{' '}
+          <span className="text-[#f5f5f0]">Pears</span> carries the room over
+          Hyperswarm + Autobase.{' '}
+          <span className="text-[#f5f5f0]">WDK</span> lands twice on the same
+          EIP-3009 wire — one route settles tips, the other reserves VIP room
+          slugs on-chain.{' '}
+          <span className="text-[#f5f5f0]">QVAC</span> keeps every AI touch on
+          the peer's own laptop across 9 registered plugins.
+        </p>
       </AnimateComponent>
 
       <div className="grid md:grid-cols-3 gap-6">

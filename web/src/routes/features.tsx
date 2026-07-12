@@ -192,6 +192,16 @@ const WDK_FEATURES = [
     body: 'Host signs system:tip-ack over the tx hash using EIP-191. test/wave8b.test.js proves a promoted writer cannot forge this ack.',
     file: 'test/wave8b.test.js',
   },
+  {
+    heading: 'x402 VIP room slug reservation (semifinal)',
+    body: 'Peer signs EIP-3009 for 5 USDT off-chain, backend facilitator settles on Sepolia. Prisma persists with @unique slug + @unique txHash. Fast-fails on already-reserved slug before issuing the 402 so no gas is wasted. Two on-chain proofs: kings-lounge and torino-fc. Second x402 paid-resource route on the same helpers as premium translations.',
+    file: 'backend/src/routes/vipRoutes.ts + pear-app/bare/x402Client.js',
+  },
+  {
+    heading: 'Etherscan-linked VIP UI',
+    body: 'RoomBrowser renders a clickable View on Etherscan anchor on successful reservation. rel="noopener noreferrer" plus target="_blank" is the XSS defense on user-visible external links.',
+    file: 'pear-app/renderer/components/RoomBrowser.js',
+  },
 ]
 
 function WdkSection() {
@@ -314,6 +324,21 @@ const QVAC_FEATURES = [
     heading: 'On-device LLM room commentator',
     body: 'Host-only Qwen3 0.6B (Q4) via @qvac/sdk completion({ stream: true }) writes color commentary into chat as a system:commentary pill. Triggers on goal-clusters and 60s ticks; rate-limited to 1 per 30s; three tone presets. Ships QVAC primitive #2 alongside NMT translation.',
     file: 'pear-app/bare/commentator.js',
+  },
+  {
+    heading: 'Heavy language auto-detect (semifinal)',
+    body: 'tinyld heavy detector picks the source language per inbound chat message before Bergamot fires. Keeps the pivot chain honest for it -> id via en. No manual locale pick, no network call.',
+    file: 'pear-app/bare/translate.js + pear-app/bare/llmTranslate.js',
+  },
+  {
+    heading: 'Voice-clone Play Sample (semifinal)',
+    body: 'After voice enrollment saves, a chip row lets the user replay the cloned voice across 6 Chatterbox locales (EN, IT, ES, FR, DE, PT) via curva.voiceClone.speak() with WebAudio playback. Confirms the enrollment landed and previews the voice a peer hears in commentary. Allowlist enforced client-side and worker-side.',
+    file: 'pear-app/renderer/components/VoiceEnrollmentModal.js + pear-app/workers/main.js',
+  },
+  {
+    heading: '9 QVAC plugins registered on Bare (semifinal)',
+    body: 'llamacpp-completion, llamacpp-embedding, nmtcpp-translation, whispercpp-transcription, parakeet-transcription, tts-ggml, ggml-vla, ggml-ocr, ggml-classification. All registered at Bare boot against @qvac/sdk 0.14.0. HOME env isolation gives each peer its own .qvac model cache.',
+    file: 'pear-app/bare/backend.js + backend/src/lib/qvac/registry.ts',
   },
 ]
 
