@@ -593,19 +593,46 @@ That returns the app name (`curva`), the release length, and the Hypercore + Hyp
 
 ### Two independent peers on one laptop (host + viewer demo)
 
-For the "host creates room, viewer joins from the directory" story you see in the pitch video. Two shell windows, side by side. Each peer runs a separate Bare worker, has its own wallet, its own identity, and discovers the other over Hyperswarm.
+For the "host creates room, viewer joins from the directory" story you see in the pitch video. Two peers, each with a separate Bare worker, its own wallet, its own identity, discovering each other over Hyperswarm.
 
-Prerequisites: backend running on `http://localhost:3700` with `ENABLE_SEEDER=true`, `MODEL_MIRROR_ENABLED=true`, and `SEEDER_MAX_ROOMS=50` (or higher) in `backend/.env`, and clean storage dirs.
+**Prerequisites**: backend running on `http://localhost:3700` (see [Backend Companion](#backend-companion) above) with `ENABLE_SEEDER=true`, `MODEL_MIRROR_ENABLED=true`, `SEEDER_MAX_ROOMS=50`, `ENABLE_VIP_RESERVATIONS=true`, `FACILITATOR_ENABLED=true`, `RELAY_SPONSOR_ENABLED=true`, `CURVA_X402_ENABLED=true` in `backend/.env`. Sponsor treasury must have USDT + ETH — see `bun run treasury:setup`.
+
+#### Quick start (one command, semifinal-verified)
+
+```bash
+# from repo root, with the backend already running on :3700
+./pear-app/scripts/demo-boot-peers.sh
+```
+
+The script at [`pear-app/scripts/demo-boot-peers.sh`](https://github.com/louissarvin/Curva/blob/main/pear-app/scripts/demo-boot-peers.sh):
+
+1. Kills any prior peer processes and Electron singleton locks
+2. Preps `HOME=/tmp/curva-peer-{a,b}-fresh` per peer (root cause of cross-peer QVAC file locks — see [ADR-006 addendum]())
+3. Symlinks `~/.qvac/models/` into each per-peer HOME so we don't re-download the 500 MB SmolVLM2 pair per peer
+4. Sets every F1-F22 feature flag ON, wallet passcode per peer, per-peer Prometheus port
+5. Boots both peers via `electron-forge`, waits for `ready { ... }` in each worker log
+6. **Auto-funds** all four peer addresses (2 owner EOAs + 2 smart accounts) with 100 USDT via `scripts/fund-peers.ts` — required because `bare/wallet/worklet.js:695-702` intentionally generates a fresh salt + BIP-39 seed on every boot, so addresses rotate and need re-funding for tips + VIP reservations to settle on-chain
+7. Prints boot summary with both peer handles and addresses
+
+Skip the auto-fund step with `SKIP_AUTOFUND=1 ./pear-app/scripts/demo-boot-peers.sh` when the sponsor treasury is drained or you want to demo the `ERC20InsufficientBalance` error path on purpose.
+
+#### Manual fallback (three shells)
+
+Use this path if the script fails or you want per-shell log tailing.
 
 **Same-laptop demo note.** Two Hyperswarm processes on one machine usually cannot hole-punch each other over the public DHT, so the peers never form a direct connection and chat + writer promotion stall. `CURVA_FORCE_RELAY=1` routes both peers through the backend seeder subprocess (`GET /relay/info` exposes its Noise pubkey), which relays every hop over Hyperswarm's built-in `relayThrough`. The seeder must be a real Hyperswarm peer — that requires `bun add hyperswarm corestore hypercore-crypto b4a` in `backend/` and spawning the seeder subprocess via `node` (both already handled by the backend when the deps are installed).
 
-Both storage paths below use the `-fresh` suffix so the wallets survive a restart within the same demo session (the same smart addresses stay funded). Delete the folder if you want a clean slate; new wallets get generated and you re-run `bun run fund:peers` (see below).
+Storage paths use the `-fresh` suffix for isolation. Wallet SEED regenerates every boot per `bare/wallet/worklet.js:695-702` (intentional demo choice trading persistence for zero configuration). Re-fund after every reboot via `bun run fund:peers -- <peerA_owner> <peerA_smart> <peerB_owner> <peerB_smart> --amount 100` — the demo boot script above automates this.
 
-**Shell 1 — Peer A (host).** `--no-auto-open` keeps the app on the lobby so the host can pick a slug and click Create. Every F1-F22 flag we shipped this semifinal cycle is set explicit so the review boot lights up the full stack:
+**Shell 1 — Peer A (host).** `--no-auto-open` keeps the app on the lobby so the host can pick a slug and click Create. Every F1-F22 flag we shipped this semifinal cycle is set explicit so the review boot lights up the full stack. `HOME=/tmp/curva-peer-a-fresh` is mandatory (cross-peer QVAC file lock isolation, see [ADR-006 addendum]()):
 
 ```bash
+mkdir -p /tmp/curva-peer-a-fresh/.qvac && \
+ln -sfn "$HOME/.qvac/models" /tmp/curva-peer-a-fresh/.qvac/models && \
 cd pear-app && \
+HOME=/tmp/curva-peer-a-fresh \
 DEV_WALLET_PASSCODE=curva-peer-a-pw \
+CURVA_X402_ENABLED=true \
 CURVA_DEMO_MODE=true \
 CURVA_FORCE_RELAY=1 \
 CURVA_KEET_IDENTITY_ENABLED=true \
@@ -644,8 +671,12 @@ npx electron-forge start -- --no-updates \
 **Shell 2 — Peer B (viewer).** Same launch, same lobby-first behaviour. Same flags — the whole point of the max-out review boot is that both peers see identical capability surface so any feature the reviewer touches works on either side:
 
 ```bash
+mkdir -p /tmp/curva-peer-b-fresh/.qvac && \
+ln -sfn "$HOME/.qvac/models" /tmp/curva-peer-b-fresh/.qvac/models && \
 cd pear-app && \
+HOME=/tmp/curva-peer-b-fresh \
 DEV_WALLET_PASSCODE=curva-peer-b-pw \
+CURVA_X402_ENABLED=true \
 CURVA_DEMO_MODE=true \
 CURVA_FORCE_RELAY=1 \
 CURVA_KEET_IDENTITY_ENABLED=true \
@@ -682,6 +713,18 @@ npx electron-forge start -- --no-updates \
 ```
 
 **Note on `CURVA_PROMETHEUS_PORT`:** each peer needs its own port because both bind to `127.0.0.1`. Peer A on `:4343`, Peer B on `:4344`. Curl either to see the loopback metrics stream (`hypercore_*`, `hyperswarm_*`, `hyperdht_*` gauges plus every trace counter).
+
+**Shell 3 — fund the peers (required for tips + VIP reservations).** The wallet seed regenerates on every boot per `bare/wallet/worklet.js:695-702`, so freshly-booted peers have zero USDT. Wait for both peers to log `wallet ready { smartAddress: '0x...', ownerAddress: '0x...' }` in their worker output, then:
+
+```bash
+cd backend && \
+bun run scripts/fund-peers.ts \
+  <peerA_owner> <peerA_smart> \
+  <peerB_owner> <peerB_smart> \
+  --amount 100
+```
+
+Each address gets a real Sepolia transaction with an Etherscan link. The `demo-boot-peers.sh` script above does this automatically after both peers report ready.
 
 **Feature-flag legend (session-shipped):**
 
