@@ -89,6 +89,19 @@ Expected output includes `name: curva`, `release: 23135`, and the Hypercore + Hy
 
 **How to actually run the two peers for the demo:** the Bare P2P worker (Hyperswarm, Autobase, Hyperdrive, blind-peering, wallet, QVAC) is fully Pear-native and lives at `pear-app/workers/main.js`. The Electron shell that renders the UI is still on the npm `electron` binary, which is what `electron-forge start` boots. Port to `pear-electron` for one-liner `pear run` boot is a post-hackathon task. See the "Two independent peers on one laptop" section below for the working demo commands.
 
+**One-command demo boot (added semifinal):**
+
+```bash
+# Backend (keep running)
+cd backend && ENABLE_VIP_RESERVATIONS=true FACILITATOR_ENABLED=true \
+  RELAY_SPONSOR_ENABLED=true CURVA_X402_ENABLED=true bun run dev
+
+# Both peers (from repo root)
+./pear-app/scripts/demo-boot-peers.sh
+```
+
+The script at [`pear-app/scripts/demo-boot-peers.sh`](https://github.com/louissarvin/Curva/blob/665c765/pear-app/scripts/demo-boot-peers.sh) kills any prior peers, preps `HOME=/tmp/curva-peer-{a,b}-fresh` per peer (so QVAC file locks stay per-peer), symlinks the shared `~/.qvac/models/` cache, sets every F1-F22 feature flag ON, boots both peers, and waits for `ready { ... }` in each worker log. Root cause of why HOME isolation is required is documented in the script header and in [ADR-006 addendum](docs/adr/).
+
 Judges can also verify the WDK + Pears integration entirely from the Companion backend, no client needed:
 
 ```bash
@@ -178,6 +191,29 @@ Blind peer key: nm5j8618j8jhbc5rrjtemkixqjes4ngzc36nc9pf1jop8u4kt1fy
 ```
 
 Both the chat Autobase and the playhead Autobase register with this blind peer at boot. When the host laptop closes, rooms keep replicating.
+
+### Semifinal live-boot verified (2026-07-12)
+
+Every path below was smoke-tested during the July 12 semifinal debug session, cold-booted from `./pear-app/scripts/demo-boot-peers.sh`, and every worker log is clean of `WORKER_PLUGINS_NOT_REGISTERED`, `MODEL_ALREADY_REGISTERED`, `File descriptor could not be locked`, and `Detector model required` errors.
+
+| Path | Verified behavior | Fix commit |
+|------|-------------------|------------|
+| **Peer publish + join over Hyperswarm** | Peer A publishes to STADIUM lobby, Peer B discovers within seconds, both worker logs show `writer promoted (Pattern B)` | pre-shipped |
+| **Multi-writer chat sync (Autobase Pattern B)** | Message from Peer A lands on Peer B in <1 s, both indexed writers, apply reducer stays pure across rebases | pre-shipped |
+| **On-device translation (Bergamot NMT)** | Direct pairs `en↔{it,id,es,fr,de,pt}` render inline; label reads `translated to <TARGET> (from <SOURCE>, on-device, Bergamot NMT)` | [`Chat.js`](https://github.com/louissarvin/Curva/blob/665c765/pear-app/renderer/components/Chat.js), [`workers/main.js`](https://github.com/louissarvin/Curva/blob/665c765/pear-app/workers/main.js) |
+| **Language auto-detection via `@qvac/langdetect-text`** | Renderer runs tinyld/heavy classification on send (1200 ms race), ships `source_lang` so Bergamot's pivot fires correctly | [`Chat.js`](https://github.com/louissarvin/Curva/blob/665c765/pear-app/renderer/components/Chat.js), [`langDetectRouter.js`](https://github.com/louissarvin/Curva/blob/665c765/pear-app/bare/langDetectRouter.js) |
+| **Bergamot pivot (it↔id via English)** | Italian message `Ciao a tutti dal Torino` → Indonesian `Halo semua orang dari Turin`, and reverse. Existing `translatePivot()` in [`bare/translate.js`](https://github.com/louissarvin/Curva/blob/665c765/pear-app/bare/translate.js) lights up once `source_lang` is set | [`Chat.js`](https://github.com/louissarvin/Curva/blob/665c765/pear-app/renderer/components/Chat.js), [`langDetectRouter.js`](https://github.com/louissarvin/Curva/blob/665c765/pear-app/bare/langDetectRouter.js) |
+| **VLM `Describe frame` (SmolVLM2 500M)** | Returns real caption e.g. "A group of football players, wearing blue and white jerseys, are celebrating a goal with a golden trophy in their hands." Load progress renders as `Loading vision model... N%` during the 500 MB first-download | [`vlmCaption.js`](https://github.com/louissarvin/Curva/blob/665c765/pear-app/bare/vlmCaption.js), [`FrameAnalyzePanel.js`](https://github.com/louissarvin/Curva/blob/665c765/pear-app/renderer/components/FrameAnalyzePanel.js), [`preload.js`](https://github.com/louissarvin/Curva/blob/665c765/pear-app/electron/preload.js) |
+| **OCR `Read text` (OCR_LATIN + OCR_CRAFT detector)** | Loads the correct GGUF detector pair, returns OCR text blocks. Root cause of the previous failure was `OCR_DETECTOR_DB_MOBILENET_V3_LARGE` being ONNX for the doctr addon while the recognizer runs on `ggml-ocr` and needs a GGUF detector | [`ocr.js`](https://github.com/louissarvin/Curva/blob/665c765/pear-app/bare/ocr.js) |
+| **Frame caption → chat → auto-translation (VLM × Autobase × Bergamot)** | Peer A pauses the video and clicks Describe. Caption is posted as a `system:vlm` chat message. Every viewer whose READ AS is set to a non-source language sees the caption translated to their language inline. F1-shaped cross-cap flow, no code changes needed beyond the fixes above | fixes cascade |
+| **Voice-clone enrollment save (Hyperblob)** | 6-second reference recorded, saved to `curva/voice-clone/host` via [`bare/voiceClone.js`](https://github.com/louissarvin/Curva/blob/665c765/pear-app/bare/voiceClone.js). Ready for use by F1 goal pipeline, F5 commentator, F3 match recap | pre-shipped |
+| **Semantic search (EmbeddingGemma 300M)** | Peer-local ingest + query on a per-room RAG workspace via [`bare/roomSearch.js`](https://github.com/louissarvin/Curva/blob/665c765/pear-app/bare/roomSearch.js). Reuse-on-collision handling ensures rag and roomSearch share a single embedding model in the worker | [`rag.js`](https://github.com/louissarvin/Curva/blob/665c765/pear-app/bare/rag.js), [`roomSearch.js`](https://github.com/louissarvin/Curva/blob/665c765/pear-app/bare/roomSearch.js) |
+| **QVAC 9-plugin registration on Bare** | `llamacpp-completion`, `llamacpp-embedding`, `nmtcpp-translation`, `whispercpp-transcription`, `parakeet-transcription`, `tts-ggml`, `ggml-vla`, `ggml-ocr`, `ggml-classification`. Worker log shows `[sdkPlugins] registered 9 plugins { failedCount: 0 }` on every cold boot | [`bare/sdkPlugins.js`](https://github.com/louissarvin/Curva/blob/665c765/pear-app/bare/sdkPlugins.js), [`workers/main.js`](https://github.com/louissarvin/Curva/blob/665c765/pear-app/workers/main.js) |
+
+Fix-commit summary:
+
+- **[`5caa5a1`](https://github.com/louissarvin/Curva/commit/5caa5a1)** — `fix(bare)`: QVAC SDK bare integration bugs and cross-peer file locks. 7 root causes, 10 files touched. Documents the rejected-`rpcInstance`-cache root cause, the string-vs-descriptor rule for `sdk.loadModel({modelSrc})`, the OCR detector family mismatch, the `~/.qvac/` HOME-isolation requirement, and the `MODEL_ALREADY_REGISTERED` reuse pattern.
+- **[`665c765`](https://github.com/louissarvin/Curva/commit/665c765)** — `feat(renderer)`: translation target-first label, langdetect autodetect, VLM/OCR load progress. 3 files touched. Every edit is additive; class names and IPC contracts unchanged.
 
 ---
 
