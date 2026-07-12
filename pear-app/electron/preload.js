@@ -121,9 +121,15 @@ const LONG_TIMEOUT_CMDS = new Set([
   'vlm:caption',    // SmolVLM2 first-load ~4 min then <2 s per subsequent call
   'ocr:read',       // OCR_LATIN + OCR_CRAFT first-load ~30 s, then <500 ms
   'voice:enroll',   // Chatterbox voice-clone reference save + Hyperblob write
+  'voice-clone:speak', // Chatterbox synthesise (~5 s per turn, plus ~15s first-load)
   'model:load',     // any explicit model load
   'match:recap',    // 7-cap orchestration budget
-  'diagnostics:report' // gathers Prometheus + registry snapshots
+  'diagnostics:report', // gathers Prometheus + registry snapshots
+  // F4 x402 flows: 402 challenge -> EIP-3009 sign -> retry POST ->
+  // facilitator settle on Sepolia. Under normal conditions <10 s but the
+  // Sepolia RPC round-trip can spike to 20-40 s on public endpoints.
+  'vip:reserve',
+  'x402:fetch'
 ])
 const LONG_TIMEOUT_MS = 5 * 60_000  // 5 min
 

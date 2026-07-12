@@ -390,6 +390,17 @@ async function reserveVipSlug(opts = {}) {
       validAfter: challenge.validAfter,
       validBefore: challenge.validBefore
     })
+    // Semifinal debug (2026-07-12): peer worker was signing with an address
+    // different from what wallet:ready reported, causing settle to revert
+    // ERC20InsufficientBalance on the mystery address. Log the sig.from to
+    // pinpoint whether the mismatch is at signEip3009 or downstream in the
+    // payment header build.
+    console.log('[x402Client] signEip3009 returned', {
+      from: sig?.from,
+      v: sig?.v,
+      hasR: typeof sig?.r === 'string',
+      hasS: typeof sig?.s === 'string'
+    })
   } catch (err) {
     return { ok: false, code: 'WALLET_SIGN_FAILED', message: err && err.message ? err.message : String(err) }
   }

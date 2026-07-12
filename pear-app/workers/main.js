@@ -2753,11 +2753,40 @@ function sanitizeTipBatchPayload(payload) {
 // Option B). Full worklet-process isolation is v2 hardening. The seed
 // never crosses the IPC pipe: only smart/owner addresses and signature
 // tuples do. See bare/wallet/worklet.js for the deeper discipline.
+let walletInitInflight = null
+
+// Public entry point. Concurrency guard (2026-07-12 semifinal): the renderer
+// fires curva.initWallet() from BOTH mountBrowser (lobby) and mountRoom (join
+// path). If both fire before walletReady flips true, they both slip past the
+// `walletReady && wallet` early-return and each calls createWalletAdapter()
+// which produces a FRESH salt + BIP-39 seed per bare/wallet/worklet.js:695-702.
+// Second call clobbers the module-level `wallet` variable with an adapter
+// whose owner EOA differs from the one wallet:ready reported and from the one
+// the boot script auto-funded. Every subsequent signEip3009() then signs from
+// the second address, which has 0 USDT, and the facilitator settle reverts
+// with ERC20InsufficientBalance.
 async function initWallet(payload) {
   if (walletReady && wallet) {
     emit('wallet:ready', walletInfoSnapshot())
     return
   }
+  if (walletInitInflight) {
+    // Second concurrent caller: await the first init, then broadcast ready
+    // to this caller as well so their downstream code (setWalletPasscode
+    // handler, mountBrowser, mountRoom) sees the same state.
+    try { await walletInitInflight } catch { /* first init failed; second caller sees walletReady=false and no emit */ }
+    if (walletReady && wallet) emit('wallet:ready', walletInfoSnapshot())
+    return
+  }
+  walletInitInflight = initWalletBody(payload)
+  try {
+    await walletInitInflight
+  } finally {
+    walletInitInflight = null
+  }
+}
+
+async function initWalletBody(payload) {
   const passcode = payload?.passcode || process.env.DEV_WALLET_PASSCODE
   if (!passcode) {
     // Task 1: signal the renderer to prompt the user instead of throwing.
@@ -4820,6 +4849,13 @@ async function dispatchCommand(msg) {
       // the settle path. Wallet is `room.wallet` per the pattern established
       // by 'x402:fetch' above.
       case 'vip:reserve': {
+        log('info', 'ipc vip:reserve', {
+          slug: payload?.slug,
+          x402FlagEnabled,
+          walletReady,
+          hasWallet: !!wallet,
+          hasSign: !!(wallet && typeof wallet.signEip3009 === 'function')
+        })
         if (!x402FlagEnabled) {
           emit('vip:error', { code: 'FEATURE_DISABLED', message: 'x402 feature disabled', requestId: id })
           emit('ack', { id, cmd, payload: { ok: false, code: 'FEATURE_DISABLED', requestId: id } })
@@ -4839,6 +4875,24 @@ async function dispatchCommand(msg) {
           return
         }
         const slug = String(payload?.slug || '').toLowerCase().slice(0, 32)
+        // Diagnostic: probe backend health before the x402 flow so we can
+        // tell a NETWORK_ERROR from a real x402 wire failure.
+        try {
+          const probeUrl = config.backendUrl + '/health'
+          const probe = await fetch(probeUrl)
+          log('info', 'vip:reserve backend probe', {
+            url: probeUrl,
+            status: probe.status,
+            ok: probe.ok
+          })
+        } catch (probeErr) {
+          log('warn', 'vip:reserve backend probe threw', {
+            url: config.backendUrl + '/health',
+            name: probeErr?.name,
+            code: probeErr?.code,
+            message: probeErr?.message
+          })
+        }
         try {
           const { reserveVipSlug } = require('../bare/x402Client.js')
           const res = await reserveVipSlug({
@@ -4846,30 +4900,59 @@ async function dispatchCommand(msg) {
             slug,
             wallet: walletHandle
           })
+          log('info', 'vip:reserve result', {
+            ok: res?.ok,
+            code: res?.code,
+            message: res?.message ? String(res.message).slice(0, 200) : undefined,
+            hasReservation: !!res?.reservation
+          })
+          // Wire-format contract (verified against preload.js:99):
+          //   preload's IPC dispatcher reads `msg.payload.requestId` and
+          //   resolves the pending writeMainAwait promise with `msg.payload`.
+          //   emit() wraps as {event, payload}, so requestId MUST be a
+          //   top-level field on the object passed to emit's second arg -
+          //   putting it inside a nested `payload` field breaks resolution.
+          //   `emit('ack', {id, cmd, payload: {...}})` is a no-op for
+          //   writeMainAwait because the outer payload is {id, cmd, payload}
+          //   and requestId lives one level deeper. That is why the whole
+          //   codebase resolves through domain-specific events like
+          //   `vlm:result` / `chat:versions`.
           if (res && res.ok) {
+            log('info', 'vip:reserve success', {
+              id,
+              txHash: res.reservation?.txHash,
+              slug: res.reservation?.slug
+            })
             emit('vip:reserved', {
+              ok: true,
+              reservation: res.reservation,
               slug: res.reservation?.slug || slug,
               txHash: res.reservation?.txHash || null,
               ownerAddress: res.reservation?.ownerAddress || null,
               requestId: id
             })
-            emit('ack', { id, cmd, payload: { ok: true, reservation: res.reservation, requestId: id } })
           } else {
+            log('info', 'vip:reserve failure', {
+              id,
+              code: res?.code,
+              message: res?.message ? String(res.message).slice(0, 200) : undefined
+            })
             emit('vip:error', {
+              ok: false,
               code: res?.code || 'VIP_RESERVE_FAILED',
               message: res?.message || 'reservation failed',
               extra: res?.extra,
               requestId: id
             })
-            emit('ack', { id, cmd, payload: { ok: false, code: res?.code, message: res?.message, requestId: id } })
           }
         } catch (err) {
+          log('warn', 'vip:reserve threw', { message: err?.message, code: err?.code })
           emit('vip:error', {
+            ok: false,
             code: err?.code || 'VIP_RESERVE_THREW',
             message: err?.message || String(err),
             requestId: id
           })
-          emit('ack', { id, cmd, payload: { ok: false, code: err?.code || 'VIP_RESERVE_THREW', requestId: id } })
         }
         return
       }

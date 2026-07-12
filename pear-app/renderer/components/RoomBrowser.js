@@ -309,7 +309,37 @@ export function mountRoomBrowser({ container, curva, onJoin } = {}) {
       if (res && res.ok && res.reservation) {
         const tx = res.reservation.txHash || res.reservation.paidTxHash || ''
         const url = tx ? ('https://sepolia.etherscan.io/tx/' + tx) : ''
-        vipStatus.textContent = 'Reserved. txHash: ' + (tx || '(pending)') + (url ? '  |  ' + url : '')
+        // Clear then rebuild the status line as real DOM so the Etherscan
+        // URL is a clickable anchor. textContent-only would put the URL
+        // inline as plain text and force the user to copy-paste.
+        vipStatus.textContent = ''
+        vipStatus.style.wordBreak = 'break-all'
+        const okLabel = document.createElement('span')
+        okLabel.textContent = 'Reserved. txHash: '
+        okLabel.style.cssText = 'color:#86efac;'
+        vipStatus.appendChild(okLabel)
+        if (tx) {
+          const hashEl = document.createElement('code')
+          hashEl.textContent = tx.slice(0, 10) + '...' + tx.slice(-8)
+          hashEl.title = tx  // full hash on hover
+          hashEl.style.cssText = 'color:#e5e7eb;background:rgba(255,255,255,0.06);padding:1px 4px;border-radius:3px;font-family:JetBrains Mono, ui-monospace, monospace;font-size:11px;'
+          vipStatus.appendChild(hashEl)
+          if (url) {
+            vipStatus.appendChild(document.createTextNode('  '))
+            const link = document.createElement('a')
+            link.href = url
+            link.textContent = 'View on Etherscan'
+            link.target = '_blank'
+            link.rel = 'noopener noreferrer'  // XSS defense-in-depth
+            link.style.cssText = 'color:#fca5a5;text-decoration:underline;'
+            vipStatus.appendChild(link)
+          }
+        } else {
+          const pending = document.createElement('span')
+          pending.textContent = '(pending)'
+          pending.style.cssText = 'color:#b0b0b0;font-style:italic;'
+          vipStatus.appendChild(pending)
+        }
         vipInput.value = ''
       } else {
         vipStatus.textContent = 'Reservation failed: ' + ((res && (res.message || res.code)) || 'unknown')
