@@ -327,6 +327,17 @@ export const settleX402Payment = async (
       },
     };
   } catch (err) {
+    console.error('[x402:settleX402Payment] submitEip3009Relay threw', {
+      chainId,
+      tokenAddress,
+      from: message.from,
+      to: message.to,
+      value: message.value,
+      errName: err instanceof Error ? err.name : typeof err,
+      errMessage: err instanceof Error ? err.message : String(err),
+      errCode: (err as { code?: unknown } | null)?.code,
+      errStack: err instanceof Error ? err.stack?.split('\n').slice(0, 6).join('\n') : undefined,
+    });
     if (err instanceof FacilitatorDisabledError) {
       return { ok: false, code: 'FACILITATOR_DISABLED', message: 'facilitator disabled' };
     }
