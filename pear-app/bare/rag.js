@@ -165,16 +165,54 @@ function createRag (opts = {}) {
         ? sdk[embedModelSrc]
         : embedModelSrc
       emit('rag:loading', { modelSrc: embedModelSrc })
-      const modelId = await sdk.loadModel({
-        modelSrc: resolved,
-        modelType: 'embedding',
-        onProgress: (p) => emit('rag:progress', {
-          modelSrc: embedModelSrc,
-          percentage: p?.percentage ?? p?.percent ?? null,
-          downloaded: p?.downloaded ?? null,
-          total: p?.total ?? null
+      // NOTE (2026-07-11 semifinal debug): SDK rejects the pair
+      // `{modelSrc: 'llamacpp-embedding', modelType: 'embedding'}` with the
+      // "modelSrc describes 'llamacpp-embedding' but modelType resolves to
+      // 'embedding'" MODEL_TYPE_MISMATCH error. Omit modelType and let the
+      // SDK infer from modelSrc. Same shape as bare/roomSearch.js:189.
+      let modelId
+      try {
+        modelId = await sdk.loadModel({
+          modelSrc: resolved,
+          onProgress: (p) => emit('rag:progress', {
+            modelSrc: embedModelSrc,
+            percentage: p?.percentage ?? p?.percent ?? null,
+            downloaded: p?.downloaded ?? null,
+            total: p?.total ?? null
+          })
         })
-      })
+      } catch (loadErr) {
+        // MODEL_ALREADY_REGISTERED: roomSearch (or a previous rag boot) has
+        // already loaded the same embedding model in this worker. Reuse the
+        // existing modelId via getLoadedModelInfo. Same shape as the fix in
+        // bare/roomSearch.js.
+        const msg = (loadErr && loadErr.message) || ''
+        if (msg.indexOf('already registered') >= 0 && typeof sdk.getLoadedModelInfo === 'function') {
+          try {
+            const info = await sdk.getLoadedModelInfo({})
+            const loaded = Array.isArray(info) ? info : (info && info.models) || []
+            const embedEntry = loaded.find(function (m) {
+              const addon = (m && (m.addon || m.pluginName)) || ''
+              return String(addon).indexOf('embedding') >= 0
+            }) || loaded[0]
+            if (embedEntry && embedEntry.modelId) {
+              modelId = embedEntry.modelId
+              log('info', 'rag reusing already-loaded embedding model', { modelId })
+            } else {
+              throw loadErr
+            }
+          } catch (infoErr) {
+            state.lastError = loadErr.message || 'load failed'
+            emit('rag:error', { code: 'LOAD_FAILED', message: state.lastError })
+            log('warn', 'rag getLoadedModelInfo failed after already-registered', {
+              loadMsg: state.lastError, infoMsg: infoErr && infoErr.message
+            })
+            return false
+          }
+        } else {
+          throw loadErr
+        }
+      }
       if (typeof modelId !== 'string' || modelId.length === 0) {
         state.lastError = 'loadModel returned no modelId'
         emit('rag:error', { code: 'LOAD_FAILED', message: state.lastError })

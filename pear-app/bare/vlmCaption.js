@@ -163,15 +163,26 @@ function createVlmCaption (opts = {}) {
       }
       emit('vlm:loading', { modelSrc: descriptorName(modelSrc) })
       try {
+        // Resolve string constant names to the actual SDK descriptor object.
+        // The SDK exports SMOLVLM2_500M_MULTIMODAL_Q8_0 etc. as descriptors on
+        // its top-level namespace; loadModel expects the descriptor (with
+        // registrySource + registryPath + expectedSize), NOT the string name.
+        // Passing the raw string triggers `Failed to load model: Model with
+        // ID "SMOLVLM2_500M_MULTIMODAL_Q8_0". Available models: [...]`
+        // because the SDK's model resolver walks the model list looking for
+        // matching gguf filenames rather than constant identifiers.
+        // Verified against @qvac/sdk 0.14.0 dist/models/registry/models.js.
+        const resolvedModelSrc = (typeof modelSrc === 'string' && s[modelSrc] !== undefined) ? s[modelSrc] : modelSrc
+        const resolvedProjection = (typeof projectionModelSrc === 'string' && s[projectionModelSrc] !== undefined) ? s[projectionModelSrc] : projectionModelSrc
         const id = await s.loadModel({
-          modelSrc,
+          modelSrc: resolvedModelSrc,
           modelType: 'llm',
           modelConfig: {
             // Multimodal completion needs the vision projection model.
             // Docs: https://docs.qvac.tether.io/ai-capabilities/multimodal/
             // ("You must load a multimodal-capable LLM AND its matching
             // projectionModelSrc").
-            projectionModelSrc,
+            projectionModelSrc: resolvedProjection,
             ctx_size: 1024
           },
           onProgress: (p) => {

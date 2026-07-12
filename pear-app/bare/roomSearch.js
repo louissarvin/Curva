@@ -193,9 +193,46 @@ function createRoomSearch (opts = {}) {
       //   matching modelType.
       // Fix: omit modelType and let the SDK infer from modelSrc. Same shape
       // used by bare/rag.js which loads embeddings the same way.
-      const modelId = await sdk.loadModel({
-        modelSrc: resolved
-      })
+      let modelId
+      try {
+        modelId = await sdk.loadModel({
+          modelSrc: resolved
+        })
+      } catch (loadErr) {
+        // MODEL_ALREADY_REGISTERED means bare/rag.js (or a previous
+        // roomSearch instance) already loaded the same embedding model in
+        // the SAME worker process. Reuse the existing modelId via
+        // getLoadedModelInfo. Not a real failure.
+        const msg = (loadErr && loadErr.message) || ''
+        if (msg.indexOf('already registered') >= 0 && typeof sdk.getLoadedModelInfo === 'function') {
+          try {
+            const info = await sdk.getLoadedModelInfo({})
+            const loaded = Array.isArray(info) ? info : (info && info.models) || []
+            // Find the embedding model in the loaded list. The addon is
+            // 'llamacpp-embedding' for both EMBEDDINGGEMMA_300M_Q4_0 and
+            // any other bert-family embedding.
+            const embedEntry = loaded.find(function (m) {
+              const addon = (m && (m.addon || m.pluginName)) || ''
+              return String(addon).indexOf('embedding') >= 0
+            }) || loaded[0]
+            if (embedEntry && embedEntry.modelId) {
+              modelId = embedEntry.modelId
+              log('info', 'roomSearch reusing already-loaded embedding model', { modelId })
+            } else {
+              throw loadErr
+            }
+          } catch (infoErr) {
+            state.lastError = (loadErr.message) || 'LOAD_FAILED'
+            state.stats.errors += 1
+            log('warn', 'roomSearch getLoadedModelInfo failed after already-registered', {
+              loadMsg: state.lastError, infoMsg: infoErr && infoErr.message
+            })
+            return false
+          }
+        } else {
+          throw loadErr
+        }
+      }
       if (typeof modelId !== 'string' || modelId.length === 0) {
         state.lastError = 'LOAD_NO_MODEL_ID'
         return false

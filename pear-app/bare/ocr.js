@@ -109,12 +109,34 @@ function createOcr (opts = {}) {
       }
       emit('ocr:loading', { modelSrc: descriptorName(modelSrc) })
       try {
+        // Resolve string constant to descriptor - same pattern as
+        // vlmCaption/rag/roomSearch. The SDK's model resolver expects
+        // the descriptor object (with registrySource/registryPath), not
+        // the constant name.
+        const resolvedModelSrc = (typeof modelSrc === 'string' && s[modelSrc] !== undefined) ? s[modelSrc] : modelSrc
+        // detectorModelSrc is REQUIRED per @qvac/sdk 0.14.0
+        // dist/server/bare/plugins/ggml-ocr/plugin.js:72 -
+        //   "Detector model required for OCR. Use a hyperdrive source or
+        //    provide detectorModelSrc"
+        //
+        // The paired detector for OCR_LATIN (the ggml-ocr recognizer) is
+        // OCR_CRAFT (craft_mlt_25k.gguf) - both share engine: "ggml-ocr" and
+        // both are GGUF. Verified via
+        //   dist/models/registry/models.js:15261 (OCR_CRAFT, engine ggml-ocr)
+        //   dist/models/registry/models.js:15277 (OCR_LATIN, engine ggml-ocr)
+        //
+        // Do NOT use OCR_DETECTOR_DB_MOBILENET_V3_LARGE / OCR_DETECTOR_DB_RESNET50:
+        // those are ONNX detectors for the doctr addon and produce
+        //   Error: StepDetectionInference: failed to open GGUF
+        // when handed to the ggml-ocr plugin.
+        const detectorSrc = s.OCR_CRAFT || 'OCR_CRAFT'
         // defaultRotationAngles goes on modelConfig at loadModel per
         // schemas/ocr.d.ts (line 10) — NOT on the per-call ocr() options.
         const id = await s.loadModel({
-          modelSrc,
+          modelSrc: resolvedModelSrc,
           modelType: 'ocr',
           modelConfig: {
+            detectorModelSrc: detectorSrc,
             defaultRotationAngles: [...defaultRotationAngles],
             // Low-confidence threshold hint to the recognizer; we STILL filter
             // client-side because plugin behavior can vary.

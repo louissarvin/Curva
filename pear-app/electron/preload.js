@@ -112,9 +112,25 @@ function installMainWorkerAckDispatcher() {
 }
 installMainWorkerAckDispatcher()
 
+// Per-command timeout overrides. Some SDK verbs (VLM caption, OCR read) can
+// take minutes on first-load because SmolVLM2 500MB and OCR_LATIN 15MB have
+// to download + validate + load before the first inference runs. The default
+// 30 s budget is only right for lightweight IPC. Keep this list small and
+// scoped so a stuck worker still gets caught by the default watchdog.
+const LONG_TIMEOUT_CMDS = new Set([
+  'vlm:caption',    // SmolVLM2 first-load ~4 min then <2 s per subsequent call
+  'ocr:read',       // OCR_LATIN + OCR_CRAFT first-load ~30 s, then <500 ms
+  'voice:enroll',   // Chatterbox voice-clone reference save + Hyperblob write
+  'model:load',     // any explicit model load
+  'match:recap',    // 7-cap orchestration budget
+  'diagnostics:report' // gathers Prometheus + registry snapshots
+])
+const LONG_TIMEOUT_MS = 5 * 60_000  // 5 min
+
 function writeMainAwait(cmd, payload) {
   const id = makeId()
   const message = { id, cmd, payload: payload || {} }
+  const timeoutMs = LONG_TIMEOUT_CMDS.has(cmd) ? LONG_TIMEOUT_MS : REQUEST_TIMEOUT_MS
   const p = new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       if (pendingRequests.has(id)) {
@@ -123,7 +139,7 @@ function writeMainAwait(cmd, payload) {
         err.code = 'REQUEST_TIMEOUT'
         reject(err)
       }
-    }, REQUEST_TIMEOUT_MS)
+    }, timeoutMs)
     pendingRequests.set(id, { resolve, reject, timer })
   })
   // Fire and forget the invoke; we resolve via the correlated event.

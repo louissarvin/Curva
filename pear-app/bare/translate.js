@@ -1170,8 +1170,18 @@ async function loadSdkLlm ({ modelSrc, onProgress, sdkImpl, modelConfig } = {}) 
   // Verified against pear-app/node_modules/@qvac/sdk/dist/client/api/load-model.d.ts.
   // Backward-compat: when `modelConfig` is unset we omit the field so the
   // pre-Wave-13B call site (commentator without tools) behaves identically.
+  // Resolve string constants (e.g. 'QWEN3_600M_INST_Q4') to the SDK's
+  // descriptor object. Same pattern as bare/vlmCaption.js and bare/ocr.js.
+  // The SDK's model resolver walks the gguf catalog looking for filename
+  // matches; passing the raw constant string produces
+  //   Failed to load model: Model with ID "QWEN3_600M_INST_Q4". Available
+  //   models: [...]
+  // because the resolver reads name/registrySource/registryPath from the
+  // descriptor object, not the string.
+  // Verified against @qvac/sdk 0.14.0 dist/models/registry/models.js:21376.
+  const resolvedModelSrc = (typeof modelSrc === 'string' && sdkHost[modelSrc] !== undefined) ? sdkHost[modelSrc] : modelSrc
   const loadOpts = {
-    modelSrc,
+    modelSrc: resolvedModelSrc,
     modelType: 'llm',
     onProgress: typeof onProgress === 'function' ? onProgress : undefined
   }

@@ -1099,18 +1099,30 @@ const promHandleReady = (async () => {
 // SDK server-log bridge: forwards @qvac/sdk internal logs to renderer via
 // `diagnostics:log` so DiagnosticsPanel's Logs tab can tail them. Lazy import
 // so a missing SDK is a silent no-op.
+//
+// CRITICAL (2026-07-11 semifinal debug): DO NOT fire this at module top level.
+// subscribeToServerLogs -> subscribeServerLogs -> loggingStream -> rpc-client
+// getRPCInstance() which awaits ensureWorkerReady/ensurePluginsRegistered.
+// If plugins aren't registered YET (because bare/sdkPlugins.js hasn't booted),
+// getRPCInstance CACHES a REJECTED promise. Every subsequent SDK verb call
+// awaits that cached rejection and re-throws WORKER_PLUGINS_NOT_REGISTERED
+// forever - even after plugins are registered later. Root cause verified via
+// diagnostic in bare/sdkPlugins.js on 2026-07-11.
+//
+// Fix: defer this bridge until after emit('ready'), which fires AFTER
+// sdkPluginsMod.boot() has populated the plugin registry.
 let observabilityLogUnsub = () => {}
-try {
-  import('@qvac/sdk').then((mod) => {
-    try {
-      observabilityLogUnsub = subscribeToServerLogs(mod || {}, (entry) => {
-        try { emit('diagnostics:log', entry) } catch { /* noop */ }
-      })
-    } catch (err) {
-      log('warn', 'observability log bridge attach failed', { message: err && err.message })
-    }
-  }).catch(() => { /* SDK absent — no logs to bridge */ })
-} catch { /* noop */ }
+const attachObservabilityLogBridge = async () => {
+  try {
+    const mod = await import('@qvac/sdk').catch(() => null)
+    if (!mod) return
+    observabilityLogUnsub = subscribeToServerLogs(mod, (entry) => {
+      try { emit('diagnostics:log', entry) } catch { /* noop */ }
+    })
+  } catch (err) {
+    log('warn', 'observability log bridge attach failed', { message: err && err.message })
+  }
+}
 // ===== END OBSERVABILITY =====
 
 // ===== VLM + OCR (Cup Final) =====
@@ -3074,7 +3086,12 @@ async function maybeTranslateMessage(msg) {
       by_peer: msg.by_peer,
       sourceLang: src,
       targetLang: userTargetLang,
-      translatedText: translated
+      translatedText: translated,
+      // Engine label the renderer shows in the translation subline. Bergamot
+      // is the default NMT engine for the built-in en-{it,id,es,fr,de,pt} pairs;
+      // Qwen3 is used only when the LLM translator is on and Bergamot doesn't
+      // cover the requested pair. See Chat.js applyTranslationToRow()::engineLabel.
+      engine: 'bergamot'
     })
   } catch (err) {
     // Silent per-message failure. Never poisons the chat stream.
@@ -3541,6 +3558,13 @@ async function closeCurrentRoom() {
       backendUrl: config.backendUrl
     })
     log('info', 'ready', { pubkey: identity.pubkey, handle: identity.handle })
+
+    // Attach the observability log bridge AFTER sdk plugins are bootstrapped.
+    // See comment at attachObservabilityLogBridge definition (~L1103) for why
+    // this MUST NOT happen at module top level.
+    attachObservabilityLogBridge().catch((err) => {
+      log('warn', 'attachObservabilityLogBridge threw', { message: err && err.message })
+    })
 
     // pear.assets branding pack: emit initial branding snapshot. Path is null
     // until the drive lands (async background fetch per Pear docs). The

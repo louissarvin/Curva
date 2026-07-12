@@ -167,7 +167,11 @@ function createLangDetectRouter (opts = {}) {
       emit('langdetect:detected', {
         lang: null, confidence, textPrefix: preview, reason: 'BELOW_FLOOR', raw: top
       })
-      return { lang: null, confidence }
+      // Include `raw` in the return so callers doing best-effort routing on
+      // short chat text (< 30 chars, where tinyld often scores 0.3-0.5
+      // even for obvious hits) can consult the classification and decide
+      // whether to trust it. See renderer/components/Chat.js send handler.
+      return { lang: null, confidence, raw: top }
     }
 
     if (!allowed.has(top)) {

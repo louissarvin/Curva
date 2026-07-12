@@ -1,40 +1,54 @@
-// Curva QVAC SDK plugin bootstrap (semifinal live-boot fix).
+// Curva QVAC SDK plugin bootstrap (semifinal live-boot fix, revision 3).
 //
-// Root cause of the bug we fix here (verified against installed source
-// 2026-07-11):
+// Root cause (verified via runtime diagnostic 2026-07-11):
 //
-//   Peer boots with @qvac/sdk in Bare runtime. First SDK-adjacent code path
-//   is the modules that DO register their plugin (translate.js registers
-//   nmtcpp-translation and llamacpp-completion). All OTHER modules then try
-//   to call sdk.ocr, sdk.classify, sdk.completion({attachments:[...]}), or
-//   sdk.embed against an SDK that has NEVER been told about their plugin
-//   registry. The SDK returns:
+//   `@qvac/sdk` client/rpc/rpc-client.js caches the `rpcInstance` promise
+//   on FIRST call to getRPCInstance():
+//     let rpcInstance = null;
+//     async function getRPCInstance() {
+//       if (rpcInstance) return { rpc: await rpcInstance };
+//       rpcInstance = getRPC();   // <-- CACHED
+//       ...
+//     }
+//   And `getRPC()` awaits `ensureWorkerReady()` which awaits
+//   `ensurePluginsRegistered()` which throws
+//   `WorkerPluginsNotRegisteredError` when the plugin registry is empty.
 //
-//     Describe failed: No plugins registered in the worker. On Bare, register
-//     the plugins you need with `plugins([...])` (or `registerPlugin(...)`)
-//     before the first SDK call — import each from its subpath, e.g.
-//     `@qvac/sdk/llamacpp-completion/plugin`. For direct Bare usage we
-//     recommend the dedicated `@qvac/bare-sdk` package.
-//     See https://docs.qvac.tether.io/configuration/plugins#runtime-registration-on-bare
+//   If ANY SDK verb fires BEFORE the plugin registry is populated (e.g.
+//   workers/main.js used to invoke `subscribeToServerLogs(mod, ...)` at
+//   module top level, kicking off a `loggingStream(...)` -> `send(...)`
+//   round-trip, which awaits getRPC()), the `rpcInstance` promise is
+//   cached as REJECTED. Every subsequent SDK call then awaits the cached
+//   rejection and re-throws WORKER_PLUGINS_NOT_REGISTERED forever - even
+//   after plugins are eventually registered.
 //
-// This module registers EVERY plugin Curva uses in one shot, up-front. Every
-// downstream module can then call sdk.loadModel + sdk.<verb> without ever
-// hitting WORKER_PLUGINS_NOT_REGISTERED. Idempotent: subsequent calls no-op
-// after the first successful registration. Best-effort per plugin: a plugin
-// that fails to import (e.g. missing native addon on the current arch) is
-// logged and skipped rather than breaking the whole boot path.
+//   The error message misleads: "No plugins registered in the worker.
+//   On Bare, register the plugins you need with `plugins([...])` (or
+//   `registerPlugin(...)`) before the first SDK call - import each from
+//   its subpath, e.g. `@qvac/sdk/llamacpp-completion/plugin`."
+//   The plugins ARE registered by the time the error fires; the issue is
+//   just that the cache holds a rejection from before registration.
+//
+// FIX (two-part):
+//   1. This module registers every plugin via `registerPlugin` imported
+//      from `@qvac/sdk/plugins` - the SAME subpath the SDK's own
+//      auto-generated Pear worker entry uses
+//      (dist/pear/pre.js::generatePearWorkerEntry).
+//   2. workers/main.js BLOCKING-awaits sdkPluginsMod.boot(log) BEFORE
+//      emit('ready'), and any observability/subscribeToServerLogs bridge
+//      is deferred until AFTER ready fires.
+//
+// Idempotent: subsequent calls no-op after the first successful boot.
+// Best-effort per plugin: a plugin that fails to import (e.g. missing
+// native addon on the current arch) is logged and skipped rather than
+// breaking the whole boot path.
 //
 // Docs verified (2026-07-11):
 //   - https://docs.qvac.tether.io/configuration/plugins#runtime-registration-on-bare
 //   - Installed plugin subpaths at
 //     pear-app/node_modules/@qvac/sdk/dist/server/bare/plugins/*
-//   - pear-app/bare/translate.js:770-800 for the working registration
-//     pattern we replicate here (import subpath -> pick .default or the
-//     named export -> mod.plugins([plugin]) -> capture returned hostApi).
-//
-// The returned `hostApi` from mod.plugins([plugins...]) is what actually
-// exposes the primed loadModel + verbs; module callers that need the primed
-// surface should await ensureAllPlugins() and use the returned hostApi.
+//   - pear-app/node_modules/@qvac/sdk/dist/pear/pre.js::generatePearWorkerEntry
+//     for the canonical registration pattern this module replicates.
 
 const PLUGIN_SUBPATHS = Object.freeze([
   { name: 'llamacpp-completion',    subpath: '@qvac/sdk/llamacpp-completion/plugin',    exportKey: 'llmPlugin' },
@@ -89,12 +103,33 @@ async function ensureAllPlugins (sdkMod, log) {
   const safeLog = typeof log === 'function' ? log : function () {}
 
   state.inFlight = (async () => {
-    if (!sdkMod || typeof sdkMod.plugins !== 'function') {
-      const reason = 'sdk-plugins-fn-missing'
-      safeLog('warn', '[sdkPlugins] SDK has no plugins() registrar; downstream calls will 4xx', { reason })
-      state.ready = true
-      state.hostApi = sdkMod || null
-      return { hostApi: state.hostApi, registered: [], failed: [{ name: '*', reason }] }
+    // Load registerPlugin via @qvac/sdk/plugins - the canonical registry
+    // subpath used by the SDK's auto-generated Pear worker entry
+    // (dist/pear/pre.js::generatePearWorkerEntry). Falls back to
+    // sdk.plugins([p]) from the top-level module if the subpath is
+    // unavailable.
+    let registerPlugin = null
+    try {
+      const pluginsRegistry = await import('@qvac/sdk/plugins')
+      if (typeof pluginsRegistry.registerPlugin === 'function') {
+        registerPlugin = pluginsRegistry.registerPlugin
+      }
+    } catch (err) {
+      safeLog('warn', '[sdkPlugins] @qvac/sdk/plugins import failed', {
+        message: err && err.message
+      })
+    }
+    if (typeof registerPlugin !== 'function') {
+      if (sdkMod && typeof sdkMod.plugins === 'function') {
+        safeLog('warn', '[sdkPlugins] @qvac/sdk/plugins subpath missing registerPlugin; falling back to sdk.plugins()')
+        registerPlugin = function (p) { sdkMod.plugins([p]) }
+      } else {
+        const reason = 'no-registerPlugin'
+        safeLog('warn', '[sdkPlugins] SDK exposes no registration function; downstream SDK calls will 4xx', { reason })
+        state.ready = true
+        state.hostApi = sdkMod || null
+        return { hostApi: state.hostApi, registered: [], failed: [{ name: '*', reason }] }
+      }
     }
 
     const collected = []
@@ -132,37 +167,48 @@ async function ensureAllPlugins (sdkMod, log) {
       return { hostApi: sdkMod, registered: [], failed: state.failed.slice() }
     }
 
-    let hostApi = sdkMod
-    try {
-      // One-shot registration keeps every plugin on the same registry instance
-      // (the sibling-registry drift bug documented in translate.js:756-770
-      // was caused by calling plugins() repeatedly with single entries).
-      hostApi = sdkMod.plugins(collected.map(function (c) { return c.plugin })) || sdkMod
-      state.registered = collected.map(function (c) { return c.name })
-      safeLog('info', '[sdkPlugins] registered ' + state.registered.length + ' plugins', {
-        names: state.registered
-      })
-    } catch (err) {
-      safeLog('warn', '[sdkPlugins] plugins() bulk call threw; falling back to per-plugin', {
-        message: err && err.message
-      })
-      // Fallback: register one by one. Some SDK betas expose registerPlugin.
-      for (const c of collected) {
-        try {
-          if (typeof sdkMod.registerPlugin === 'function') {
-            sdkMod.registerPlugin(c.plugin)
-          } else {
-            sdkMod.plugins([c.plugin])
-          }
+    // Register plugins one by one via the CANONICAL registerPlugin from
+    // @qvac/sdk/plugins. This is the exact pattern the SDK's auto-generated
+    // Pear worker entry uses (dist/pear/pre.js::generatePearWorkerEntry).
+    for (const c of collected) {
+      try {
+        registerPlugin(c.plugin)
+        state.registered.push(c.name)
+      } catch (err) {
+        // "Plugin already registered" is FINE - means another module beat us
+        // to it and the registry already has the plugin. Any other error is a
+        // failure worth logging.
+        const msg = (err && err.message) || 'THREW'
+        if (msg.indexOf('already registered') >= 0) {
           state.registered.push(c.name)
-        } catch (subErr) {
-          state.failed.push({ name: c.name, reason: (subErr && subErr.message) || 'THREW' })
+          safeLog('info', '[sdkPlugins] ' + c.name + ' already registered (fine)', {})
+        } else {
+          state.failed.push({ name: c.name, reason: msg })
         }
       }
-      hostApi = sdkMod
     }
 
-    state.hostApi = hostApi || sdkMod
+    safeLog('info', '[sdkPlugins] registered ' + state.registered.length + ' plugins', {
+      names: state.registered
+    })
+
+    // Prime the SDK's rpc-client so the first hostApi is captured. This
+    // ALSO guarantees that any subsequent `import('@qvac/sdk')` in
+    // downstream modules gets the primed surface. Skipping this leaves the
+    // top-level SDK unprimed - `sdk.loadModel(...)` still resolves through
+    // the same registry we just wrote to, so it works either way, but the
+    // hostApi is nice to have for callers that want the returned surface.
+    try {
+      const freshSdk = await import('@qvac/sdk').catch(() => null)
+      if (freshSdk && typeof freshSdk.plugins === 'function') {
+        const host = freshSdk.plugins([])
+        state.hostApi = host || freshSdk
+      } else {
+        state.hostApi = sdkMod
+      }
+    } catch {
+      state.hostApi = sdkMod
+    }
     state.ready = true
     return { hostApi: state.hostApi, registered: state.registered.slice(), failed: state.failed.slice() }
   })()
