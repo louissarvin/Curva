@@ -41,6 +41,116 @@ function iso2Flag(iso2) {
   return String.fromCodePoint(cp(iso2[0]), cp(iso2[1]))
 }
 
+// F4 semifinal: VIP badge status cache. Slug is the key; value is either a
+// hit ({reserved:true, ownerAddress, txHash, ...}) or a miss ({reserved:false}).
+// TTL keeps the fetch pressure off /vip/status when the lobby re-renders many
+// times per second while the swarm topology settles.
+//
+// IMPORTANT: We hit the backend directly via fetch() instead of going through
+// the Bare worker IPC. The worker's message queue serialises 50+ concurrent
+// status checks and blows past the preload's default timeout. The backend
+// endpoint is public (no auth), the CSP already allows connect-src to
+// http://localhost:3700, and localhost fetches complete in <20ms round-trip.
+const VIP_STATUS_CACHE = new Map()
+const VIP_STATUS_TTL_MS = 30_000
+const VIP_INFLIGHT = new Map()
+const VIP_BACKEND_URL = 'http://localhost:3700'
+const VIP_SLUG_RE = /^[a-z0-9-]{3,32}$/
+const VIP_FETCH_TIMEOUT_MS = 4000
+
+function vipCacheGet(slug) {
+  const entry = VIP_STATUS_CACHE.get(slug)
+  if (!entry) return null
+  if (Date.now() - entry.fetchedAt > VIP_STATUS_TTL_MS) {
+    VIP_STATUS_CACHE.delete(slug)
+    return null
+  }
+  return entry
+}
+
+function vipCachePut(slug, data) {
+  VIP_STATUS_CACHE.set(slug, { ...data, fetchedAt: Date.now() })
+}
+
+function shortAddr(addr) {
+  const s = String(addr || '')
+  if (!/^0x[0-9a-fA-F]{40}$/.test(s)) return s
+  return s.slice(0, 6) + '…' + s.slice(-4)
+}
+
+function applyVipBadge(badgeEl, data) {
+  if (!badgeEl || !data || !data.reserved) return
+  badgeEl.textContent = 'VIP'
+  badgeEl.classList.remove('curva-browser__badge--stadium')
+  badgeEl.classList.remove('curva-browser__badge--private')
+  badgeEl.classList.add('curva-browser__badge--vip')
+  const owner = shortAddr(data.ownerAddress)
+  const tx = data.txHash ? String(data.txHash) : ''
+  const shortTx = tx ? tx.slice(0, 10) + '…' : ''
+  badgeEl.title = 'On-chain VIP reservation'
+    + (owner ? '\nOwner: ' + owner : '')
+    + (shortTx ? '\nTx: ' + shortTx : '')
+    + '\nReserved via x402 EIP-3009 for 5 USDT on Sepolia'
+}
+
+async function fetchVipStatus(slug) {
+  const normalized = String(slug || '').trim().toLowerCase().replace(/^vip-/, '')
+  if (!VIP_SLUG_RE.test(normalized)) return { reserved: false }
+  const url = VIP_BACKEND_URL + '/vip/status/' + encodeURIComponent(normalized)
+  const controller = typeof AbortController === 'function' ? new AbortController() : null
+  const t = controller ? setTimeout(() => { try { controller.abort() } catch (_) { /* noop */ } }, VIP_FETCH_TIMEOUT_MS) : null
+  try {
+    const resp = await fetch(url, {
+      method: 'GET',
+      headers: { 'Accept': 'application/json' },
+      signal: controller ? controller.signal : undefined
+    })
+    if (!resp.ok) return { reserved: false }
+    const body = await resp.json()
+    if (!body || !body.success || !body.data) return { reserved: false }
+    const d = body.data
+    if (d.reserved === true) {
+      return {
+        reserved: true,
+        ownerAddress: d.ownerAddress,
+        txHash: d.txHash,
+        reservedAt: d.reservedAt
+      }
+    }
+    return { reserved: false }
+  } finally {
+    if (t) clearTimeout(t)
+  }
+}
+
+async function checkVipBadgeAsync(_curva, slug, badgeEl) {
+  if (!slug || !badgeEl) return
+  const cached = vipCacheGet(slug)
+  if (cached) {
+    applyVipBadge(badgeEl, cached)
+    return
+  }
+  // Dedupe concurrent fetches for the same slug across cards.
+  let promise = VIP_INFLIGHT.get(slug)
+  if (!promise) {
+    promise = (async () => {
+      try {
+        const data = await fetchVipStatus(slug)
+        vipCachePut(slug, data)
+        return data
+      } catch (_) {
+        // Fail open: no badge upgrade. VIP is a UX signal, not access control.
+        return { reserved: false, error: true }
+      } finally {
+        VIP_INFLIGHT.delete(slug)
+      }
+    })()
+    VIP_INFLIGHT.set(slug, promise)
+  }
+  const data = await promise
+  applyVipBadge(badgeEl, data)
+}
+
 function nameToFlag(name) {
   if (typeof name !== 'string') return '🏳️'
   const key = name.trim().toLowerCase().replace(/[^a-z\s]/g, '').trim()
@@ -431,7 +541,16 @@ export function mountRoomBrowser({ container, curva, onJoin } = {}) {
         ? livePeerCountsByHex.get(hex)
         : undefined
       const match = room.matchId ? matchesById.get(room.matchId) : null
-      list.appendChild(renderRoomCard(room, match, onJoin, liveCount))
+      const card = renderRoomCard(room, match, onJoin, liveCount)
+      list.appendChild(card)
+      // F4 semifinal: after the card is in the DOM, fire the VIP status
+      // lookup. If reserved on-chain, the badge flips from STADIUM/PRIVATE
+      // to VIP with the owner + txHash in the tooltip. Fire-and-forget:
+      // never blocks the initial paint, and cache prevents re-fetch storms.
+      if (room && room.slug && card.__curvaBadgeEl) {
+        // Do not await; render loop must not block on a network call.
+        checkVipBadgeAsync(curva, String(room.slug), card.__curvaBadgeEl)
+      }
     }
   }
 
@@ -740,6 +859,10 @@ function renderRoomCard(room, match, onJoin, liveCount) {
   li.appendChild(head)
   li.appendChild(meta)
   li.appendChild(actions)
+  // F4 semifinal: expose the badge so the caller can upgrade to VIP after
+  // a /vip/status/<slug> lookup returns reserved:true. Fail-open — the badge
+  // stays STADIUM/PRIVATE if the lookup fails, times out, or returns miss.
+  li.__curvaBadgeEl = badge
   return li
 }
 

@@ -3174,6 +3174,13 @@ body {
   color: var(--curva-stadium);
 }
 
+.curva-browser__badge--vip {
+  background: linear-gradient(90deg, rgba(212, 175, 55, 0.18), rgba(200, 16, 46, 0.18));
+  border: 1px solid rgba(212, 175, 55, 0.55);
+  color: #f5d371;
+  text-shadow: 0 0 6px rgba(212, 175, 55, 0.35);
+}
+
 /* Reader note (Chat.js) */
 .curva-chat__reader-note {
   padding: 8px 12px;
