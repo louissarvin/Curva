@@ -308,6 +308,18 @@ let pendingPostJoin = null
 
 function mountBrowser() {
   destroyBrowser()
+  // F4 semifinal: kick off wallet init so the lobby VIP-reserve button works
+  // BEFORE the user joins a room. Idempotent per workers/main.js::initWallet
+  // (line 2757-2760: returns early when walletReady is true), so mounting the
+  // browser multiple times is safe. Without this the wallet only initialises
+  // when the user joins a room, which means clicking Reserve VIP in the lobby
+  // returns WALLET_NOT_READY. The passcode is auto-supplied by
+  // DEV_WALLET_PASSCODE per workers/main.js:2761.
+  if (typeof curva.initWallet === 'function') {
+    curva.initWallet().catch((err) => {
+      logEvent('warn', 'lobby wallet init deferred: ' + (err && err.message))
+    })
+  }
   browserInstance = safeMount('RoomBrowser', () => mountRoomBrowser({
     container: els.browser,
     curva,

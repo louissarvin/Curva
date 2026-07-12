@@ -255,9 +255,76 @@ export function mountRoomBrowser({ container, curva, onJoin } = {}) {
   seederChip.style.cssText = 'font-size:11px;color:#86efac;padding:4px 8px;border-radius:6px;background:rgba(34,197,94,0.08);border:1px solid rgba(34,197,94,0.2);margin-bottom:12px;'
   seederChip.hidden = true
 
+  // F4 semifinal: VIP room reservation UI. Peer signs a 5 USDT EIP-3009
+  // authorization off-chain; backend facilitator settles + writes the
+  // reservation to Prisma. Fails open on backend outage - reservation is a
+  // signaling layer + directory hint, not P2P access control. See
+  // backend/src/routes/vipRoutes.ts and pear-app/bare/x402Client.js.
+  const vipSection = document.createElement('section')
+  vipSection.className = 'curva-browser__vip'
+  vipSection.style.cssText = 'padding:14px;margin-top:12px;border:1px solid rgba(220,38,38,0.35);border-radius:10px;background:rgba(220,38,38,0.04);'
+  const vipTitle = document.createElement('div')
+  vipTitle.style.cssText = 'font-size:13px;font-weight:600;color:#fca5a5;margin-bottom:6px;'
+  vipTitle.textContent = 'Reserve a VIP room slug (5 USDT via EIP-3009)'
+  const vipHint = document.createElement('div')
+  vipHint.style.cssText = 'font-size:12px;color:#b0b0b0;margin-bottom:10px;'
+  vipHint.textContent = 'Second x402 paid-resource route. Signs a 5 USDT authorization to the sponsor address; backend facilitator settles on Sepolia. Reservation is public + on-chain; the slug appears in every peer\'s lobby with a VIP badge.'
+  const vipForm = document.createElement('form')
+  vipForm.style.cssText = 'display:flex;gap:8px;align-items:center;flex-wrap:wrap;'
+  const vipInput = document.createElement('input')
+  vipInput.type = 'text'
+  vipInput.placeholder = 'kings-lounge'
+  vipInput.maxLength = 32
+  vipInput.className = 'curva-browser__input'
+  vipInput.style.cssText = 'flex:1 1 160px;min-width:160px;padding:8px 10px;border-radius:6px;border:1px solid var(--curva-border);background:var(--curva-bg-elev);color:var(--curva-fg);font-size:13px;'
+  const vipBtn = document.createElement('button')
+  vipBtn.type = 'submit'
+  vipBtn.className = 'curva-browser__btn curva-browser__btn--primary'
+  vipBtn.textContent = 'Reserve for 5 USDT'
+  const vipStatus = document.createElement('div')
+  vipStatus.style.cssText = 'flex:1 1 100%;font-size:12px;color:#b0b0b0;margin-top:6px;'
+  vipForm.appendChild(vipInput)
+  vipForm.appendChild(vipBtn)
+  vipForm.appendChild(vipStatus)
+  vipSection.appendChild(vipTitle)
+  vipSection.appendChild(vipHint)
+  vipSection.appendChild(vipForm)
+  vipForm.addEventListener('submit', async (e) => {
+    e.preventDefault()
+    if (!curva.vip || typeof curva.vip.reserve !== 'function') {
+      vipStatus.textContent = 'VIP reservation not available in this build.'
+      return
+    }
+    const raw = String(vipInput.value || '').toLowerCase().trim()
+    const slug = raw.replace(/[^a-z0-9-]/g, '').replace(/^-+|-+$/g, '').slice(0, 32)
+    if (slug.length < 3) {
+      vipStatus.textContent = 'Slug must be 3-32 chars, lowercase a-z / 0-9 / dashes.'
+      return
+    }
+    vipInput.value = slug
+    vipBtn.disabled = true
+    vipStatus.textContent = 'Signing EIP-3009 authorization for 5 USDT...'
+    try {
+      const res = await curva.vip.reserve(slug)
+      if (res && res.ok && res.reservation) {
+        const tx = res.reservation.txHash || res.reservation.paidTxHash || ''
+        const url = tx ? ('https://sepolia.etherscan.io/tx/' + tx) : ''
+        vipStatus.textContent = 'Reserved. txHash: ' + (tx || '(pending)') + (url ? '  |  ' + url : '')
+        vipInput.value = ''
+      } else {
+        vipStatus.textContent = 'Reservation failed: ' + ((res && (res.message || res.code)) || 'unknown')
+      }
+    } catch (err) {
+      vipStatus.textContent = 'Reservation failed: ' + (err?.message || err?.code || 'unknown')
+    } finally {
+      vipBtn.disabled = false
+    }
+  })
+
   container.appendChild(title)
   container.appendChild(subtitle)
   container.appendChild(createSection)
+  container.appendChild(vipSection)
   container.appendChild(banner)
   container.appendChild(seederChip)
   container.appendChild(loading)

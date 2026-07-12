@@ -31,12 +31,33 @@ const path = require('path')
 const TARGETS = [
   'node_modules/@noble/hashes/package.json',
   'node_modules/@noble/curves/package.json',
+  'node_modules/@noble/secp256k1/package.json',
   'node_modules/ethers/node_modules/@noble/hashes/package.json',
   'node_modules/ethers/node_modules/@noble/curves/package.json',
   'node_modules/@tetherto/wdk-wallet-evm-erc-4337/node_modules/@noble/hashes/package.json',
   'node_modules/@tetherto/wdk-wallet-evm-erc-4337/node_modules/@noble/curves/package.json',
+  // Semifinal (2026-07-12): wdk-wallet-evm (NOT wdk-wallet-evm-erc-4337)
+  // has its own nested @noble/hashes + @noble/curves copies that were
+  // missing from this list. Peer boot showed:
+  //   [Curva] ERROR WDK dependencies unavailable: INVALID_VERSION:
+  //   Unexpected token '^' in '^14.21.3 || >=16'
+  // Diagnostic panel showed `WDK wallet: error`. Verified via
+  //   grep -rE "14.21.3.*>=16" pear-app/node_modules/
+  // that these three paths still had the compound range.
+  'node_modules/@tetherto/wdk-wallet-evm/node_modules/@noble/hashes/package.json',
+  'node_modules/@tetherto/wdk-wallet-evm/node_modules/@noble/curves/package.json',
   'node_modules/@tetherto/wdk-wallet-evm/node_modules/ethers/node_modules/@noble/hashes/package.json',
-  'node_modules/@tetherto/wdk-wallet-evm/node_modules/ethers/node_modules/@noble/curves/package.json'
+  'node_modules/@tetherto/wdk-wallet-evm/node_modules/ethers/node_modules/@noble/curves/package.json',
+  // abstractionkit (@tetherto/wdk-wallet-evm-erc-4337 transitive dep) also
+  // nests its own @noble/curves.
+  'node_modules/abstractionkit/node_modules/@noble/hashes/package.json',
+  'node_modules/abstractionkit/node_modules/@noble/curves/package.json',
+  // Semifinal follow-up (2026-07-12): bip39 has its own @noble/hashes copy,
+  // and @tetherto/wdk-wallet-evm-erc-4337 has a nested ethers with its own
+  // @noble/hashes. Both were still tripping WDK boot with INVALID_VERSION
+  // after the first postinstall pass.
+  'node_modules/bip39/node_modules/@noble/hashes/package.json',
+  'node_modules/@tetherto/wdk-wallet-evm-erc-4337/node_modules/ethers/node_modules/@noble/hashes/package.json'
 ]
 
 const REPLACEMENT = null // null = delete the engines.node field

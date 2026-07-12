@@ -45,6 +45,12 @@ rm -f "${HOME_B}/SingletonLock" "${HOME_B}/SingletonCookie" 2>/dev/null || true
 # Feature flag set: all F1-F22 flags on so a judge can hit any demo path
 # without knowing which env var toggles which behaviour.
 CURVA_ENV=(
+  # F4 semifinal: x402 paid-resource routes (premium translation + VIP room
+  # reservation). Both peer worker AND backend must have this on; the
+  # backend .env already ships with CURVA_X402_ENABLED=true. Without this,
+  # the worker's vip:reserve handler returns FEATURE_DISABLED and the UI
+  # shows "Reservation failed: x402 feature disabled".
+  CURVA_X402_ENABLED=true
   CURVA_DEMO_MODE=true
   CURVA_FORCE_RELAY=1
   CURVA_KEET_IDENTITY_ENABLED=true
@@ -121,10 +127,50 @@ echo "[demo-boot] waiting for peer B ready..."
 until grep -q "ready {" "${LOG_B}" 2>/dev/null; do sleep 2; done
 echo "[demo-boot] Peer B ready"
 
+# Auto-fund: peers generate a fresh 16-byte salt + 24-word BIP-39 seed on
+# every boot per bare/wallet/worklet.js:695-702 (intentional demo choice
+# that trades persistence for zero configuration). So every fresh boot
+# needs re-funding before tips / VIP reservations can settle on-chain.
+#
+# This block waits for `wallet ready` in each peer log, greps the four
+# addresses (Peer A owner+smart, Peer B owner+smart), and fires
+# scripts/fund-peers.ts to seed 100 USDT into each from the sponsor EOA.
+# Failing this step is non-fatal: peers still boot, chat still works, and
+# only tips / VIP reservations will hit ERC20InsufficientBalance until the
+# user runs the fund script by hand.
+#
+# Skip via SKIP_AUTOFUND=1 if the sponsor treasury is drained or you want
+# to demo the ERC20InsufficientBalance error path deliberately.
+echo "[demo-boot] waiting for peer wallets to initialize..."
+until grep -q "wallet ready" "${LOG_A}" 2>/dev/null && grep -q "wallet ready" "${LOG_B}" 2>/dev/null; do
+  sleep 2
+done
+
+PEER_A_OWNER=$(grep -A2 "wallet ready" "${LOG_A}" | grep "ownerAddress:" | head -1 | grep -oE "0x[a-fA-F0-9]{40}")
+PEER_A_SMART=$(grep -A2 "wallet ready" "${LOG_A}" | grep "smartAddress:" | head -1 | grep -oE "0x[a-fA-F0-9]{40}")
+PEER_B_OWNER=$(grep -A2 "wallet ready" "${LOG_B}" | grep "ownerAddress:" | head -1 | grep -oE "0x[a-fA-F0-9]{40}")
+PEER_B_SMART=$(grep -A2 "wallet ready" "${LOG_B}" | grep "smartAddress:" | head -1 | grep -oE "0x[a-fA-F0-9]{40}")
+
+if [ "${SKIP_AUTOFUND:-0}" = "1" ]; then
+  echo "[demo-boot] SKIP_AUTOFUND=1 set, skipping fund step"
+elif [ -n "${PEER_A_OWNER}" ] && [ -n "${PEER_A_SMART}" ] && [ -n "${PEER_B_OWNER}" ] && [ -n "${PEER_B_SMART}" ]; then
+  echo "[demo-boot] auto-funding peer wallets (100 USDT each)..."
+  cd "$(dirname "${PEAR_APP_DIR}")/backend" && bun run scripts/fund-peers.ts \
+    "${PEER_A_OWNER}" "${PEER_A_SMART}" \
+    "${PEER_B_OWNER}" "${PEER_B_SMART}" \
+    --amount 100 2>&1 | tail -20 | sed 's/^/[fund] /' \
+    || echo "[demo-boot] auto-fund failed (non-fatal). Run scripts/fund-peers.ts by hand if tips/VIP fail."
+  cd "${PEAR_APP_DIR}"
+else
+  echo "[demo-boot] could not parse wallet addresses from logs; skipping fund step"
+fi
+
 echo ""
 echo "==== BOOT SUMMARY ==================================================="
 grep -E "sdkPlugins registered [0-9]|ready \{|handle:" "${LOG_A}" | head -3 | sed 's/^/[peer-A] /'
 grep -E "sdkPlugins registered [0-9]|ready \{|handle:" "${LOG_B}" | head -3 | sed 's/^/[peer-B] /'
+echo "[peer-A] wallet: owner=${PEER_A_OWNER:-?} smart=${PEER_A_SMART:-?}"
+echo "[peer-B] wallet: owner=${PEER_B_OWNER:-?} smart=${PEER_B_SMART:-?}"
 echo ""
 echo "Logs: ${LOG_A}  |  ${LOG_B}"
 echo "======================================================================"

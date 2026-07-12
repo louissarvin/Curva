@@ -451,14 +451,114 @@ export function mountVoiceEnrollmentModal({ container, curva, isHost } = {}) {
         successTitle.textContent = 'Voice cloned.'
         const successMsg = document.createElement('p')
         successMsg.className = 'curva-voice-enroll__explainer'
-        successMsg.textContent = 'Try it now with a chat message.'
+        successMsg.textContent = 'Your voice is now on the P2P mesh. When a goal fires, every peer hears the announcement in this voice, in their own language. Play a sample below to hear yourself in each language you support.'
+        card.appendChild(successTitle)
+        card.appendChild(successMsg)
+
+        // Language chips -> pipe a fixed sample sentence through
+        // curva.voiceClone.speak(text, locale). Chatterbox supported locales
+        // per @qvac/sdk/dist/schemas/text-to-speech.d.ts:2 TTS_CHATTERBOX_LANGUAGES
+        // are `en, it, es, fr, de, pt`. See bare/voiceClone.js:344.
+        //
+        // Playback uses the standard WebAudio path: the SDK returns raw Float32
+        // samples + sampleRate on speak-done, we shove them into an
+        // AudioBuffer and start(). This is the same "aha" moment that closes
+        // the F1 voice-clone story in the demo.
+        const SAMPLES = [
+          { code: 'en', label: 'EN English',  text: 'Goal! What a strike from midfield, the crowd is on their feet!' },
+          { code: 'it', label: 'IT Italiano', text: 'Gol! Che tiro da centrocampo, la folla è in piedi!' },
+          { code: 'es', label: 'ES Espanol',  text: 'Gol! Que gran disparo desde el centro del campo, la aficion esta en pie!' },
+          { code: 'fr', label: 'FR Francais', text: 'But! Quelle frappe depuis le milieu de terrain, la foule est debout!' },
+          { code: 'de', label: 'DE Deutsch',  text: 'Tor! Was fuer ein Schuss aus dem Mittelfeld, die Menge steht auf den Beinen!' },
+          { code: 'pt', label: 'PT Portugues', text: 'Gol! Que chutaco do meio-campo, a torcida esta de pe!' }
+        ]
+
+        const sampleTitle = document.createElement('div')
+        sampleTitle.className = 'curva-voice-enroll__hint'
+        sampleTitle.textContent = 'Play a sample in:'
+        sampleTitle.style.marginTop = '18px'
+        card.appendChild(sampleTitle)
+
+        const chipRow = document.createElement('div')
+        chipRow.className = 'curva-voice-enroll__actions'
+        chipRow.style.flexWrap = 'wrap'
+        chipRow.style.marginTop = '10px'
+        card.appendChild(chipRow)
+
+        const sampleStatus = document.createElement('div')
+        sampleStatus.className = 'curva-voice-enroll__status'
+        sampleStatus.textContent = ''
+        card.appendChild(sampleStatus)
+
+        function playSamples (float32Samples, sampleRate) {
+          try {
+            // Bare returns { samples: Float32Array | number[], sampleRate }.
+            // Preload may serialise the Float32Array as a plain number[] when
+            // the IPC boundary transits JSON, so coerce both shapes.
+            let arr
+            if (float32Samples instanceof Float32Array) arr = float32Samples
+            else if (Array.isArray(float32Samples)) arr = Float32Array.from(float32Samples)
+            else if (float32Samples && float32Samples.buffer) arr = new Float32Array(float32Samples.buffer)
+            else return false
+            const ACtor = window.AudioContext || window.webkitAudioContext
+            if (!ACtor) return false
+            const ac = new ACtor()
+            const buf = ac.createBuffer(1, arr.length, Number(sampleRate) || 16000)
+            buf.copyToChannel(arr, 0, 0)
+            const src = ac.createBufferSource()
+            src.buffer = buf
+            src.connect(ac.destination)
+            src.onended = () => { try { ac.close() } catch { /* noop */ } }
+            src.start(0)
+            return true
+          } catch { return false }
+        }
+
+        // Subscribe to voiceClone speak-done ONCE for this success state so we
+        // can play back the Float32 samples returned by the bare worker.
+        if (typeof curva.voiceClone.onSpeakDone === 'function') {
+          const off = curva.voiceClone.onSpeakDone((payload) => {
+            if (!payload) return
+            const played = playSamples(payload.samples, payload.sampleRate)
+            sampleStatus.textContent = played
+              ? 'Playing sample (' + (payload.locale || '?') + ')'
+              : 'Sample returned but audio playback failed'
+          })
+          subs.push(off)
+        }
+
+        for (const s of SAMPLES) {
+          const chip = document.createElement('button')
+          chip.type = 'button'
+          chip.className = 'curva-voice-enroll__btn'
+          chip.textContent = s.label
+          chip.addEventListener('click', async () => {
+            if (typeof curva.voiceClone.speak !== 'function') {
+              sampleStatus.textContent = 'Voice-clone playback unavailable'
+              return
+            }
+            chip.disabled = true
+            sampleStatus.textContent = 'Loading ' + s.label + ' voice model...'
+            try {
+              const out = await curva.voiceClone.speak(s.text, s.code)
+              if (!out || out.ok === false) {
+                sampleStatus.textContent = 'Sample failed for ' + s.label + ': ' + (out?.code || 'unknown')
+              }
+            } catch (err) {
+              sampleStatus.textContent = 'Sample failed for ' + s.label + ': ' + (err?.message || 'unknown')
+            } finally {
+              chip.disabled = false
+            }
+          })
+          chipRow.appendChild(chip)
+        }
+
         const doneBtn = document.createElement('button')
         doneBtn.type = 'button'
         doneBtn.className = 'curva-voice-enroll__btn curva-voice-enroll__btn--primary'
         doneBtn.textContent = 'Close'
+        doneBtn.style.marginTop = '18px'
         doneBtn.addEventListener('click', closeModal)
-        card.appendChild(successTitle)
-        card.appendChild(successMsg)
         card.appendChild(doneBtn)
       } catch (err) {
         saveBtn.disabled = false

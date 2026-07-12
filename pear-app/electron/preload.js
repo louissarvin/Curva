@@ -1552,6 +1552,30 @@ contextBridge.exposeInMainWorld('curva', {
     onError:      (cb) => onEvent('voiceClone:error', cb)
   },
 
+  // ===== F4 SEMIFINAL: VIP ROOM RESERVATION =====
+  // x402 paid-resource on `POST /vip/reserve`. Peer signs an EIP-3009
+  // transferWithAuthorization for 5 USDT to the sponsor address; backend
+  // facilitator settles + writes reservation to Prisma with @unique slug and
+  // @unique txHash. The wire is byte-identical to any other x402 route; see
+  // backend/src/routes/vipRoutes.ts and pear-app/bare/x402Client.js.
+  //
+  // Slug shape: ^[a-z0-9-]{3,32}$ (server normalises via bare/x402Client.js
+  // VIP_SLUG_RE). Fails open on backend outage; the reservation is a
+  // signaling layer + directory hint, not P2P access control.
+  vip: {
+    reserve(slug) {
+      if (typeof slug !== 'string' || slug.length === 0) throw new RangeError('slug required')
+      if (slug.length > 32) throw new RangeError('slug too long (max 32)')
+      return writeMainAwait('vip:reserve', { slug })
+    },
+    status(slug) {
+      if (typeof slug !== 'string' || slug.length === 0) throw new RangeError('slug required')
+      return writeMainAwait('vip:status', { slug })
+    },
+    onReserved: (cb) => onEvent('vip:reserved', cb),
+    onError:    (cb) => onEvent('vip:error',    cb)
+  },
+
   // ===== WAVE 3: GOAL CARD =====
   // LLM structured extraction (json_schema mode). Feed a scoreboard blob,
   // receive a { minute, scorer, team, assist } card. Feature-flag:

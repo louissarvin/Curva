@@ -4813,6 +4813,78 @@ async function dispatchCommand(msg) {
       }
       // ===== END WDK X402 =====
 
+      // ===== F4 SEMIFINAL: VIP ROOM RESERVATION =====
+      // Peer signs a 5 USDT EIP-3009 authorization off-chain; backend
+      // facilitator settles via /vip/reserve. See bare/x402Client.js for the
+      // 402 -> sign -> retry handshake and backend/src/routes/vipRoutes.ts for
+      // the settle path. Wallet is `room.wallet` per the pattern established
+      // by 'x402:fetch' above.
+      case 'vip:reserve': {
+        if (!x402FlagEnabled) {
+          emit('vip:error', { code: 'FEATURE_DISABLED', message: 'x402 feature disabled', requestId: id })
+          emit('ack', { id, cmd, payload: { ok: false, code: 'FEATURE_DISABLED', requestId: id } })
+          return
+        }
+        // Use the MODULE-LEVEL wallet (line 435 above) instead of `room?.wallet`
+        // because VIP reservation is meant to fire from the LOBBY before any
+        // room is joined. Diagnostic panel shows `WDK wallet: ready` but
+        // `room` is still null pre-join. The wallet adapter created at
+        // workers/main.js:2820 exposes signEip3009 as soon as walletReady flips
+        // true. `x402:fetch` uses room?.wallet because it needs the room's
+        // relay context; VIP has no such coupling.
+        const walletHandle = wallet
+        if (!walletReady || !walletHandle || typeof walletHandle.signEip3009 !== 'function') {
+          emit('vip:error', { code: 'WALLET_NOT_READY', message: 'wallet not initialized', requestId: id })
+          emit('ack', { id, cmd, payload: { ok: false, code: 'WALLET_NOT_READY', requestId: id } })
+          return
+        }
+        const slug = String(payload?.slug || '').toLowerCase().slice(0, 32)
+        try {
+          const { reserveVipSlug } = require('../bare/x402Client.js')
+          const res = await reserveVipSlug({
+            baseUrl: config.backendUrl,
+            slug,
+            wallet: walletHandle
+          })
+          if (res && res.ok) {
+            emit('vip:reserved', {
+              slug: res.reservation?.slug || slug,
+              txHash: res.reservation?.txHash || null,
+              ownerAddress: res.reservation?.ownerAddress || null,
+              requestId: id
+            })
+            emit('ack', { id, cmd, payload: { ok: true, reservation: res.reservation, requestId: id } })
+          } else {
+            emit('vip:error', {
+              code: res?.code || 'VIP_RESERVE_FAILED',
+              message: res?.message || 'reservation failed',
+              extra: res?.extra,
+              requestId: id
+            })
+            emit('ack', { id, cmd, payload: { ok: false, code: res?.code, message: res?.message, requestId: id } })
+          }
+        } catch (err) {
+          emit('vip:error', {
+            code: err?.code || 'VIP_RESERVE_THREW',
+            message: err?.message || String(err),
+            requestId: id
+          })
+          emit('ack', { id, cmd, payload: { ok: false, code: err?.code || 'VIP_RESERVE_THREW', requestId: id } })
+        }
+        return
+      }
+      case 'vip:status': {
+        const slug = String(payload?.slug || '').toLowerCase().slice(0, 32)
+        try {
+          const st = await x402CheckVipStatus(slug, { baseUrl: config.backendUrl })
+          emit('ack', { id, cmd, payload: { ...(st || {}), requestId: id } })
+        } catch (err) {
+          emit('ack', { id, cmd, payload: { ok: false, code: 'VIP_STATUS_FAILED', message: err?.message, requestId: id } })
+        }
+        return
+      }
+      // ===== END VIP =====
+
       // ===== ATTENDANCE (Wave 14) =====
       case 'attendance:issue': {
         if (!attendanceFlagEnabledInWorker) {

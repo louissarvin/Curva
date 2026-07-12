@@ -41,7 +41,14 @@ const RECENT_WINDOW_SIZE = 20
 //     Reads Math.max(1, checkout || core.length); the value peers can pin.
 //   * autobase.view — pear-app/node_modules/autobase/index.js:187
 //     The Hyperbee produced by the `open(viewStore)` handler. Reused here.
-const APPLY_MARKER_INTERVAL = 10
+// APPLY_MARKER_INTERVAL controls how often we snapshot a version marker into
+// the ring during a batch of applied nodes. Set low so the demo scrubber has
+// a usable range even with 5-10 test messages. The tail marker (line ~520
+// below) still fires post-batch, so every batch gets an entry regardless of
+// this interval; this constant only controls INTRA-batch markers for large
+// backfills. Old default was 10 which starved the demo scrubber of drag
+// range. 1 = every apply() row seeds a marker.
+const APPLY_MARKER_INTERVAL = 1
 const VERSION_MARKER_CAP = 1024
 
 // F3 Hyperbee goal shard. 3-digit zero-padded minute covers 000..130
