@@ -123,11 +123,24 @@ The last command fires a real Sepolia gasless USDT tx and returns the `txHash` p
 
 | Track | Role | Primitives exercised |
 |-------|------|----------------------|
-| **Pears** | Primary | Hyperswarm, HyperDHT, Corestore, Hypercore, Hyperbee, Autobase (Pattern B), Hyperdrive, Hyperblobs, hypercore-blob-server, blind-peering, keet-identity-key 3.2.0, pear-updater, pear-electron dual-runtime |
-| **WDK** | Cameo | EIP-3009 gasless USDT tips, Foundry-deployed EIP-3009 token, live Sepolia facilitator sponsor |
-| **QVAC** | Cameo | Qwen3 0.6B Q4 room commentator, Whisper Tiny + Silero VAD STT, Supertonic multilingual TTS |
+| **Pears** | Primary | Hyperswarm, HyperDHT, Corestore, Hypercore, Hyperbee, Autobase (Pattern B), Hyperdrive, Hyperblobs, hypercore-blob-server, blind-peering, keet-identity-key 3.2.0 — plus pear-runtime + pear-electron runtime hosts |
+| **WDK** | Cameo | EIP-3009 gasless USDT tips + x402 VIP room reservation (two paid-resource routes on the same wire), Foundry-deployed EIP-3009 token, live Sepolia facilitator sponsor |
+| **QVAC** | Cameo | 9 SDK plugins × 25 verbs across Qwen3 LLM, Bergamot NMT, Whisper + Parakeet STT, Supertonic + Chatterbox TTS, SmolVLM2 VLM, OCR CRAFT+Latin, EmbeddingGemma RAG, Silero VAD |
 
-Thirteen Pears building blocks. Two real WDK settlement paths. Three on-device AI models. All wired through the same running app.
+**11 core Holepunch primitives + 2 runtime hosts. Two real WDK settlement paths. 25 QVAC SDK verbs across nine plugins. All wired through the same running app.**
+
+## Semifinal-cycle spotlight (pinned to `0c75429`)
+
+Judges walking the code review can start here. Everything below landed after the round-of-32 freeze commit `517cff08`; permalinks pin to current HEAD so the line numbers won't drift.
+
+- **x402 VIP room reservation** — client handshake at [`pear-app/bare/x402Client.js#L37-L370`](https://github.com/louissarvin/Curva/blob/0c75429a6d0431dc740a23eeb101a32d280a9e34/pear-app/bare/x402Client.js#L37-L370), backend route at [`backend/src/routes/vipRoutes.ts`](https://github.com/louissarvin/Curva/blob/0c75429a6d0431dc740a23eeb101a32d280a9e34/backend/src/routes/vipRoutes.ts). On-chain proof: `0x309447f5...` (kings-lounge), `0x18af4e31...` (torino-fc).
+- **RAG-augmented commentator with 800 ms deadline race** — [`pear-app/bare/commentator.js#L45-L400`](https://github.com/louissarvin/Curva/blob/0c75429a6d0431dc740a23eeb101a32d280a9e34/pear-app/bare/commentator.js#L45-L400). Chat-history RAG snippet retrieval bounded by a race so the announcer never silences.
+- **Auto-highlight pipeline** — [`pear-app/bare/highlightPipeline.js#L91-L400`](https://github.com/louissarvin/Curva/blob/0c75429a6d0431dc740a23eeb101a32d280a9e34/pear-app/bare/highlightPipeline.js#L91-L400). MobileNetV3 → SmolVLM2 → Qwen3 → Bergamot → Chatterbox, five QVAC capabilities in one flow.
+- **QVAC asset seed-back mesh** — [`pear-app/bare/qvacAssetSeed.js#L95-L436`](https://github.com/louissarvin/Curva/blob/0c75429a6d0431dc740a23eeb101a32d280a9e34/pear-app/bare/qvacAssetSeed.js#L95-L436). Hyperdrive + Hyperblobs + hypercore-blob-server compose to let Peer B pull a Bergamot pair from Peer A over a DHT topic. True P2P model distribution.
+- **Cross-lingual voice coach** — [`pear-app/bare/voiceCoach.js#L117-L200`](https://github.com/louissarvin/Curva/blob/0c75429a6d0431dc740a23eeb101a32d280a9e34/pear-app/bare/voiceCoach.js#L117-L200). Bergamot brackets around a QVAC 5-cap chain.
+- **Match recap 7-capability synthesis** — [`pear-app/bare/matchRecap.js#L92-L500`](https://github.com/louissarvin/Curva/blob/0c75429a6d0431dc740a23eeb101a32d280a9e34/pear-app/bare/matchRecap.js#L92-L500). Autobase → RAG → Qwen3 → Bergamot → Chatterbox → Hyperdrive.
+
+Full permalink index (freeze-snapshot + semifinal-cycle sections) at [`PERMALINKS.md`](https://github.com/louissarvin/Curva/blob/0c75429a6d0431dc740a23eeb101a32d280a9e34/PERMALINKS.md).
 
 ---
 
@@ -144,7 +157,7 @@ Discovery:   e8af62ec1ac7733cdc7f2d3e0e26d563e76a5364f6ed7b882c24c23d69211ee8
 
 Verify from any machine with `pear info pear://hcg8oftrk7hps1z4x9pprf4jhk7mitohjort6csfpjwjjo3ynomy`. The client Bare worker (`workers/main.js`) is Pear-native today; the Electron shell that hosts it is still on npm `electron` (booted via `electron-forge start` in the two-peer demo below). Port to `pear-electron` for direct `pear run` boot is queued for the post-hackathon iteration.
 
-### 13 primitives exercised at runtime
+### 11 primitives + 2 runtime hosts exercised at runtime
 
 ```bash
 curl -s http://localhost:3700/pears/status | jq
@@ -249,7 +262,7 @@ Reference: [`pear-app/bare/`](pear-app/bare/) directory holds the P2P code, [`pe
 
 #### Additional Pears techniques and hardening
 
-The 13 primitives above are the load-bearing core. Waves 2 through 5 added the techniques that make the code review round score properly: apply purity, ack cadence, snapshot reads, sub-database namespacing, encryption at rest, and production observability. Each item below is a specific technique on top of an existing primitive, not a new primitive.
+The 11 primitives + 2 runtime hosts above are the load-bearing core. Waves 2 through 5 added the techniques that make the code review round score properly: apply purity, ack cadence, snapshot reads, sub-database namespacing, encryption at rest, and production observability. Each item below is a specific technique on top of an existing primitive, not a new primitive.
 
 | Technique | Primitive | How Curva uses it | Product moment |
 |-----------|-----------|-------------------|----------------|
@@ -472,7 +485,7 @@ Total: ~750+ tests passing across new-feature suites (195/195 on the F1-F22 sess
 Two artifacts added late in the semifinal cycle to reduce the reviewer's spelunking cost:
 
 - **[`SECURITY.md`](SECURITY.md)** at repo root — threat model + defenses per subsystem (keet-identity, Pattern B, apply middleware observability, chat scrubber, Hypercore encryption for sealed predictions, RAG prompt-injection defense, EIP-3009 replay protection, x402 nonce + slug guard, delegated inference fail-closed firewall, F13 asset seed input validation, loopback-only Prometheus, sponsor key rotation) + explicit "does NOT defend against" section.
-- **`GET /features` on the Companion** — reviewer runs `curl http://localhost:3700/features` and gets a JSON matrix of every Curva feature: 11 QVAC orchestration flows, 16 QVAC capabilities, 16 MCP tools, 13 Pears primitives + 9 techniques, 5 WDK surfaces, backend feature-flag state, all 30 backend route prefixes. 30s cached. Route at [`backend/src/routes/featuresRoutes.ts`](https://github.com/louissarvin/Curva/blob/a14f2e8/backend/src/routes/featuresRoutes.ts).
+- **`GET /features` on the Companion** — reviewer runs `curl http://localhost:3700/features` and gets a JSON matrix of every Curva feature: 11 QVAC orchestration flows, 16 QVAC capabilities, 16 MCP tools, 11 Pears primitives + 2 runtime hosts + 9 techniques, 5 WDK surfaces, backend feature-flag state, all 30 backend route prefixes. 30s cached. Route at [`backend/src/routes/featuresRoutes.ts`](https://github.com/louissarvin/Curva/blob/a14f2e8/backend/src/routes/featuresRoutes.ts).
 
 ### What we intentionally did NOT build
 
@@ -835,7 +848,7 @@ Honest checklist. Everything below is verifiable tonight.
 | Pear app published to Pear DHT | Verified | `pear info pear://hcg8oft...` returns `name: curva, release: 23135` |
 | Pear-native Bare P2P worker | Verified | `pear-app/workers/main.js` runs all P2P (Hyperswarm, Autobase, Hyperdrive, blind-peering) under Bare shims (`bare-fs`, `bare-crypto`, `bare-http1`) |
 | Direct `pear run pear://...` boot | Staged | Electron shell still on npm `electron`; port to `pear-electron` window API is post-hackathon |
-| 13 Pears primitives active at runtime | Verified | `GET /pears/status` enumerates each with runtime state |
+| 11 Pears primitives + 2 runtime hosts active at runtime | Verified | `GET /pears/status` enumerates each with runtime state |
 | Autobase Pattern B multi-writer | Verified | Chat + playhead both use `base.addWriter` after ed25519 invitation |
 | Blind peering | Verified | Blind peer key `nm5j8618...kt1fy`, chat + playhead both register |
 | Rooms survive host disconnect | Verified | Blind peer keeps replicating both Autobases |
