@@ -482,8 +482,27 @@ async function createTranslator (opts = {}) {
       disabled = true
       disabledReason = `init timeout after ${timeoutMs}ms`
       onError({ code: 'INIT_TIMEOUT', message: disabledReason })
-      // Best-effort: capture any late init errors so they don't unhandled-reject.
-      initPromise.catch(() => {})
+      // Late-recovery. On cold start, downloading + decompressing four
+      // Bergamot pairs from Mozilla's GCS bucket routinely takes 30-90s on a
+      // normal home link (see storage.googleapis.com/moz-fx-translations-data
+      // per bare/translate.js docs above). initPromise keeps running after
+      // the timeout even though we've already reported disabled=true. When
+      // the underlying pairs finish loading successfully in the background,
+      // flip disabled back off and emit `phase: 'ready'` so callers can
+      // recover. Preserves the timeout test's semantics: slowFactory tests
+      // never resolve initPromise, so this hook never fires there.
+      initPromise
+        .then(() => {
+          if (loadedPairs.size === 0) return
+          disabled = false
+          disabledReason = null
+          onProgress({
+            phase: 'ready',
+            loaded: Array.from(loadedPairs),
+            lateInit: true
+          })
+        })
+        .catch(() => { /* stay disabled — init genuinely failed */ })
     }
   } catch (err) {
     disabled = true

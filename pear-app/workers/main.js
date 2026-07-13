@@ -3056,10 +3056,34 @@ async function ensureTranslator(targetLang) {
   translatorInitPromise = createTranslator({
     storageDir,
     backendClient,
-    timeoutMs: 30_000,
+    // Cold-start budget. Four Bergamot pairs + vocabs = ~48 MB from Mozilla's
+    // GCS bucket, plus gunzip + engine init. 30s was too tight and blew the
+    // race on every fresh boot; 90s matches typical home-link cold-start.
+    // If it does still time out, bare/translate.js emits a late `phase: 'ready'`
+    // event when the underlying loadModel calls finish, which we honour below
+    // to flip `translationEnabled` back on.
+    timeoutMs: 90_000,
     onProgress: (ev) => {
       log('info', 'translator progress', ev)
       emit('translate:progress', ev)
+      // Late-recovery from bare/translate.js after INIT_TIMEOUT: flip the
+      // gate back on and re-notify the renderer so the "Loading translation
+      // model..." UI can clear and translations start flowing.
+      if (ev && ev.phase === 'ready' && ev.lateInit && translator) {
+        const st = translator.status()
+        if (st.ready) {
+          translationEnabled = true
+          log('info', 'translator recovered post-timeout', {
+            loaded: st.loaded,
+            targetLang: userTargetLang
+          })
+          emit('translate:ready', {
+            loaded: st.loaded,
+            targetLang: userTargetLang,
+            lateInit: true
+          })
+        }
+      }
     },
     onError: (err) => {
       log('warn', 'translator progress error', { message: err?.message, code: err?.code })

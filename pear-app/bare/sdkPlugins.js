@@ -219,12 +219,101 @@ async function ensureAllPlugins (sdkMod, log) {
 }
 
 /**
+ * Configure the SDK before any RPC verb fires.
+ *
+ * The SDK's file-based config loader at
+ * node_modules/@qvac/sdk/dist/client/config-loader/resolve-config.bare.js:33
+ * uses CommonJS `require(filePath)`, but the SDK's own client modules are
+ * loaded as ESM (`file://` scheme), so `require` is not defined and JSON /
+ * .js configs throw `CONFIG_FILE_PARSE_FAILED: require is not defined`. That
+ * error is fatal — the SDK worker rejects every subsequent loadModel with
+ * the same message (we watched translate.js hit it for every Bergamot pair
+ * in the peer log). Documented reason to configure programmatically instead.
+ *
+ * The private-subpath import below reaches directly into
+ * `dist/server/bare/registry/config-registry.js` where `setSDKConfig` lives.
+ * That module is server-side, module-scoped state; calling it once here
+ * before ensureAllPlugins() fires any RPC guarantees our timeouts are in
+ * effect for the very first loadModel. `setSDKConfig` is idempotent-guarded
+ * (throws ConfigAlreadySetError on second call), so we swallow that in the
+ * unlikely event another path beat us to it.
+ *
+ * Values match the (deleted) qvac.config.json: 5-minute per-attempt window
+ * with 10 retries so cold-start P2P blob downloads of Chatterbox T3+S3Gen
+ * (~1.4 GB combined) don't blow the SDK default 60_000ms x 3 retries
+ * budget. See registry-client-options.js:9-11 for the mapping into
+ * QVACRegistryClient.downloadBlob options.
+ */
+async function primeSdkConfig (log) {
+  const safeLog = typeof log === 'function' ? log : function () {}
+  // Reach config-registry.js via absolute file:// URL because the SDK's
+  // package.json `exports` field gates all subpath imports and does NOT
+  // include `./dist/server/bare/registry/*` (verified against the installed
+  // 0.14.0 package.json — only `.`, `./package`, `./dist/server/worker.js`,
+  // and the plugin subpaths are exposed). `./package` → package.json is
+  // allowed, which gives us the package root without any private-path probing;
+  // from there we compose the file:// URL. Bare's dynamic import() accepts
+  // file:// URLs unconditionally, side-stepping the package resolver.
+  let setSDKConfig
+  try {
+    // Dual-runtime module resolution: `bare-path` on Bare, Node's `path` under
+    // brittle-node tests. Same discipline used in bare/translate.js.
+    let path
+    try { path = require('bare-path') } catch { path = require('path') }
+    // Compose the file:// URL from __dirname to sidestep BOTH the package
+    // resolver's exports gate AND require.resolve('@qvac/sdk/package.json')
+    // — Bare's package resolver refuses either lookup because the SDK's
+    // exports field lists only `./package` (aliased to package.json), not the
+    // literal `./package.json`, and does not expose anything under
+    // `./dist/server/bare/registry/*`. This layout is guaranteed by
+    // pear-app/node_modules/@qvac/sdk being a peer-hoisted dep of pear-app/,
+    // so the relative traversal `../node_modules/@qvac/sdk/...` is stable.
+    const configRegistryPath = path.resolve(
+      __dirname,
+      '..',
+      'node_modules/@qvac/sdk/dist/server/bare/registry/config-registry.js'
+    )
+    const configRegistry = await import('file://' + configRegistryPath)
+    setSDKConfig = configRegistry && configRegistry.setSDKConfig
+  } catch (err) {
+    safeLog('warn', '[sdkPlugins] setSDKConfig import failed; SDK will use defaults', {
+      message: err && err.message
+    })
+    return
+  }
+  if (typeof setSDKConfig !== 'function') {
+    safeLog('warn', '[sdkPlugins] setSDKConfig not exported from config-registry.js; skipping')
+    return
+  }
+  try {
+    setSDKConfig({
+      registryStreamTimeoutMs: 300000,
+      registryDownloadMaxRetries: 10
+    })
+    safeLog('info', '[sdkPlugins] SDK config primed', {
+      registryStreamTimeoutMs: 300000,
+      registryDownloadMaxRetries: 10
+    })
+  } catch (err) {
+    const msg = (err && err.message) || String(err)
+    if (msg.toLowerCase().indexOf('already set') >= 0) {
+      safeLog('info', '[sdkPlugins] SDK config already set by another path (fine)', {})
+    } else {
+      safeLog('warn', '[sdkPlugins] setSDKConfig threw; SDK will use defaults', { message: msg })
+    }
+  }
+}
+
+/**
  * Convenience helper: import the SDK, register everything, return hostApi.
  * Callers that don't have the sdk module in scope can use this to boot in
  * one line.
  * @param {(level:string,msg:string,extra?:object)=>void} log
  */
 async function boot (log) {
+  // Prime the SDK's registry timeouts BEFORE any RPC verb fires. See
+  // primeSdkConfig for the docs-referenced rationale.
+  await primeSdkConfig(log)
   let sdkMod
   try {
     sdkMod = await import('@qvac/sdk')

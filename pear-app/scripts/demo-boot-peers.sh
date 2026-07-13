@@ -92,6 +92,15 @@ CURVA_ENV=(
 
 echo "[demo-boot] booting Peer A (HOME=${HOME_A})..."
 cd "${PEAR_APP_DIR}"
+
+# QVAC SDK timeouts are primed programmatically inside bare/sdkPlugins.js via
+# setSDKConfig() before any RPC verb fires. We do NOT use the file-based
+# QVAC_CONFIG_PATH resolver because @qvac/sdk's Bare config loader (see
+# node_modules/@qvac/sdk/dist/client/config-loader/resolve-config.bare.js:33)
+# calls `require(filePath)` in an ESM context and throws
+# CONFIG_FILE_PARSE_FAILED. See bare/sdkPlugins.js::primeSdkConfig for the
+# programmatic-set path and the SDK internals it targets.
+
 env "${CURVA_ENV[@]}" \
     HOME="${HOME_A}" \
     DEV_WALLET_PASSCODE=curva-peer-a-pw \
