@@ -49,7 +49,25 @@ const ALLOWED_CLONE_LOCALES = Object.freeze(new Set([
   'en', 'it', 'es', 'fr', 'de', 'pt'
 ]))
 
-const CHATTERBOX_MODEL_SRC_KEY = 'TTS_CHATTERBOX_MULTILINGUAL_Q8_0'
+// Chatterbox is a TWO-artefact model. Per @qvac/sdk plugin at
+// dist/server/bare/plugins/tts-ggml/plugin.js:19, resolveChatterboxConfig
+// throws TTS_ARTIFACTS_REQUIRED when modelConfig.s3genModelSrc is missing.
+// The T3 GGUF loaded via modelSrc is only half of the pipeline; the S3Gen
+// companion generates the mel-to-waveform stage. See the SDK's own example
+// at dist/examples/tts/chatterbox.js:10-14 for the canonical call shape.
+//
+// Registry key discipline: the SDK renamed the multilingual T3 key from the
+// old `TTS_CHATTERBOX_MULTILINGUAL_Q8_0` (Ship 3 F1 vintage) to the current
+// `TTS_T3_MULTILINGUAL_CHATTERBOX_Q8_0` when it split the T3 / S3Gen pipeline
+// into separate registry entries. Using the old key resolves to `undefined`
+// off the sdk namespace, falls back to a plain string, and the SDK's model
+// resolver rejects with `MODEL_NOT_FOUND` (see the peer log at boot for the
+// full "Available models" list — the new T3 name is what actually ships).
+// Both constants below live at models.js:16737 (T3) and models.js:16833
+// (S3Gen), and are top-level re-exported via
+// node_modules/@qvac/sdk/dist/index.js `export * from './models/registry/'`.
+const CHATTERBOX_MODEL_SRC_KEY = 'TTS_T3_MULTILINGUAL_CHATTERBOX_Q8_0'
+const CHATTERBOX_S3GEN_SRC_KEY = 'TTS_S3GEN_MULTILINGUAL_CHATTERBOX_Q8_0'
 const CHATTERBOX_MODEL_ID_PREFIX = 'tts-chatterbox'
 const CHATTERBOX_SAMPLE_RATE = 24000 // Chatterbox reports 24kHz mono s16 PCM.
 
@@ -305,6 +323,14 @@ function createVoiceClone (opts = {}) {
       return null
     }
     const modelSrc = sdk[CHATTERBOX_MODEL_SRC_KEY] || CHATTERBOX_MODEL_SRC_KEY
+    // Resolve the S3Gen companion from the SDK's registry exports the same way
+    // we resolve the T3 model. The schema accepts either a whole registry
+    // constant OR its `.src` string (dist/schemas/text-to-speech.d.ts:225 ->
+    // ZodUnion<[ZodString, ZodObject<{ src: ZodString, ... }>]>). We prefer the
+    // full object because it carries expectedSize + sha256Checksum which the
+    // SDK uses for integrity checks. Fallback to the plain constant name so
+    // older SDK releases that name-lookup internally still resolve it.
+    const s3genModelSrc = sdk[CHATTERBOX_S3GEN_SRC_KEY] || CHATTERBOX_S3GEN_SRC_KEY
     let modelId
     try {
       emit('voiceClone:loading', { locale: target })
@@ -314,6 +340,8 @@ function createVoiceClone (opts = {}) {
         modelConfig: {
           ttsEngine: 'chatterbox',
           language: target,
+          // Required by resolveChatterboxConfig; missing → TtsArtifactsRequiredError.
+          s3genModelSrc,
           referenceAudioSrc: {
             src: 'hyperblob://' + state.referenceRef.blobCoreKey,
             blobCoreKey: state.referenceRef.blobCoreKey,
@@ -561,6 +589,7 @@ module.exports = {
   normaliseLocale,
   ALLOWED_CLONE_LOCALES,
   CHATTERBOX_MODEL_SRC_KEY,
+  CHATTERBOX_S3GEN_SRC_KEY,
   CHATTERBOX_MODEL_ID_PREFIX,
   CHATTERBOX_SAMPLE_RATE,
   MAX_REFERENCE_BYTES,

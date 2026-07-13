@@ -1537,17 +1537,24 @@ contextBridge.exposeInMainWorld('curva', {
       }
       return writeMainAwait('voice-clone:enroll', payload)
     },
-    speak({ text, locale = 'en' } = {}) {
+    // Positional (text, locale) matching bare/voiceClone.js:352 speak(text, locale)
+    // and the renderer's actual call convention at
+    // renderer/components/VoiceEnrollmentModal.js:543 `speak(s.text, s.code)`.
+    //
+    // Locale allowlist is the six-language Chatterbox safe subset that Curva
+    // exposes via ALLOWED_CLONE_LOCALES in bare/voiceClone.js:49. That subset
+    // is intentionally narrower than the SDK's full
+    // TTS_CHATTERBOX_LANGUAGES (22 langs, see
+    // node_modules/@qvac/sdk/dist/schemas/text-to-speech.d.ts:2) but matches the
+    // six sample chips the VoiceEnrollmentModal offers.
+    speak(text, locale = 'en') {
       if (typeof text !== 'string' || text.length === 0) {
         throw new RangeError('text required')
       }
       if (text.length > 800) throw new RangeError('text too long (max 800)')
       const loc = String(locale).toLowerCase().slice(0, 2)
-      // Chatterbox subset enforced worker-side; we allowlist EN/IT here for a
-      // fast fail on obvious mistakes. Non-supported locales still return
-      // { ok: false, code } from the worker for robustness.
-      if (!['en', 'it'].includes(loc)) {
-        throw new RangeError('locale must be en or it')
+      if (!['en', 'it', 'es', 'fr', 'de', 'pt'].includes(loc)) {
+        throw new RangeError('locale must be one of en, it, es, fr, de, pt')
       }
       return writeMainAwait('voice-clone:speak', { text, locale: loc })
     },
