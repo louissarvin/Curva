@@ -1257,6 +1257,13 @@ async function ensureVoiceClone () {
         sdk,
         hyperblobs,
         corestore: store,
+        // Storage dir for the local filesystem mirror of the reference WAV.
+        // Chatterbox's TTS interface can only open filesystem paths (the SDK
+        // resolve.js does not know `hyperblob://`), so voiceClone.js writes a
+        // copy of the WAV bytes here on enroll and passes the path to
+        // referenceAudioSrc on loadModel. See bare/voiceClone.js::enroll for
+        // the write and ::ensureModel for the read.
+        storageDir: config.dir,
         emit: (ev, p) => emit(ev, p),
         log
       })
@@ -5456,14 +5463,34 @@ async function dispatchCommand(msg) {
         emit('voiceClone:speak-start', { locale, requestId: id })
         const out = await vc.speak(text, locale)
         if (out) {
+          // Ship the ACTUAL sample array so the renderer's WebAudio playback
+          // path in VoiceEnrollmentModal.js::playSamples() can decode. Sending
+          // only .length (as we did until 2026-07-15) meant playSamples()
+          // received a plain Number, failed the Float32Array/Array/typedArray
+          // sniff, returned false, and the modal stayed stuck on
+          // "Loading EN English voice model..." because no onSpeakDone update
+          // ever cleared the status. Payload is ~640KB JSON for a 3.4s clip
+          // (81k int16 samples serialized as a JSON array); acceptable given
+          // this is a one-off event, not a per-chunk stream.
           emit('voiceClone:speak-done', {
             locale: out.locale,
-            samples: out.samples.length,
+            samples: out.samples,
+            sampleCount: out.samples.length,
             sampleRate: out.sampleRate,
             requestId: id
           })
         }
-        emit('ack', { id, cmd, payload: { ok: !!out, locale, requestId: id } })
+        emit('ack', {
+          id,
+          cmd,
+          payload: {
+            ok: !!out,
+            locale,
+            sampleCount: out ? out.samples.length : 0,
+            sampleRate: out ? out.sampleRate : null,
+            requestId: id
+          }
+        })
         return
       }
       case 'voice-clone:status': {

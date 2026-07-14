@@ -39,6 +39,40 @@
 
 'use strict'
 
+// Dual-runtime module resolution: `bare-*` on Bare, Node's built-ins under
+// brittle-node tests. Same discipline used in bare/translate.js and
+// bare/clips.js.
+function _tryRequire (bareId, nodeId) {
+  try { return require(bareId) } catch { return require(nodeId) }
+}
+
+/**
+ * Read seconds of PCM audio from a canonical RIFF/WAVE header.
+ * Returns NaN when the bytes aren't a recognised WAV so callers can fall
+ * through to downstream validation. Only tries the standard fmt+data layout
+ * (matches what pear-app/renderer/components/VoiceEnrollmentModal.js emits
+ * via float32PcmToWav16Bit); anything exotic is treated as unknown.
+ * @param {Uint8Array|Buffer} bytes
+ * @returns {number} duration in seconds, or NaN
+ */
+function readWavDurationSeconds (bytes) {
+  if (!bytes || bytes.byteLength < 44) return NaN
+  const view = bytes instanceof Uint8Array
+    ? new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+    : new DataView(bytes)
+  // 'RIFF' at 0, 'WAVE' at 8 (big-endian ASCII)
+  const riff = String.fromCharCode(view.getUint8(0), view.getUint8(1), view.getUint8(2), view.getUint8(3))
+  const wave = String.fromCharCode(view.getUint8(8), view.getUint8(9), view.getUint8(10), view.getUint8(11))
+  if (riff !== 'RIFF' || wave !== 'WAVE') return NaN
+  // byteRate at bytes 28-31 (u32 LE). Data-chunk size = total - 44 for the
+  // canonical PCM header layout used by float32PcmToWav16Bit.
+  const byteRate = view.getUint32(28, true)
+  if (!byteRate) return NaN
+  const dataBytes = bytes.byteLength - 44
+  if (dataBytes <= 0) return 0
+  return dataBytes / byteRate
+}
+
 // Ship 3 F1: European/Latin safe set. Verified against the
 // TTS_CHATTERBOX_LANGUAGES literal at text-to-speech.d.ts:2 (fetched
 // 2026-07-10). All six are members of that Chatterbox-supported list. We
@@ -135,14 +169,23 @@ function createVoiceClone (opts = {}) {
     corestore = null,
     log = () => {},
     emit = () => {},
-    defaultLocale = 'en'
+    defaultLocale = 'en',
+    // Optional local storage dir for a filesystem mirror of the reference WAV.
+    // Chatterbox's referenceAudioSrc goes through the SDK's resolveModelPath
+    // (node_modules/@qvac/sdk/dist/server/rpc/handlers/load-model/resolve.js)
+    // which only understands `registry://`, `http(s)://`, `pear://`, or bare
+    // filesystem paths - NOT `hyperblob://`. Curva keeps the Hyperblob write
+    // as the P2P replication surface (other peers pull the reference from the
+    // room's corestore) AND mirrors the same bytes to a local file so the
+    // TTS plugin's TTSInterface constructor can read them. See enroll() below.
+    storageDir = null
   } = opts
 
   const state = {
     destroyed: false,
     ready: false,
     modelIdByLocale: new Map(),
-    // { blobCoreKey: hex string, blobIndex: number, mimeType, sizeBytes }
+    // { blobCoreKey: hex string, blobIndex: number, filePath: string|null, mimeType, sizeBytes }
     referenceRef: null,
     sdk: null,
     lastError: null,
@@ -224,6 +267,27 @@ function createVoiceClone (opts = {}) {
       })
       return null
     }
+    // Chatterbox validates reference audio duration at model activation:
+    //   "--reference-audio is only N.NN s; Chatterbox requires strictly more
+    //    than 5 s of clean mono speech. Shorter references produce undersized
+    //    conditioning tensors and the model falls back on the built-in voice."
+    // Parse the WAV header (RIFF/WAVE) to compute duration up-front so we can
+    // reject with a clear code here instead of the opaque FAILED_TO_ACTIVATE
+    // surfaced only on the first speak() call. WAV header layout per RIFF spec:
+    // bytes 0-3 'RIFF', 8-11 'WAVE', 22-23 numChannels (u16 LE),
+    // 24-27 sampleRate (u32 LE), 28-31 byteRate (u32 LE). Data size is the
+    // subchunk after 'data' but we approximate with total - 44 for the
+    // canonical PCM header (matches what float32PcmToWav16Bit produces on the
+    // renderer side). Only inspected when the header magic matches — non-WAV
+    // uploads fall through to the SDK's own validation.
+    const durationSeconds = readWavDurationSeconds(bytes)
+    if (Number.isFinite(durationSeconds) && durationSeconds > 0 && durationSeconds <= 5.0) {
+      emit('voiceClone:error', {
+        code: 'REFERENCE_TOO_SHORT',
+        message: 'reference audio is ' + durationSeconds.toFixed(2) + 's; Chatterbox requires strictly more than 5s of clean mono speech'
+      })
+      return null
+    }
 
     let blobId
     try {
@@ -271,16 +335,50 @@ function createVoiceClone (opts = {}) {
       return null
     }
 
+    // Mirror the WAV bytes to a local filesystem path so Chatterbox's TTS
+    // interface can read them. The SDK's resolveModelPath (verified against
+    // node_modules/@qvac/sdk/dist/server/rpc/handlers/load-model/resolve.js:94-133)
+    // handles ONLY: pear://, registry://, http(s)://, and bare filesystem
+    // paths. There is no hyperblob:// scheme, so passing a hyperblob-URL
+    // reference resolves to a non-existent file and TTSInterface at
+    // node_modules/@qvac/tts-ggml/tts.js:16 throws
+    // "Error: reference audio not found: hyperblob://...". The Hyperblob write
+    // stays as the P2P replication surface (other peers pull the reference
+    // from the room's corestore); this mirror file is the local-read surface
+    // that the tts-ggml addon actually opens.
+    let filePath = null
+    if (storageDir && typeof storageDir === 'string') {
+      try {
+        const path = _tryRequire('bare-path', 'path')
+        const fs = _tryRequire('bare-fs', 'fs')
+        const dir = path.join(storageDir, 'qvac-models')
+        try { fs.mkdirSync(dir, { recursive: true }) } catch (err) {
+          if (err.code !== 'EEXIST') throw err
+        }
+        filePath = path.join(dir, 'voice-clone-reference-' + blobCoreKey.slice(0, 16) + '.wav')
+        fs.writeFileSync(filePath, bytes)
+      } catch (err) {
+        log('warn', 'voiceClone: filesystem mirror write failed; TTS may not resolve reference', {
+          message: err && err.message
+        })
+        filePath = null
+      }
+    } else {
+      log('warn', 'voiceClone: no storageDir provided; TTS reference audio will not be resolvable')
+    }
+
     state.referenceRef = {
       blobCoreKey,
       blobIndex,
-      sizeBytes: bytes.byteLength
+      sizeBytes: bytes.byteLength,
+      filePath
     }
     void corestore // referenced for future replication path; keeps lint quiet
     emit('voiceClone:enrolled', {
       blobCoreKey,
       blobIndex,
-      sizeBytes: bytes.byteLength
+      sizeBytes: bytes.byteLength,
+      filePath
     })
     return { ...state.referenceRef }
   }
@@ -292,13 +390,21 @@ function createVoiceClone (opts = {}) {
    */
   function setReference (ref) {
     if (!ref || typeof ref !== 'object') return false
-    const { blobCoreKey, blobIndex } = ref
+    const { blobCoreKey, blobIndex, filePath } = ref
     if (typeof blobCoreKey !== 'string' || blobCoreKey.length === 0) return false
     if (!Number.isFinite(blobIndex) || blobIndex < 0) return false
+    // filePath is the filesystem mirror of the reference WAV. Optional at the
+    // setReference boundary (caller may re-hydrate it before speak()), but
+    // required by ensureModel() at speak time — see the NO_REFERENCE_FILE
+    // error there. Callers doing a "resume without re-enroll" must restore
+    // the mirror from the Hyperblob before setReference, otherwise the first
+    // speak() will error out cleanly instead of silently synthesising with
+    // an empty reference.
     state.referenceRef = {
       blobCoreKey,
       blobIndex,
-      sizeBytes: Number.isFinite(ref.sizeBytes) ? ref.sizeBytes : null
+      sizeBytes: Number.isFinite(ref.sizeBytes) ? ref.sizeBytes : null,
+      filePath: typeof filePath === 'string' && filePath.length > 0 ? filePath : null
     }
     return true
   }
@@ -331,6 +437,19 @@ function createVoiceClone (opts = {}) {
     // SDK uses for integrity checks. Fallback to the plain constant name so
     // older SDK releases that name-lookup internally still resolve it.
     const s3genModelSrc = sdk[CHATTERBOX_S3GEN_SRC_KEY] || CHATTERBOX_S3GEN_SRC_KEY
+    // referenceAudioSrc MUST be a scheme the SDK's resolveModelPath can
+    // resolve. `hyperblob://` is not registered there (only pear://, registry://,
+    // http(s)://, filesystem paths). If enroll() successfully wrote the
+    // filesystem mirror alongside the Hyperblob, prefer that path. Fail loudly
+    // otherwise so we don't hit the opaque
+    // "reference audio not found: hyperblob://..." error at TTSInterface init.
+    const refFilePath = state.referenceRef && state.referenceRef.filePath
+    if (!refFilePath || typeof refFilePath !== 'string') {
+      const msg = 'reference audio filesystem mirror missing — pass storageDir to createVoiceClone'
+      state.lastError = msg
+      emit('voiceClone:error', { code: 'NO_REFERENCE_FILE', locale: target, message: msg })
+      return null
+    }
     let modelId
     try {
       emit('voiceClone:loading', { locale: target })
@@ -342,11 +461,10 @@ function createVoiceClone (opts = {}) {
           language: target,
           // Required by resolveChatterboxConfig; missing → TtsArtifactsRequiredError.
           s3genModelSrc,
-          referenceAudioSrc: {
-            src: 'hyperblob://' + state.referenceRef.blobCoreKey,
-            blobCoreKey: state.referenceRef.blobCoreKey,
-            blobIndex: state.referenceRef.blobIndex
-          }
+          // Bare filesystem path; SDK's resolveModelPath (resolve.js:134-149)
+          // treats anything with a `/` as a filesystem path and hands it
+          // through unchanged. TTSInterface then opens the WAV directly.
+          referenceAudioSrc: refFilePath
         },
         onProgress: (p) => emit('voiceClone:progress', {
           locale: target,

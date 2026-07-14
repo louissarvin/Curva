@@ -16,7 +16,17 @@
 // is disconnected on stop so no timer leaks occur.
 
 const RECORD_SECONDS = 15
+// Chatterbox voice-clone requires strictly MORE than 5 s of reference audio
+// (verified from the tts-ggml addon runtime error:
+// "--reference-audio is only N.NN s; Chatterbox requires strictly more than
+//  5 s of clean mono speech. Shorter references produce undersized
+//  conditioning tensors and the model falls back on the built-in voice.").
+// We enforce a 6-second minimum with 1-second safety margin so users don't
+// hit the exact-boundary rejection at 5.00-5.03 s.
+const MIN_RECORD_SECONDS = 6
 const TARGET_SAMPLE_RATE = 16_000
+// Minimum PCM sample count required to satisfy Chatterbox validation.
+const MIN_RECORD_SAMPLES = MIN_RECORD_SECONDS * TARGET_SAMPLE_RATE
 const SCRIPT_BUFFER_SIZE = 4096
 
 // Encode a Float32Array (range roughly [-1, 1]) as a 16-bit little-endian
@@ -400,6 +410,19 @@ export function mountVoiceEnrollmentModal({ container, curva, isHost } = {}) {
 
     recordBtn.addEventListener('click', () => {
       if (isRecording) {
+        // Guard against stopping short of Chatterbox's >5 s minimum. If we
+        // stop early, the reference WAV is under 5 s and the tts-ggml addon
+        // rejects it at model activation time with a
+        // FAILED_TO_ACTIVATE / "Chatterbox requires strictly more than 5 s"
+        // error that only surfaces on the first sample chip click, well
+        // after the user has moved past enrollment.
+        const soFarSamples = pcmChunks.reduce((sum, c) => sum + (c.length || 0), 0)
+        if (soFarSamples < MIN_RECORD_SAMPLES) {
+          const soFarSec = soFarSamples / TARGET_SAMPLE_RATE
+          const need = Math.max(1, Math.ceil(MIN_RECORD_SECONDS - soFarSec))
+          setStatus('Keep recording ' + need + ' more second' + (need === 1 ? '' : 's') + ' — Chatterbox needs at least ' + MIN_RECORD_SECONDS + 's of clean speech.')
+          return
+        }
         clearInterval(countdownTimer)
         countdownTimer = null
         finishRecording()
@@ -431,9 +454,21 @@ export function mountVoiceEnrollmentModal({ container, curva, isHost } = {}) {
 
     saveBtn.addEventListener('click', async () => {
       if (!recordedPcm) return
+      // Defensive: block Save if the recording is under Chatterbox's 5s minimum.
+      // Should never fire because recordBtn already guards early stop, but
+      // catches any exotic path that leaves a short pcm buffer here.
+      if (recordedPcm.length < MIN_RECORD_SAMPLES) {
+        const soFarSec = (recordedPcm.length / TARGET_SAMPLE_RATE).toFixed(2)
+        setStatus('Recording is only ' + soFarSec + 's — Chatterbox needs at least ' + MIN_RECORD_SECONDS + 's. Please re-record.', true)
+        return
+      }
       saveBtn.disabled = true
       saveBtn.textContent = 'Enrolling...'
-      setStatus('')
+      // On a fresh cold boot the worker has to lazy-import @qvac/sdk and stand
+      // up a dedicated Hyperblobs on a new corestore namespace before it can
+      // accept the WAV. That first-call cost can push past 10 seconds. Surface
+      // a status so the user knows the app isn't hung.
+      setStatus('Writing reference audio to the P2P mesh...')
       try {
         // Preload boundary at preload.js:1510 rejects Float32Array with
         // "unsupported pcm type" — it only accepts ArrayBuffer / Uint8Array /
@@ -443,7 +478,17 @@ export function mountVoiceEnrollmentModal({ container, curva, isHost } = {}) {
         // a Uint8Array so preload accepts it and bare/voiceClone.js Hyperblob-
         // stores a valid WAV that Chatterbox can consume.
         const wavBytes = float32PcmToWav16Bit(recordedPcm, TARGET_SAMPLE_RATE)
-        await curva.voiceClone.enroll(wavBytes)
+        // Worker ack shape (workers/main.js:5445): { ok, ref, requestId }.
+        // If ok=false the worker already emitted `voiceClone:error` with a
+        // typed code; the promise still RESOLVES rather than rejecting. Check
+        // ok before advancing to the success UI or the modal locks into the
+        // "Voice cloned" state with a null referenceRef and every subsequent
+        // sample chip click silently fails.
+        const out = await curva.voiceClone.enroll(wavBytes)
+        if (!out || out.ok === false) {
+          const code = out?.code || 'UNKNOWN'
+          throw new Error('enrollment failed (' + code + ')')
+        }
         // Success state
         card.textContent = ''
         const successTitle = document.createElement('div')
@@ -490,20 +535,64 @@ export function mountVoiceEnrollmentModal({ container, curva, isHost } = {}) {
         sampleStatus.textContent = ''
         card.appendChild(sampleStatus)
 
-        function playSamples (float32Samples, sampleRate) {
+        function playSamples (rawSamples, sampleRate) {
           try {
-            // Bare returns { samples: Float32Array | number[], sampleRate }.
-            // Preload may serialise the Float32Array as a plain number[] when
-            // the IPC boundary transits JSON, so coerce both shapes.
+            // Chatterbox emits Int16Array of 24 kHz PCM (verified in
+            // node_modules/@qvac/tts-ggml/index.js:215 which documents
+            // "outputArray = Int16Array of 24 kHz PCM samples"). Over the
+            // Bare worker IPC pipe those samples are JSON-serialised into a
+            // plain number[] where each entry is a signed 16-bit integer
+            // (range -32768..32767). WebAudio's copyToChannel requires
+            // Float32 in [-1.0, 1.0], so we normalise by dividing through
+            // 32768 (the max magnitude of int16). This path is unconditional
+            // for Array inputs because Chatterbox always yields int16 - a
+            // "smart" sniff on the first N samples was too fragile (short
+            // clips can start with near-silent samples and false-negative
+            // the int16 detection, leaving the buffer at full int16 scale
+            // which WebAudio treats as +32000 = clip-to-1.0 = distortion
+            // or silence depending on the platform).
             let arr
-            if (float32Samples instanceof Float32Array) arr = float32Samples
-            else if (Array.isArray(float32Samples)) arr = Float32Array.from(float32Samples)
-            else if (float32Samples && float32Samples.buffer) arr = new Float32Array(float32Samples.buffer)
-            else return false
+            if (rawSamples instanceof Float32Array) {
+              arr = rawSamples
+            } else if (rawSamples instanceof Int16Array) {
+              arr = new Float32Array(rawSamples.length)
+              for (let i = 0; i < rawSamples.length; i++) arr[i] = rawSamples[i] / 32768
+            } else if (Array.isArray(rawSamples)) {
+              arr = new Float32Array(rawSamples.length)
+              for (let i = 0; i < rawSamples.length; i++) arr[i] = rawSamples[i] / 32768
+            } else if (rawSamples && rawSamples.buffer) {
+              // TypedArray view - assume int16 semantics and reinterpret.
+              const view = new Int16Array(rawSamples.buffer, rawSamples.byteOffset || 0, rawSamples.byteLength / 2)
+              arr = new Float32Array(view.length)
+              for (let i = 0; i < view.length; i++) arr[i] = view[i] / 32768
+            } else {
+              console.warn('[Curva] playSamples: unrecognised input shape', typeof rawSamples, rawSamples && rawSamples.constructor && rawSamples.constructor.name)
+              return false
+            }
+            if (!arr.length) return false
+            // Range sanity for debugging - log peak/rms so we can tell from
+            // the DevTools console whether the audio is truly quiet vs. clipped.
+            let peak = 0
+            let rms = 0
+            for (let i = 0; i < arr.length; i++) {
+              const v = arr[i]
+              if (v > peak) peak = v; else if (-v > peak) peak = -v
+              rms += v * v
+            }
+            rms = Math.sqrt(rms / arr.length)
+            console.info('[Curva] playSamples', { samples: arr.length, sampleRate, peak: peak.toFixed(4), rms: rms.toFixed(4) })
+
             const ACtor = window.AudioContext || window.webkitAudioContext
             if (!ACtor) return false
-            const ac = new ACtor()
-            const buf = ac.createBuffer(1, arr.length, Number(sampleRate) || 16000)
+            const ac = new ACtor({ sampleRate: Number(sampleRate) || 24000 })
+            // Some platforms (Safari, iOS, and Chromium on macOS in certain
+            // states) suspend a fresh AudioContext until an explicit resume().
+            // The chip click was a user gesture but 30-45s of synthesis can
+            // elapse before we get here; kick resume() to be safe. Ignored
+            // (returns a resolved Promise) on platforms where the context is
+            // already running.
+            if (typeof ac.resume === 'function') { ac.resume().catch(() => {}) }
+            const buf = ac.createBuffer(1, arr.length, Number(sampleRate) || 24000)
             buf.copyToChannel(arr, 0, 0)
             const src = ac.createBufferSource()
             src.buffer = buf
@@ -538,11 +627,27 @@ export function mountVoiceEnrollmentModal({ container, curva, isHost } = {}) {
               return
             }
             chip.disabled = true
-            sampleStatus.textContent = 'Loading ' + s.label + ' voice model...'
+            sampleStatus.textContent = 'Loading ' + s.label + ' voice model (first use of this locale can take ~30-45s on CPU)...'
+            const t0 = Date.now()
             try {
               const out = await curva.voiceClone.speak(s.text, s.code)
+              const dt = ((Date.now() - t0) / 1000).toFixed(1)
               if (!out || out.ok === false) {
                 sampleStatus.textContent = 'Sample failed for ' + s.label + ': ' + (out?.code || 'unknown')
+              } else {
+                // Success: the worker ack tells us how many samples got synthesized
+                // and at what sample rate. onSpeakDone (subscribed above) may fire
+                // BEFORE this ack lands (both traverse the same IPC pipe in send
+                // order: speak-done, then ack). If it already replaced the status
+                // to "Playing sample (locale)", we don't clobber it. Otherwise
+                // surface the synthesis stats so the user isn't left staring at
+                // "Loading...".
+                if (sampleStatus.textContent.startsWith('Loading ')) {
+                  const secs = out.sampleCount && out.sampleRate
+                    ? (out.sampleCount / out.sampleRate).toFixed(2) + 's'
+                    : ''
+                  sampleStatus.textContent = 'Synthesized ' + secs + ' of ' + s.label + ' audio in ' + dt + 's (waiting for playback)'
+                }
               }
             } catch (err) {
               sampleStatus.textContent = 'Sample failed for ' + s.label + ': ' + (err?.message || 'unknown')
