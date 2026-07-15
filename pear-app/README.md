@@ -27,9 +27,9 @@ A fully P2P watch-party desktop app. Pears (Holepunch) is the whole distribution
 ![brittle](https://img.shields.io/badge/brittle-4.0-EE6A55?style=flat-square)
 
 ![ADRs](https://img.shields.io/badge/ADRs-10-1F6FEB?style=flat-square)
-![QVAC capabilities](https://img.shields.io/badge/QVAC%20capabilities-15%2B-7B3FE4?style=flat-square)
-![Pears primitives](https://img.shields.io/badge/Pears%20primitives-13-000000?style=flat-square)
-![Tests](https://img.shields.io/badge/tests-73%20files-EE6A55?style=flat-square)
+![QVAC capabilities](https://img.shields.io/badge/QVAC%20verbs-26-7B3FE4?style=flat-square)
+![Pears primitives](https://img.shields.io/badge/Pears%20primitives-11%20%2B%202%20hosts-000000?style=flat-square)
+![Tests](https://img.shields.io/badge/tests-86%20files-EE6A55?style=flat-square)
 
 </div>
 
@@ -172,19 +172,23 @@ Full ADRs, IPC contract, and phase log live in [ARCHITECTURE.md](./ARCHITECTURE.
 
 ### Pears building blocks
 
-Nine primitives, all doing real work.
+Eleven core primitives + two runtime hosts, all doing real work at runtime. Verify at `GET /pears/status` on the Companion.
 
 | Building block | File | Purpose |
 |----------------|------|---------|
-| Hyperswarm | `bare/swarmLifecycle.js` | Match-room discovery on sha256 topic, `relayThrough` NAT fallback |
+| Hyperswarm | `bare/swarmLifecycle.js`, `workers/main.js` | Match-room discovery on sha256 topic, `relayThrough` NAT fallback |
+| HyperDHT | via `hyperswarm` | Underlying DHT for hole-punching and topic announce |
 | Corestore | `bare/room.js` | One disk root, many named cores per room |
-| Hypercore | `bare/playhead.js`, `bare/chat.js`, `bare/clips.js` | Named cores for playhead, chat, clips, room state |
+| Hypercore | `bare/playhead.js`, `bare/chat.js`, `bare/clips.js`, `bare/predictions.js` | Named cores for playhead, chat, clips, sealed predictions |
 | Autobase | `bare/playhead.js`, `bare/chat.js`, `bare/writerInvitation.js` | Multi-writer playhead + chat, Pattern B addWriter |
 | Hyperbee | `bare/chat.js`, `bare/room.js`, `bare/tip.js` | Chat view, room state, tip log, writer roster, reactions bucket |
-| Hyperdrive | `bare/clips.js` | Per-peer clip filesystem, `findingPeers` cold-start |
-| Hyperblobs | `bare/clips.js` | 128x72 ffmpeg-baseline clip thumbnails |
-| hypercore-crypto | `bare/topics.js`, `bare/writerInvitation.js` | Topic derivation, ed25519 writer invitations |
-| pear-runtime updater | `electron/main.js` | OTA renderer toast; Companion also runs a permanent seeder daemon |
+| Hyperdrive | `bare/clips.js`, `bare/qvacAssetSeed.js` | Per-peer clip filesystem + F13 QVAC asset seed-back mesh |
+| Hyperblobs | `bare/clips.js`, `bare/voiceClone.js` | Clip thumbnails + voice-clone reference audio blob |
+| hypercore-blob-server | `bare/clips.js`, `bare/qvacAssetSeed.js` | HTTP range serve for local video + asset streaming |
+| blind-peering | `bare/blindPeering.js` | Companion attaches as blind peer for room uptime |
+| keet-identity-key 3.2.0 | `bare/keetIdentity.js` | Portable identity signing every chat message |
+| pear-runtime | `electron/main.js` | Runtime host, `pear://` deep-link + OTA update channel |
+| pear-electron / Electron shell | `electron/main.js` | Chromium window that hosts the Bare worker |
 
 ### WDK dual-path tipping
 
@@ -341,133 +345,128 @@ npm run demo:4peer
 
 Runs `scripts/demo-4peer.js`, which spawns four Electron instances with staggered storage roots, joins them into the same room, and drives a scripted playhead + chat + tip scenario. Used for judged rehearsal and CI smoke.
 
-### Full feature demo (semifinal max-out)
+### Grand Final live-boot (max-out feature set)
 
-Boot each peer with EVERY wave 2 to 6 QVAC feature and observability turned on. This is the exact command used for the semifinal recording; every flag exercises a real code path shipped by waves 2 through 6 (F1-F22 semifinal cycle).
+Boot both peers with every F1-F22 flag ON, the same rig the Grand Final live pitch runs. Every flag exercises a real code path shipped through the semifinal cycle.
 
-**Peer A (host).** Fresh storage under `/tmp/curva-peer-a-fresh`, backend at `localhost:3700`:
+**Prerequisites**: backend running on `http://localhost:3700` (see [Backend Companion](#backend-companion) below) with the following in `backend/.env`:
+
+```env
+ENABLE_SEEDER=true
+MODEL_MIRROR_ENABLED=true
+SEEDER_MAX_ROOMS=50
+ENABLE_VIP_RESERVATIONS=true
+FACILITATOR_ENABLED=true
+RELAY_SPONSOR_ENABLED=true
+CURVA_X402_ENABLED=true
+```
+
+Sponsor treasury must have USDT + ETH — see `bun run treasury:setup` in `backend/`.
+
+#### Quick start (one command)
+
+```sh
+./scripts/demo-boot-peers.sh
+```
+
+The script kills any prior peers, HOME-isolates per-peer storage under `/tmp/curva-peer-{a,b}-fresh` (root cause: cross-peer QVAC file-locks), symlinks the shared `~/.qvac/models/` cache so the ~1.9 GB model set isn't duplicated per peer, sets every F1-F22 flag, boots both peers via `electron-forge`, waits for `ready { ... }` in each worker log, then auto-funds all four peer addresses (2 owner EOAs + 2 smart accounts) with 100 USDT each via `backend/scripts/fund-peers.ts`. Skip auto-fund with `SKIP_AUTOFUND=1 ./scripts/demo-boot-peers.sh` if the sponsor treasury is drained.
+
+#### Manual fallback (three shells)
+
+Use this if the script fails or you want per-shell log tailing. `HOME=/tmp/curva-peer-{a,b}-fresh` is mandatory — without it, cross-peer QVAC corestore lock isolation breaks (`File descriptor could not be locked` on the second peer).
+
+**Shell 1 — Peer A (host).** Prometheus binds `127.0.0.1:4343`:
 
 ```sh
 cd pear-app && \
-  DEV_WALLET_PASSCODE=curva-peer-a-pw \
-  CURVA_DEMO_MODE=true \
-  CURVA_FORCE_RELAY=1 \
-  CURVA_KEET_IDENTITY_ENABLED=true \
-  CURVA_MULTIWRITER=true \
-  CURVA_BLIND_PEERING_ENABLED=true \
-  \
-  CURVA_QVAC_COMMENTATOR_ENABLED=true \
-  CURVA_QVAC_STT_ENABLED=true \
-  CURVA_QVAC_TTS_ENABLED=true \
-  CURVA_QVAC_TTS_LOCALES=en,it,id,es,fr,de,pt \
-  CURVA_QVAC_LLM_TRANSLATE_ENABLED=true \
-  CURVA_QVAC_BOT_ENABLED=true \
-  \
-  CURVA_PREDICTIONS_ENABLED=true \
-  CURVA_ATTENDANCE_ENABLED=true \
-  CURVA_DELEGATED_INFERENCE_ENABLED=true \
-  CURVA_TACTICAL_ENABLED=true \
-  CURVA_DEMO_HUD_ENABLED=true \
-  \
-  CURVA_OBSERVABILITY_ENABLED=true \
-  CURVA_PROMETHEUS_PORT=4343 \
-  \
-  CURVA_ASK_FRAME_ENABLED=true \
-  CURVA_LANGDETECT_ENABLED=true \
-  CURVA_SEMSEARCH_ENABLED=true \
-  CURVA_GOAL_CARD_ENABLED=true \
-  CURVA_DIARIZE_ENABLED=true \
-  \
-  CURVA_APPLY_MIDDLEWARE_ENABLED=true \
-  CURVA_GOAL_PIPELINE_ENABLED=true \
-  CURVA_VLM_PREFILTER_ENABLED=true \
-  \
-  CURVA_VOICE_CLONE_ENABLED=true \
-  CURVA_VOICE_CLONE_GOAL_ENABLED=true \
-  CURVA_COMMENTATOR_VOICE_CLONE_ENABLED=true \
-  CURVA_VOICE_COACH_MEMORY_ENABLED=true \
-  CURVA_VOICE_COACH_CROSS_LINGUAL_ENABLED=true \
-  CURVA_MATCH_RECAP_ENABLED=true \
-  CURVA_ROOM_SEARCH_ENABLED=true \
-  CURVA_AUTO_HIGHLIGHT_ENABLED=true \
-  CURVA_COMMENTATOR_RAG_ENABLED=true \
-  CURVA_COMMENTATOR_MULTI_LOCALE_ENABLED=true \
-  CURVA_QVAC_ASSET_SEED_ENABLED=true \
-  CURVA_GOAL_PROOF_ENABLED=true \
-  \
-  npx electron-forge start -- --no-updates \
-    --storage /tmp/curva-peer-a-fresh \
-    --no-auto-open \
-    --backend http://localhost:3700
+HOME=/tmp/curva-peer-a-fresh \
+DEV_WALLET_PASSCODE=curva-peer-a-pw \
+CURVA_X402_ENABLED=true \
+CURVA_DEMO_MODE=true \
+CURVA_FORCE_RELAY=1 \
+CURVA_KEET_IDENTITY_ENABLED=true \
+CURVA_MULTIWRITER=true \
+CURVA_BLIND_PEERING_ENABLED=true \
+CURVA_APPLY_MIDDLEWARE_ENABLED=true \
+CURVA_OBSERVABILITY_ENABLED=true CURVA_PROMETHEUS_PORT=4343 \
+CURVA_QVAC_COMMENTATOR_ENABLED=true CURVA_QVAC_STT_ENABLED=true CURVA_QVAC_TTS_ENABLED=true \
+CURVA_QVAC_TTS_LOCALES=en,it,id,es,fr,de,pt \
+CURVA_QVAC_LLM_TRANSLATE_ENABLED=true CURVA_QVAC_BOT_ENABLED=true \
+CURVA_PREDICTIONS_ENABLED=true CURVA_ATTENDANCE_ENABLED=true \
+CURVA_DELEGATED_INFERENCE_ENABLED=true \
+CURVA_TACTICAL_ENABLED=true CURVA_DEMO_HUD_ENABLED=true \
+CURVA_VOICE_CLONE_ENABLED=true \
+CURVA_GOAL_CARD_ENABLED=true CURVA_GOAL_PIPELINE_ENABLED=true \
+CURVA_LANGDETECT_ENABLED=true CURVA_SEMSEARCH_ENABLED=true \
+CURVA_ASK_FRAME_ENABLED=true CURVA_DIARIZE_ENABLED=true \
+CURVA_VLM_PREFILTER_ENABLED=true \
+CURVA_VOICE_CLONE_GOAL_ENABLED=true \
+CURVA_VOICE_COACH_MEMORY_ENABLED=true \
+CURVA_MATCH_RECAP_ENABLED=true \
+CURVA_COMMENTATOR_VOICE_CLONE_ENABLED=true \
+CURVA_ROOM_SEARCH_ENABLED=true \
+CURVA_AUTO_HIGHLIGHT_ENABLED=true \
+CURVA_COMMENTATOR_RAG_ENABLED=true \
+CURVA_QVAC_ASSET_SEED_ENABLED=true \
+CURVA_COMMENTATOR_MULTI_LOCALE_ENABLED=true \
+CURVA_GOAL_PROOF_ENABLED=true \
+CURVA_VOICE_COACH_CROSS_LINGUAL_ENABLED=true \
+npx electron-forge start -- --no-updates \
+  --storage /tmp/curva-peer-a-fresh \
+  --no-auto-open \
+  --backend http://localhost:3700
 ```
 
-**Peer B (viewer).** Same flags, different passcode, different storage root, different Prometheus port (both peers bind `127.0.0.1:<port>` so they can't share):
+**Shell 2 — Peer B (viewer).** Same flag set, different HOME, different passcode, different Prometheus port:
 
 ```sh
 cd pear-app && \
-  DEV_WALLET_PASSCODE=curva-peer-b-pw \
-  CURVA_DEMO_MODE=true \
-  CURVA_FORCE_RELAY=1 \
-  CURVA_KEET_IDENTITY_ENABLED=true \
-  CURVA_MULTIWRITER=true \
-  CURVA_BLIND_PEERING_ENABLED=true \
-  \
-  CURVA_QVAC_COMMENTATOR_ENABLED=true \
-  CURVA_QVAC_STT_ENABLED=true \
-  CURVA_QVAC_TTS_ENABLED=true \
-  CURVA_QVAC_TTS_LOCALES=en,it,id,es,fr,de,pt \
-  CURVA_QVAC_LLM_TRANSLATE_ENABLED=true \
-  CURVA_QVAC_BOT_ENABLED=true \
-  \
-  CURVA_PREDICTIONS_ENABLED=true \
-  CURVA_ATTENDANCE_ENABLED=true \
-  CURVA_DELEGATED_INFERENCE_ENABLED=true \
-  CURVA_TACTICAL_ENABLED=true \
-  CURVA_DEMO_HUD_ENABLED=true \
-  \
-  CURVA_OBSERVABILITY_ENABLED=true \
-  CURVA_PROMETHEUS_PORT=4344 \
-  \
-  CURVA_ASK_FRAME_ENABLED=true \
-  CURVA_LANGDETECT_ENABLED=true \
-  CURVA_SEMSEARCH_ENABLED=true \
-  CURVA_GOAL_CARD_ENABLED=true \
-  CURVA_DIARIZE_ENABLED=true \
-  \
-  CURVA_APPLY_MIDDLEWARE_ENABLED=true \
-  CURVA_GOAL_PIPELINE_ENABLED=true \
-  CURVA_VLM_PREFILTER_ENABLED=true \
-  \
-  CURVA_VOICE_CLONE_ENABLED=true \
-  CURVA_VOICE_CLONE_GOAL_ENABLED=true \
-  CURVA_COMMENTATOR_VOICE_CLONE_ENABLED=true \
-  CURVA_VOICE_COACH_MEMORY_ENABLED=true \
-  CURVA_VOICE_COACH_CROSS_LINGUAL_ENABLED=true \
-  CURVA_MATCH_RECAP_ENABLED=true \
-  CURVA_ROOM_SEARCH_ENABLED=true \
-  CURVA_AUTO_HIGHLIGHT_ENABLED=true \
-  CURVA_COMMENTATOR_RAG_ENABLED=true \
-  CURVA_COMMENTATOR_MULTI_LOCALE_ENABLED=true \
-  CURVA_QVAC_ASSET_SEED_ENABLED=true \
-  CURVA_GOAL_PROOF_ENABLED=true \
-  \
-  npx electron-forge start -- --no-updates \
-    --storage /tmp/curva-peer-b-fresh \
-    --no-auto-open \
-    --backend http://localhost:3700
+HOME=/tmp/curva-peer-b-fresh \
+DEV_WALLET_PASSCODE=curva-peer-b-pw \
+CURVA_X402_ENABLED=true \
+CURVA_DEMO_MODE=true \
+CURVA_FORCE_RELAY=1 \
+CURVA_KEET_IDENTITY_ENABLED=true \
+CURVA_MULTIWRITER=true \
+CURVA_BLIND_PEERING_ENABLED=true \
+CURVA_APPLY_MIDDLEWARE_ENABLED=true \
+CURVA_OBSERVABILITY_ENABLED=true CURVA_PROMETHEUS_PORT=4344 \
+CURVA_QVAC_COMMENTATOR_ENABLED=true CURVA_QVAC_STT_ENABLED=true CURVA_QVAC_TTS_ENABLED=true \
+CURVA_QVAC_TTS_LOCALES=en,it,id,es,fr,de,pt \
+CURVA_QVAC_LLM_TRANSLATE_ENABLED=true CURVA_QVAC_BOT_ENABLED=true \
+CURVA_PREDICTIONS_ENABLED=true CURVA_ATTENDANCE_ENABLED=true \
+CURVA_DELEGATED_INFERENCE_ENABLED=true \
+CURVA_TACTICAL_ENABLED=true CURVA_DEMO_HUD_ENABLED=true \
+CURVA_VOICE_CLONE_ENABLED=true \
+CURVA_GOAL_CARD_ENABLED=true CURVA_GOAL_PIPELINE_ENABLED=true \
+CURVA_LANGDETECT_ENABLED=true CURVA_SEMSEARCH_ENABLED=true \
+CURVA_ASK_FRAME_ENABLED=true CURVA_DIARIZE_ENABLED=true \
+CURVA_VLM_PREFILTER_ENABLED=true \
+CURVA_VOICE_CLONE_GOAL_ENABLED=true \
+CURVA_VOICE_COACH_MEMORY_ENABLED=true \
+CURVA_MATCH_RECAP_ENABLED=true \
+CURVA_COMMENTATOR_VOICE_CLONE_ENABLED=true \
+CURVA_ROOM_SEARCH_ENABLED=true \
+CURVA_AUTO_HIGHLIGHT_ENABLED=true \
+CURVA_COMMENTATOR_RAG_ENABLED=true \
+CURVA_QVAC_ASSET_SEED_ENABLED=true \
+CURVA_COMMENTATOR_MULTI_LOCALE_ENABLED=true \
+CURVA_GOAL_PROOF_ENABLED=true \
+CURVA_VOICE_COACH_CROSS_LINGUAL_ENABLED=true \
+npx electron-forge start -- --no-updates \
+  --storage /tmp/curva-peer-b-fresh \
+  --no-auto-open \
+  --backend http://localhost:3700
 ```
 
-**Backend companion** (separate terminal, needs the wave 3 observability + shared RAG routes + wave 6 x402 VIP schema):
+**Shell 3 — Backend Companion.** Uses the flags from the Prerequisites `.env` block above:
 
 ```sh
 cd backend && \
-  bun run db:push && \
-  ENABLE_BACKEND_METRICS=true \
-  ENABLE_SHARED_RAG=true \
-  ENABLE_VIP_RESERVATIONS=true \
-  FACILITATOR_ENABLED=true RELAY_SPONSOR_ENABLED=true \
-  CURVA_X402_ENABLED=true \
-  bun run dev
+bun run db:push && \
+ENABLE_BACKEND_METRICS=true \
+ENABLE_SHARED_RAG=true \
+bun run dev
 ```
 
 `bun run db:push` is required once on a fresh clone — creates the `vip_reservations` table for F4. Idempotent on repeat runs.
@@ -530,19 +529,21 @@ npm test
 
 Uses [brittle](https://github.com/holepunchto/brittle) as the runner (same as every Pear reference app).
 
-**Status: 423 / 423 pass, 1,634 asserts green** (after waves 2 to 4 shipped: voice coach, VLM captioning, OCR, Chatterbox voice clone, JSON-schema goal card, langdetect, ask-the-frame, Parakeet diarization, semantic search, Autobase view.checkout, Hyperbee sub(), hypercore encryption, hypertrace + Prometheus federation, hypercore-stats + hyperswarm-stats + hyperdht-stats, apply middleware chain, goal pipeline, MobileNetV3 pre-filter, live Models panel).
+**Status: 86 test files, 1,032 test() invocations, all green** as of the Grand Final build lock. Coverage spans: multi-writer chat + playhead, Chatterbox voice-clone end-to-end enrollment + synthesis, VLM captioning, OCR, JSON-schema goal card, langdetect, ask-the-frame, Parakeet diarization, semantic search, Autobase view.checkout, Hyperbee sub(), hypercore encryption, hypertrace + Prometheus federation, apply middleware chain, goal pipeline, MobileNetV3 pre-filter, x402 VIP reservation client, Bergamot translator + delegated inference guest, match recap 7-cap flow, multi-locale commentator with RAG deadline race, QVAC asset seed-back mesh.
 
 ---
 
 ## Known limitations
 
-Honest checklist for the Cup submission window:
+Honest checklist for the Grand Final window:
 
-- **Chat sync one-way (B to A) in some sessions.** Fix in progress, target 2026-07-15.
-- **Translation cold boot is slow.** First open of the QVAC pipeline downloads ~500 MB of Bergamot + Whisper + Supertonic + Qwen3 0.6B models. Subsequent runs are instant. Judges on hotel WiFi should expect a few minutes on first `pear run`.
-- **Wallet balance refresh has latency.** After a sponsored tip lands on-chain it can take up to 30 seconds for the peer's balance widget to reflect. The tx hash is available immediately in the tip receipt.
-- **Blind peer runs on the host laptop.** Rooms survive host disconnect only as long as the machine running the blind peer stays online.
-- **Unsigned desktop builds.** macOS Gatekeeper will warn on first open of any `.dmg` we ship.
+- **Bergamot translation cold boot.** First open of a Bergamot pair downloads ~30 MB from Mozilla's `storage.googleapis.com` bucket, plus vocab. Under 30 s per pair on a good link, up to 90 s on hotel WiFi. `bare/translate.js` has a late-recovery path so a slow first-boot completes in the background even if the UI reports "not initialized" — the state un-sticks on late arrival and translation starts working without a manual reboot.
+- **Chatterbox voice-clone cold boot.** First voice-clone chip click on a fresh machine downloads the T3 (~604 MB) + S3Gen (~827 MB) GGUF pair from the QVAC blob registry over Hyperswarm. On a normal home link this takes 15-25 minutes end-to-end (one-time cost, then cached in `~/.qvac/models/` forever). `bare/sdkPlugins.js::primeSdkConfig` bumps the SDK's `registryStreamTimeoutMs` to 300 s x 10 retries so under-seeded blob ranges don't blow the default 60 s x 3 budget.
+- **Chatterbox synthesis is CPU-only on macOS Apple Silicon in this build.** First chip click per locale takes ~45 s (real-time factor 11x on M1 CPU). Subsequent clicks on the same locale are <5 s because the model bind stays in-memory. Metal GPU path is available in the SDK but not enabled by default; sub-real-time synthesis is possible with `useGPU: true` on config, deferred post-Cup.
+- **Reference audio must be strictly > 5 s.** Chatterbox's tts-ggml addon rejects references ≤ 5 s at model activation. The VoiceEnrollmentModal enforces `MIN_RECORD_SECONDS = 6` on the record button so users can't stop early; the bare worker also parses the WAV header and rejects with `REFERENCE_TOO_SHORT` as a defense in depth.
+- **Wallet balance refresh has latency.** After a sponsored tip lands on-chain it can take up to 30 s for the peer's balance widget to reflect. The tx hash is available immediately in the tip receipt.
+- **Blind peer runs on the Companion.** Rooms survive host disconnect only as long as the Companion's blind-peering process stays online. Companion is optional public-good infra; if it goes dark, rooms still work but replication depends on both peers being connected.
+- **Unsigned desktop builds.** macOS Gatekeeper will warn on first open of any `.dmg` we ship — verify the SHA-256 in the DoraHacks submission thread.
 
 ## Two-peer cross-machine test
 
@@ -577,7 +578,7 @@ Deep-dive into IPC contracts, reducer sketches, ADRs, and threat model: [ARCHITE
 <div align="center">
 
 **Tether Developers Cup 2026 · Pears track · Indonesia**
-Final live pitch: **2026-07-15**
+Final live pitch: **2026-07-16, 20:00 WIB (UTC+7)**
 
 MIT © 2026 Curva contributors
 
@@ -678,3 +679,4 @@ Detailed why/how/trade-off per package lives in the [root README](../README.md#t
 | `@tetherto/wdk` | `bare/wallet/worklet.js` | Wallet factory with `onChainIdentifier: 'curva'` marker |
 | `@tetherto/wdk-wallet-evm-erc-4337` | `bare/wallet/eip3009.js`, `bare/wallet/worklet.js` | EIP-3009 sign + ERC-4337 Safe smart account |
 | `@tetherto/wdk-secret-manager` | `bare/wallet/worklet.js` | PBKDF2 + XSalsa20-Poly1305 encrypted seed |
+| x402 paid-resource client | `bare/x402Client.js` | 402 handshake + `X-Payment` retry for VIP room slug reservations; same EIP-3009 wire as tips, second paid-resource route on identical primitive |
