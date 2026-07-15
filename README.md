@@ -603,25 +603,54 @@ Copy `backend/.env.example` to `backend/.env` and fill in `DATABASE_URL`, `SEPOL
 
 ### Pear app
 
+Install client dependencies once:
+
 ```bash
-cd pear-app
+cd pear-app && \
 npm install
-npm run demo:4peer       # four windows on one laptop for judges
 ```
 
-Verify the release is on the Pear DHT:
+The actual demo boot (two peers, host + viewer, with every F1-F22 feature flag lit) is in the [Two independent peers on one laptop](#two-independent-peers-on-one-laptop-host--viewer-demo) section below — one command via `./pear-app/scripts/demo-boot-peers.sh` or three manual shells if you want per-peer log tailing.
+
+Optionally verify the release is on the Pear DHT (does not require `npm install`):
 
 ```bash
 pear info pear://hcg8oftrk7hps1z4x9pprf4jhk7mitohjort6csfpjwjjo3ynomy
 ```
 
-That returns the app name (`curva`), the release length, and the Hypercore + Hyperblobs byte counts. Booting the app directly via `pear run` requires the Electron shell to be ported to `pear-electron`, which is a post-hackathon item; the two-peer demo below uses `electron-forge start` to give each window its own `--storage` and `--room` flags.
+That returns the app name (`curva`), the release length, and the Hypercore + Hyperblobs byte counts. Booting the app directly via `pear run` requires the Electron shell to be ported to `pear-electron`, which is a post-hackathon item; the two-peer demo uses `electron-forge start` to give each window its own `--storage` flag.
 
 ### Two independent peers on one laptop (host + viewer demo)
 
 For the "host creates room, viewer joins from the directory" story you see in the pitch video. Two peers, each with a separate Bare worker, its own wallet, its own identity, discovering each other over Hyperswarm.
 
-**Prerequisites**: backend running on `http://localhost:3700` (see [Backend Companion](#backend-companion) above) with `ENABLE_SEEDER=true`, `MODEL_MIRROR_ENABLED=true`, `SEEDER_MAX_ROOMS=50`, `ENABLE_VIP_RESERVATIONS=true`, `FACILITATOR_ENABLED=true`, `RELAY_SPONSOR_ENABLED=true`, `CURVA_X402_ENABLED=true` in `backend/.env`. Sponsor treasury must have USDT + ETH — see `bun run treasury:setup`.
+**Prerequisites**: the Backend Companion must be running on `http://localhost:3700` with the demo feature flags on. Two commands boot it end-to-end:
+
+**Shell 0a — one-time setup** (install deps + push Prisma schema). Skip if already done on this machine:
+
+```bash
+cd backend && \
+bun install && \
+bun run db:push
+```
+
+**Shell 0b — boot the backend with the demo feature flags.** These flags enable the seeder, model mirror, VIP reservations, x402 paid-resource routes, and the facilitator that pays gas for peer-signed tips. Keep this shell open while you run peers in the shells below:
+
+```bash
+cd backend && \
+ENABLE_SEEDER=true \
+MODEL_MIRROR_ENABLED=true \
+SEEDER_MAX_ROOMS=50 \
+ENABLE_VIP_RESERVATIONS=true \
+FACILITATOR_ENABLED=true \
+RELAY_SPONSOR_ENABLED=true \
+CURVA_X402_ENABLED=true \
+bun run start
+```
+
+Verify it's up with `curl -s http://localhost:3700/health | jq` in another shell — you should see `success: true` and `data.facilitator.enabled: true`.
+
+**Note on the sponsor treasury**: the sponsor EOA that pays gas for peer-signed tips and settles VIP reservations was funded manually with USDT + ETH from a Sepolia faucet during initial setup — that balance persists on-chain forever. **You do NOT need to re-fund it on every boot**; the peer-level 100 USDT top-up per address is handled automatically by `demo-boot-peers.sh` below. If you're setting up a fresh clone and need to check the sponsor address / balance, run `bun run treasury:setup` from the `backend/` folder — it's a read-only diagnostic that prints the sponsor address, current ETH balance, and funding instructions if under-funded. It never modifies `.env` and never transfers anything.
 
 #### Quick start (one command, semifinal-verified)
 
