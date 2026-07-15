@@ -127,11 +127,13 @@ The last command fires a real Sepolia gasless USDT tx and returns the `txHash` p
 | **WDK** | Cameo | EIP-3009 gasless USDT tips + x402 VIP room reservation (two paid-resource routes on the same wire), Foundry-deployed EIP-3009 token, live Sepolia facilitator sponsor |
 | **QVAC** | Cameo | 9 SDK plugins × 25 verbs across Qwen3 LLM, Bergamot NMT, Whisper + Parakeet STT, Supertonic + Chatterbox TTS, SmolVLM2 VLM, OCR CRAFT+Latin, EmbeddingGemma RAG, Silero VAD |
 
-**11 core Holepunch primitives + 2 runtime hosts. Two real WDK settlement paths. 25 QVAC SDK verbs across nine plugins. All wired through the same running app.**
+**11 core Holepunch primitives + 2 runtime hosts. Two real WDK settlement paths. 26 QVAC SDK verbs across nine plugins. All wired through the same running app.**
+
+**Grand Final live pitch: 2026-07-16, 20:00 WIB (UTC+7)**. Build-lock commits landed July 13-15 (see fix-commit summary below).
 
 ## Semifinal-cycle spotlight (pinned to `0c75429`)
 
-Judges walking the code review can start here. Everything below landed after the round-of-32 freeze commit `517cff08`; permalinks pin to current HEAD so the line numbers won't drift.
+Judges walking the code review can start here. Everything below landed after the round-of-32 freeze commit `517cff08`; permalinks pin to the semifinal-freeze commit `0c75429` for stability, and the four Grand Final cycle fix commits (`edf4f45`, `ec746c8`, `ef61a7f`, `79378ec`) sit on top with their own permalinks in the fix-commit summary below.
 
 - **x402 VIP room reservation** — client handshake at [`pear-app/bare/x402Client.js#L37-L370`](https://github.com/louissarvin/Curva/blob/0c75429a6d0431dc740a23eeb101a32d280a9e34/pear-app/bare/x402Client.js#L37-L370), backend route at [`backend/src/routes/vipRoutes.ts`](https://github.com/louissarvin/Curva/blob/0c75429a6d0431dc740a23eeb101a32d280a9e34/backend/src/routes/vipRoutes.ts). On-chain proof: `0x309447f5...` (kings-lounge), `0x18af4e31...` (torino-fc).
 - **RAG-augmented commentator with 800 ms deadline race** — [`pear-app/bare/commentator.js#L45-L400`](https://github.com/louissarvin/Curva/blob/0c75429a6d0431dc740a23eeb101a32d280a9e34/pear-app/bare/commentator.js#L45-L400). Chat-history RAG snippet retrieval bounded by a race so the announcer never silences.
@@ -205,9 +207,9 @@ Blind peer key: nm5j8618j8jhbc5rrjtemkixqjes4ngzc36nc9pf1jop8u4kt1fy
 
 Both the chat Autobase and the playhead Autobase register with this blind peer at boot. When the host laptop closes, rooms keep replicating.
 
-### Semifinal live-boot verified (2026-07-12)
+### Grand Final live-boot verified (2026-07-15)
 
-Every path below was smoke-tested during the July 12 semifinal debug session, cold-booted from `./pear-app/scripts/demo-boot-peers.sh`, and every worker log is clean of `WORKER_PLUGINS_NOT_REGISTERED`, `MODEL_ALREADY_REGISTERED`, `File descriptor could not be locked`, and `Detector model required` errors.
+Every path below was smoke-tested at the Grand Final build-lock, cold-booted from `./pear-app/scripts/demo-boot-peers.sh`, and every worker log is clean of `WORKER_PLUGINS_NOT_REGISTERED`, `MODEL_ALREADY_REGISTERED`, `File descriptor could not be locked`, `Detector model required`, `TTS_ARTIFACTS_REQUIRED`, `MODEL_NOT_FOUND` (Chatterbox T3/S3Gen key rename), `reference audio not found: hyperblob://` (SDK doesn't resolve `hyperblob://` schemes), or `Chatterbox requires strictly more than 5 s` errors.
 
 | Path | Verified behavior | Fix commit |
 |------|-------------------|------------|
@@ -232,13 +234,20 @@ Fix-commit summary:
 - **[`665c765`](https://github.com/louissarvin/Curva/commit/665c765)** — `feat(renderer)`: translation target-first label, langdetect autodetect, VLM/OCR load progress. 3 files touched. Every edit is additive; class names and IPC contracts unchanged.
 - **[`f54dfe8`](https://github.com/louissarvin/Curva/commit/f54dfe8)** — `feat(vip)`: F4 VIP room reservation end-to-end + auto-fund on boot. 8 files touched. Ships the missing renderer UI + IPC wiring for the F4 flow, the voice-clone Play Sample chips, the chat scrubber marker density fix, extends the noble-engines postinstall to 8 additional nested copies (unblocks WDK boot), and adds the auto-fund step to `demo-boot-peers.sh`.
 
+Grand Final cycle fixes (July 13-15):
+
+- **[`edf4f45`](https://github.com/louissarvin/Curva/commit/edf4f45)** — `fix(voice-clone)`: chatterbox T3+S3Gen keys + positional speak signature. Two docs-verified bugs a fresh clone would hit on the first "Play sample" click: SDK renamed `TTS_CHATTERBOX_MULTILINGUAL_Q8_0` to `TTS_T3_MULTILINGUAL_CHATTERBOX_Q8_0` and split the pipeline into a T3 + S3Gen pair, plus preload was destructuring `speak({text,locale})` while the bare worker's `speak(text,locale)` takes positional args.
+- **[`ec746c8`](https://github.com/louissarvin/Curva/commit/ec746c8)** — `fix(qvac)`: prime registry timeouts + translator late-recovery on cold-start. Programmatically calls `setSDKConfig({registryStreamTimeoutMs: 300000, registryDownloadMaxRetries: 10})` via a `file://` bypass (the SDK's own Bare config loader throws `require is not defined` inside its ESM module — verified bug). Also adds late-recovery to `bare/translate.js` so a Bergamot cold-boot that blows the initial 30 s cap un-sticks itself when models finish loading.
+- **[`ef61a7f`](https://github.com/louissarvin/Curva/commit/ef61a7f)** — `fix(preload)`: correct LONG_TIMEOUT_CMDS command-name typos. Three entries silently disagreed with the actual writeMainAwait command strings (`voice:enroll` vs `voice-clone:enroll`, `match:recap` vs `match-recap:generate`, `diagnostics:report` vs `diagnostics:generate-report`), falling back to the 30 s REQUEST_TIMEOUT budget instead of the intended 5-min window.
+- **[`79378ec`](https://github.com/louissarvin/Curva/commit/79378ec)** — `fix(voice-clone)`: end-to-end enrollment + Chatterbox synthesis playback. Five distinct bugs, all in one chain: hyperblob:// URL unresolvable by the SDK's resolveModelPath (fix: filesystem mirror at `<storageDir>/qvac-models/voice-clone-reference-<coreKey>.wav`); reference <5 s rejected only at model activation (fix: `readWavDurationSeconds` upfront + `MIN_RECORD_SECONDS=6` UX guard); `speak-done` shipped `samples.length` (number) instead of the samples array (fix: ship the array); Chatterbox int16 PCM played as raw values through WebAudio (fix: unconditional `/32768` normalisation + `AudioContext.resume()`); record button allowed early stop under the 5 s minimum. Verified live: `TTS job completed. Stats: {audioDurationMs:4120, totalSamples:98880}` → `[Curva] playSamples { peak: 0.9144, rms: 0.0938 }` → audible cloned voice.
+
 ---
 
 ## Tether stack integration in detail
 
 Curva does not treat Pears, WDK, and QVAC as three separate features. Each library is wired to a specific Curva user story and every peer runs the full stack at once. Below is what each tool is, exactly how Curva uses it, and which product moment it powers.
 
-### Pears (primary track, 13 building blocks)
+### Pears (primary track, 11 core primitives + 2 runtime hosts)
 
 The Pears / Holepunch stack is what makes Curva a peer-to-peer watch-party instead of another SaaS. Every user story that survives without a central server runs through Pears.
 
@@ -500,7 +509,7 @@ Two artifacts added late in the semifinal cycle to reduce the reviewer's spelunk
 
 ### Feature-flag boot matrix
 
-See [`pear-app/README.md`](pear-app/README.md) "Full feature demo (semifinal max-out)" section for the exact peer-A / peer-B / backend boot commands with every flag pinned. Reviewers can pick a subset for a shallow pass or the full set for a deep dive.
+See [`pear-app/README.md`](pear-app/README.md) "Grand Final live-boot (max-out feature set)" section for the exact peer-A / peer-B / backend boot commands with every flag pinned + `HOME=/tmp/curva-peer-{a,b}-fresh` isolation. Reviewers can pick a subset for a shallow pass or the full set for a deep dive.
 
 Flag defaults are all OFF so a clean checkout has zero opt-in surface. Every module fails closed when its flag is missing, so a mis-configured env produces `NOT_READY` events rather than crashes.
 
